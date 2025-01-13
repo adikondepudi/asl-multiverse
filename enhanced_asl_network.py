@@ -25,17 +25,29 @@ class TemporalAttention(nn.Module):
     def __init__(self, n_plds: int, hidden_dim: int):
         super().__init__()
         self.attention = nn.Sequential(
-            nn.Linear(hidden_dim, hidden_dim),
+            nn.Linear(hidden_dim, hidden_dim),  # Project features first
             nn.Tanh(),
-            nn.Linear(hidden_dim, n_plds)
+            nn.Linear(hidden_dim, 1)  # Output single attention weight per timestep
         )
         
     def forward(self, x: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor]:
-        # x shape: (batch_size, n_plds, hidden_dim)
-        attention_weights = F.softmax(self.attention(x), dim=1)
-        attended = torch.bmm(attention_weights.unsqueeze(1), x)
+        # x shape: (batch_size, channels_per_pld, n_plds)
+        batch_size, channels, n_plds = x.size()
+        
+        # Transpose for attention calculation: (batch_size, n_plds, channels_per_pld)
+        x_trans = x.transpose(1, 2)
+        
+        # Calculate attention scores: (batch_size, n_plds, 1)
+        attention_scores = self.attention(x_trans)
+        
+        # Apply softmax to get weights
+        attention_weights = F.softmax(attention_scores.squeeze(-1), dim=1)
+        
+        # Apply attention: (batch_size, 1, n_plds) @ (batch_size, n_plds, channels_per_pld)
+        attended = torch.bmm(attention_weights.unsqueeze(1), x_trans)
+        
         return attended.squeeze(1), attention_weights
-
+    
 class UncertaintyHead(nn.Module):
     """Uncertainty estimation head"""
     def __init__(self, input_dim: int, output_dim: int):
@@ -49,8 +61,6 @@ class UncertaintyHead(nn.Module):
         return mean, log_var
 
 class EnhancedASLNet(nn.Module):
-    """Enhanced ASL neural network with dual branches and uncertainty estimation"""
-    
     def __init__(self, 
                  input_size: int,
                  hidden_sizes: List[int] = [256, 128, 64],
@@ -59,8 +69,12 @@ class EnhancedASLNet(nn.Module):
                  norm_type: str = 'batch'):
         super().__init__()
         
+        # Store parameters
         self.n_plds = n_plds
-        self.input_reshape = input_size // 2  # Split for PCASL and VSASL
+        self.input_size = input_size
+        
+        # Calculate dimensions
+        self.channels_per_pld = hidden_sizes[-1]
         
         # Input processing layers
         self.input_layer = nn.Linear(input_size, hidden_sizes[0])
@@ -82,11 +96,16 @@ class EnhancedASLNet(nn.Module):
             for _ in range(3)
         ])
         
+        # Add a dimension adjustment layer
+        self.dim_adjust = nn.Linear(hidden_sizes[-1], self.channels_per_pld * n_plds)
+        
         # Temporal attention
         self.temporal_attention = TemporalAttention(n_plds, hidden_sizes[-1])
         
         # Separate branches for CBF and ATT
-        branch_size = hidden_sizes[-1] * 2
+        combined_size = self.channels_per_pld + hidden_sizes[-1]
+        branch_size = combined_size
+        
         self.cbf_branch = nn.Sequential(
             nn.Linear(branch_size, branch_size // 2),
             nn.ReLU(),
@@ -104,21 +123,9 @@ class EnhancedASLNet(nn.Module):
         # Uncertainty estimation heads
         self.cbf_uncertainty = UncertaintyHead(branch_size // 4, 1)
         self.att_uncertainty = UncertaintyHead(branch_size // 4, 1)
-        
-    def _get_norm_layer(self, size: int, norm_type: str) -> nn.Module:
-        if norm_type == 'batch':
-            return nn.BatchNorm1d(size)
-        elif norm_type == 'layer':
-            return nn.LayerNorm(size)
-        elif norm_type == 'instance':
-            return nn.InstanceNorm1d(size)
-        else:
-            raise ValueError(f"Unknown normalization type: {norm_type}")
-    
+
     def forward(self, x: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
-        # Split input into PCASL and VSASL signals
-        pcasl = x[:, :self.input_reshape]
-        vsasl = x[:, self.input_reshape:]
+        batch_size = x.size(0)
         
         # Initial processing
         x = self.input_layer(x)
@@ -133,15 +140,15 @@ class EnhancedASLNet(nn.Module):
         for block in self.residual_blocks:
             x = block(x)
         
-        # Reshape for temporal attention
-        batch_size = x.size(0)
-        x_reshaped = x.view(batch_size, self.n_plds, -1)
+        # Adjust dimensions and reshape for temporal attention
+        x_adjusted = self.dim_adjust(x)
+        x_reshaped = x_adjusted.view(batch_size, self.channels_per_pld, self.n_plds)
         
         # Apply temporal attention
         x_attended, attention_weights = self.temporal_attention(x_reshaped)
         
         # Concatenate attended features with original
-        x_combined = torch.cat([x_attended, x.view(batch_size, -1)], dim=1)
+        x_combined = torch.cat([x_attended, x], dim=1)
         
         # Separate branches
         cbf_features = self.cbf_branch(x_combined)
@@ -153,6 +160,17 @@ class EnhancedASLNet(nn.Module):
         
         return cbf_mean, att_mean, cbf_log_var, att_log_var
 
+    def _get_norm_layer(self, size: int, norm_type: str) -> nn.Module:
+        """Get normalization layer based on specified type"""
+        if norm_type == 'batch':
+            return nn.BatchNorm1d(size)
+        elif norm_type == 'layer':
+            return nn.LayerNorm(size)
+        elif norm_type == 'instance':
+            return nn.InstanceNorm1d(size)
+        else:
+            raise ValueError(f"Unknown normalization type: {norm_type}")
+            
 class CustomLoss(nn.Module):
     """Custom loss function with uncertainty estimation and temporal consistency"""
     

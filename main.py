@@ -35,7 +35,7 @@ def train_enhanced_asl_model(config: dict = None, output_dir: str = 'results'):
     with open(output_dir / 'config.json', 'w') as f:
         json.dump(config, f, indent=4)
     
-    # Initialize components
+    # Initialize simulator
     simulator = ASLSimulator(ASLParameters(
         T1_artery=config.get('T1_artery', 1850),
         T2_factor=config.get('T2_factor', 1.0),
@@ -44,14 +44,28 @@ def train_enhanced_asl_model(config: dict = None, output_dir: str = 'results'):
         alpha_VSASL=config.get('alpha_VSASL', 0.56),
     ))
     
-    # Get PLDs from config or use default
+    # Get PLDs and calculate input size
     pld_range = config.get('pld_range', [500, 3000, 500])
     plds = np.arange(*pld_range)
     input_size = len(plds) * 2  # PCASL + VSASL signals
     
+    # Create a model factory function
+    def create_model():
+        n_plds = len(np.arange(500, 3001, 500))  # 6 PLDs
+        input_size = n_plds * 2  # 12 features (6 for PCASL, 6 for VSASL)
+        
+        return EnhancedASLNet(
+            input_size=input_size,  # This should be 12
+            hidden_sizes=[256, 128, 64],
+            n_plds=n_plds,  # This should be 6
+            dropout_rate=config['dropout_rate'],
+            norm_type=config['norm_type']
+        )
+    
+    # Initialize trainer with model factory
     trainer = EnhancedASLTrainer(
-        model_class=EnhancedASLNet,
-        input_size=input_size,
+        model_class=create_model,  # Use the factory function
+        input_size=input_size,  # Pass the same input_size
         hidden_sizes=config['hidden_sizes'],
         learning_rate=config['learning_rate'],
         batch_size=config['batch_size'],

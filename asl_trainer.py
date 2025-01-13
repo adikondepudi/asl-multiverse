@@ -6,6 +6,8 @@ import numpy as np
 from typing import Dict, List, Tuple, Optional
 from dataclasses import dataclass
 
+from enhanced_asl_network import EnhancedASLNet, CustomLoss
+
 class ASLNet(nn.Module):
     """Neural network for ASL parameter estimation"""
     
@@ -280,9 +282,9 @@ class EnhancedASLTrainer:
         self.batch_size = batch_size
         self.n_ensembles = n_ensembles
         
-        # Initialize ensemble models
+        # Initialize ensemble models using the factory function
         self.models = [
-            model_class(input_size, hidden_sizes).to(device)
+            model_class().to(device)
             for _ in range(n_ensembles)
         ]
         
@@ -298,31 +300,49 @@ class EnhancedASLTrainer:
         self.train_losses = defaultdict(list)
         self.val_losses = defaultdict(list)
         self.metrics_history = defaultdict(lambda: defaultdict(list))
-        
+
     def prepare_curriculum_data(self,
-                              simulator,
-                              n_samples: int = 20000,
-                              val_split: float = 0.2) -> Tuple[List[DataLoader], DataLoader]:
+                            simulator,
+                            n_samples: int = 20000,
+                            val_split: float = 0.2) -> Tuple[List[DataLoader], DataLoader]:
         """Prepare curriculum learning datasets"""
         
         # Generate more samples for problematic ATT ranges
         att_ranges = [
-            (500, 1500, 0.4),   # 40% samples
-            (1500, 2500, 0.3),  # 30% samples
-            (2500, 4000, 0.3)   # 30% samples
+            (500, 1500, 0.4),   # 40% samples for short ATT
+            (1500, 2500, 0.3),  # 30% samples for medium ATT
+            (2500, 4000, 0.3)   # 30% samples for long ATT
         ]
         
-        datasets = []
+        plds = np.arange(500, 3001, 500)  # Define PLDs explicitly
+        signals_list = []
+        att_values_list = []
+        
         for att_min, att_max, proportion in att_ranges:
             n_range_samples = int(n_samples * proportion)
             att_values = np.random.uniform(att_min, att_max, n_range_samples)
-            data = simulator.generate_synthetic_data(att_values, n_noise=50)
-            datasets.append((data, att_values))
+            signals = simulator.generate_synthetic_data(plds, att_values, n_noise=50)
+            
+            # Reshape signals for model input
+            n_plds = len(plds)
+            n_att = len(att_values)
+            
+            # Reshape PCASL and VSASL signals
+            pcasl = signals['PCASL'].reshape(-1, n_plds)  # (n_noise * n_att, n_plds)
+            vsasl = signals['VSASL'].reshape(-1, n_plds)  # (n_noise * n_att, n_plds)
+            
+            # Combine PCASL and VSASL signals
+            combined_signals = np.hstack([pcasl, vsasl])  # (n_noise * n_att, 2 * n_plds)
+            signals_list.append(combined_signals)
+            
+            # Repeat att_values for each noise realization
+            repeated_att = np.repeat(att_values, 50)
+            att_values_list.append(repeated_att)
         
-        # Combine datasets with proper weighting
-        X = np.concatenate([d[0] for d in datasets])
-        y = np.concatenate([np.column_stack((np.full_like(att, simulator.params.CBF), att))
-                          for d, att in datasets])
+        # Combine all signals and parameters
+        X = np.concatenate(signals_list, axis=0)
+        att_values = np.concatenate(att_values_list)
+        y = np.column_stack((np.full_like(att_values, simulator.params.CBF), att_values))
         
         # Split into train/val
         n_val = int(len(X) * val_split)
