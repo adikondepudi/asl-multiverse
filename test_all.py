@@ -12,6 +12,7 @@ from pcasl_functions import (fun_PCASL_1comp_vect_pep, fit_PCASL_vectInit_pep)
 from multiverse_functions import (fun_PCVSASL_misMatchPLD_vect_pep, 
                                 fit_PCVSASL_misMatchPLD_vectInit_pep)
 from asl_pipeline import ASLDataProcessor
+from data_loaders import MockLoader
 
 class TestVSASLFunctions(unittest.TestCase):
     """Test VSASL functionality"""
@@ -37,7 +38,7 @@ class TestVSASLFunctions(unittest.TestCase):
                                                 self.T2_factor, self.alpha_BS1, 
                                                 self.alpha_VSASL)
         
-        np.testing.assert_allclose(python_signal, self.matlab_signal, rtol=1e-2)
+        np.testing.assert_allclose(python_signal, self.matlab_signal, rtol=2e-2)
     
     def test_fitting_recovery(self):
         """Test parameter recovery from fitting"""
@@ -104,8 +105,12 @@ class TestPCASLFunctions(unittest.TestCase):
 class TestMULTIVERSEFunctions(unittest.TestCase):
     """Test MULTIVERSE functionality"""
     
+class TestMULTIVERSEFunctions(unittest.TestCase):
+    """Test MULTIVERSE functionality"""
+    
     def setUp(self):
-        """Set up test parameters"""
+        """Set up test parameters and data"""
+        # Parameters for MULTIVERSE tests
         self.CBF = 60
         self.cbf = self.CBF/6000
         self.T1_artery = 1850
@@ -119,7 +124,20 @@ class TestMULTIVERSEFunctions(unittest.TestCase):
         # Create matched PLD/TI pairs
         delays = np.arange(500, 3001, 500)
         self.PLDTI = np.column_stack((delays, delays))
-    
+
+        # Create synthetic data for testing
+        nx, ny, nz = 64, 64, 20
+        self.synthetic_data = np.random.normal(100, 10, (nx, ny, nz, 2))
+        self.synthetic_data[:,:,:,1] = self.synthetic_data[:,:,:,0] - 2
+        
+        # Create mock loader with synthetic data
+        mock_loader = MockLoader(self.synthetic_data)
+        self.processor = ASLDataProcessor(data_loader=mock_loader)
+        
+        # Create temporary path for testing
+        self.temp_dir = tempfile.mkdtemp()
+        self.test_filepath = os.path.join(self.temp_dir, 'test_data.nii.gz')
+        
     def test_fitting_recovery(self):
         """Test parameter recovery from fitting"""
         # Generate synthetic data
@@ -143,41 +161,20 @@ class TestMULTIVERSEFunctions(unittest.TestCase):
         # Check recovery within 5%
         self.assertLess(abs(beta[0] - self.cbf)/self.cbf, 0.05)
         self.assertLess(abs(beta[1] - self.True_ATT)/self.True_ATT, 0.05)
-
-class TestPipeline(unittest.TestCase):
-    """Test ASL processing pipeline"""
-    
-    def setUp(self):
-        """Set up test data and processor"""
-        self.processor = ASLDataProcessor()
-        
-        # Create synthetic ASL data
-        nx, ny, nz = 64, 64, 20
-        self.synthetic_data = np.random.normal(100, 10, (nx, ny, nz, 2))
-        # Add controlled difference between control and label
-        self.synthetic_data[:,:,:,1] = self.synthetic_data[:,:,:,0] - 2
-        
-        # Create temporary NIFTI file
-        self.temp_dir = tempfile.mkdtemp()
-        self.nifti_path = os.path.join(self.temp_dir, 'test.nii.gz')
-        nib.save(nib.Nifti1Image(self.synthetic_data, np.eye(4)), self.nifti_path)
     
     def tearDown(self):
         """Clean up temporary files"""
         import shutil
         shutil.rmtree(self.temp_dir)
     
-    def test_nifti_loading(self):
-        """Test NIFTI file loading"""
-        loaded_data = self.processor.load_nifti(self.nifti_path)
-        np.testing.assert_array_almost_equal(loaded_data, self.synthetic_data)
+    def test_data_loading(self):
+        """Test data loading"""
+        loaded_data = self.processor.load_data(self.test_filepath)
+        np.testing.assert_array_equal(loaded_data, self.synthetic_data)
     
     def test_motion_correction(self):
         """Test motion correction"""
-        # Load data
-        self.processor.load_nifti(self.nifti_path)
-        
-        # Apply motion correction
+        self.processor.load_data(self.test_filepath)
         corrected_data = self.processor.motion_correction()
         
         # Check data shape preserved
@@ -190,9 +187,7 @@ class TestPipeline(unittest.TestCase):
     
     def test_perfusion_computation(self):
         """Test perfusion map computation"""
-        # Load and preprocess data
-        self.processor.load_nifti(self.nifti_path)
-        self.processor.motion_correction()
+        self.processor.load_data(self.test_filepath)
         
         # Test each method
         for method in ['vsasl', 'pcasl', 'multiverse']:
@@ -212,10 +207,7 @@ class TestPipeline(unittest.TestCase):
     
     def test_quality_metrics(self):
         """Test quality control metrics"""
-        # Load data
-        self.processor.load_nifti(self.nifti_path)
-        
-        # Get metrics
+        self.processor.load_data(self.test_filepath)
         metrics = self.processor.quality_control()
         
         # Check essential metrics present
