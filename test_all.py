@@ -55,7 +55,7 @@ class TestVSASLFunctions(unittest.TestCase):
         
         # Fit
         Init = [50/6000, 1500]
-        beta, conintval, rmse, df = fit_VSASL_vect_pep(self.PLDs, noisy_signal, Init,
+        beta, conintval, rmse, df = fit_VSASL_vectInit_pep(self.PLDs, noisy_signal, Init,
                                                        self.T1_artery, self.T2_factor,
                                                        self.alpha_BS1, self.alpha_VSASL)
         

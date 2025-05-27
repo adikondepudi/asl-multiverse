@@ -57,7 +57,7 @@ def fun_VSASL_1comp_vect_pep(beta, PLD, T1_artery, T2_factor, alpha_BS1, alpha_V
     
     return diff_sig
 
-def fit_VSASL_vect_pep(PLD, diff_sig, Init, T1_artery, T2_factor, alpha_BS1, alpha_VSASL):
+def fit_VSASL_vectInit_pep(PLD, diff_sig, Init, T1_artery, T2_factor, alpha_BS1, alpha_VSASL):
     """
     Fit VSASL data to estimate CBF and ATT.
     
@@ -172,9 +172,9 @@ def fit_VSASL_vect_nopep(PLD, diff_sig):
     return fit_VSASL_vect_pep(PLD, diff_sig, Init, T1_artery, T2_factor, 
                              alpha_BS1, alpha_VSASL)
 
-def fit_VSASL_vectInit_pep(PLD, diff_sig, Init, T1_artery, T2_factor, alpha_BS1, alpha_VSASL):
-    """
-    Fit VSASL data to estimate CBF and ATT using provided initial values.
-    Same as fit_VSASL_vect_pep but with explicit initialization.
-    """
-    return fit_VSASL_vect_pep(PLD, diff_sig, Init, T1_artery, T2_factor, alpha_BS1, alpha_VSASL)
+# def fit_VSASL_vectInit_pep(PLD, diff_sig, Init, T1_artery, T2_factor, alpha_BS1, alpha_VSASL):
+#     """
+#     Fit VSASL data to estimate CBF and ATT using provided initial values.
+#     Same as fit_VSASL_vect_pep but with explicit initialization.
+#     """
+#     return fit_VSASL_vect_pep(PLD, diff_sig, Init, T1_artery, T2_factor, alpha_BS1, alpha_VSASL)

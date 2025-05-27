@@ -1,3 +1,5 @@
+# Convert to single array so that we can have different numbers of VSASL and PCASL PLDs
+
 import numpy as np
 from scipy.optimize import least_squares
 from scipy.stats import t

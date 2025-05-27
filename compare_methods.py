@@ -49,6 +49,7 @@ def run_monte_carlo_simulation(n_iterations=1000):
                 
             # Add noise
             noise_level = 0.0002
+            #TODO noise level should be different btwn PCASL/VSASL and MULTIVERSE
             noisy_pcasl = clean_pcasl + np.random.normal(0, noise_level, clean_pcasl.shape)
             noisy_vsasl = clean_vsasl + np.random.normal(0, noise_level, clean_vsasl.shape)
             noisy_multi = clean_multi + np.random.normal(0, noise_level, clean_multi.shape)
