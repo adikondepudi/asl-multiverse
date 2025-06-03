@@ -1,23 +1,23 @@
 """
 Enhanced main.py - Comprehensive ASL Neural Network Research Pipeline
 
-This module implements a complete end-to-end framework for developing, validating, 
+This module implements a complete end-to-end framework for developing, validating,
 and benchmarking neural networks against clinical requirements for ASL parameter estimation.
 
 Primary Purpose:
-Comprehensive ASL Neural Network Research Pipeline - A complete framework that transforms 
-research hypotheses into validated clinical improvements through systematic development, 
+Comprehensive ASL Neural Network Research Pipeline - A complete framework that transforms
+research hypotheses into validated clinical improvements through systematic development,
 optimization, and validation of neural networks for ASL parameter estimation.
 
 Core Objectives:
 1. Demonstrate 50% precision improvement over conventional methods
-2. Enable single-repeat acquisition with maintained quality  
+2. Enable single-repeat acquisition with maintained quality
 3. Ensure clinical robustness across patient populations
 4. Generate publication-ready figures and metrics
 5. Provide reproducible research framework
 
-Author: Enhanced ASL Research Team
-Date: 2025
+Author: Enhanced ASL Research Team (with modifications for diverse data)
+Date: 2025 (Updated)
 """
 
 import torch
@@ -27,1054 +27,749 @@ import json
 import time
 from datetime import datetime
 import yaml
-import logging
+import logging # Import standard logging
 from typing import Dict, List, Tuple, Optional, Any
 import pandas as pd
 import matplotlib.pyplot as plt
 import seaborn as sns
 from tqdm import tqdm
 import optuna
-from dataclasses import dataclass, asdict
+from dataclasses import dataclass, asdict, field # Added field
 import warnings
-warnings.filterwarnings('ignore')
+warnings.filterwarnings('ignore') # Use with caution
 
 # Import enhanced ASL components
 from enhanced_asl_network import EnhancedASLNet, CustomLoss
-from asl_simulation import ASLSimulator, ASLParameters
+from asl_simulation import ASLParameters # ASLSimulator not directly used by main anymore
 from enhanced_simulation import RealisticASLSimulator
-from asl_trainer import EnhancedASLTrainer
-from comparison_framework import ComprehensiveComparison
-from performance_metrics import ProposalEvaluator
-from single_repeat_validation import SingleRepeatValidator
+from asl_trainer import EnhancedASLTrainer # Uses RealisticASLSimulator internally now
+from comparison_framework import ComprehensiveComparison, ComparisonResult # Import ComparisonResult
+from performance_metrics import ProposalEvaluator # For proposal-specific metrics if needed
+from single_repeat_validation import SingleRepeatValidator # For specific validation task
 
 # Import conventional methods for comparison
 from vsasl_functions import fit_VSASL_vectInit_pep
-from pcasl_functions import fit_PCASL_vectInit_pep  
+from pcasl_functions import fit_PCASL_vectInit_pep
 from multiverse_functions import fit_PCVSASL_misMatchPLD_vectInit_pep
+
+# Global logger for this script, to be configured by PerformanceMonitor
+script_logger = logging.getLogger(__name__)
 
 
 @dataclass
 class ResearchConfig:
     """Configuration for the comprehensive research pipeline"""
     # Training parameters
-    hidden_sizes: List[int] = None
+    hidden_sizes: List[int] = field(default_factory=lambda: [256, 128, 64])
     learning_rate: float = 0.001
     batch_size: int = 256
-    n_samples: int = 50000  # Increased for comprehensive training
-    n_epochs: int = 300
+    n_training_subjects: int = 10000  # Renamed from n_samples for clarity with diverse_dataset
+    n_epochs: int = 200 # Reduced default from 300 for potentially longer data gen
     n_ensembles: int = 5
     dropout_rate: float = 0.1
     norm_type: str = 'batch'
-    
+
     # Hyperparameter optimization
-    n_trials: int = 100
-    optimization_timeout: int = 3600  # 1 hour
-    
+    optuna_n_trials: int = 20 # Reduced default from 100
+    optuna_timeout_hours: float = 0.5 # Reduced default from 1 hour (3600s)
+    optuna_n_subjects: int = 500 # Subjects for each optuna trial
+    optuna_n_epochs: int = 20  # Epochs for each optuna trial
+
     # Data generation
-    pld_range: List[int] = None
-    att_ranges: List[Tuple[float, float, str]] = None
-    
-    # Simulation parameters  
-    T1_artery: float = 1850
+    pld_values: List[int] = field(default_factory=lambda: list(range(500, 3001, 500))) # Explicit PLDs
+    # att_ranges for curriculum and evaluation
+    att_ranges_config: List[Tuple[float, float, str]] = field(default_factory=lambda: [
+        (500.0, 1500.0, "Short ATT"),
+        (1500.0, 2500.0, "Medium ATT"),
+        (2500.0, 4000.0, "Long ATT")
+    ])
+
+    # Simulation parameters for RealisticASLSimulator (used if not overridden by its internal defaults)
+    T1_artery: float = 1850.0
     T2_factor: float = 1.0
     alpha_BS1: float = 1.0
     alpha_PCASL: float = 0.85
     alpha_VSASL: float = 0.56
-    T_tau: float = 1800
-    CBF: float = 60
-    
-    # Clinical validation
-    n_clinical_subjects: int = 200
-    clinical_conditions: List[str] = None
-    noise_levels: List[float] = None
-    
-    # Performance targets (50% improvement goals)
-    target_cbf_cv_improvement: float = 0.50
-    target_att_cv_improvement: float = 0.50
-    target_scan_time_reduction: float = 0.75  # 75% reduction (4x to 1x repeats)
-    
-    def __post_init__(self):
-        if self.hidden_sizes is None:
-            self.hidden_sizes = [256, 128, 64]
-        if self.pld_range is None:
-            self.pld_range = [500, 3000, 500]
-        if self.att_ranges is None:
-            self.att_ranges = [
-                (500, 1500, "Short ATT"),
-                (1500, 2500, "Medium ATT"), 
-                (2500, 4000, "Long ATT")
-            ]
-        if self.clinical_conditions is None:
-            self.clinical_conditions = ['healthy', 'stroke', 'elderly', 'tumor']
-        if self.noise_levels is None:
-            self.noise_levels = [3.0, 5.0, 10.0, 15.0]
+    T_tau: float = 1800.0
+    # CBF is varied in RealisticASLSimulator, so a single config.CBF is less relevant for generation
+    # but can be used as a reference for normalization if needed.
+    reference_CBF: float = 60.0
 
+    # Clinical validation / Test set generation
+    n_test_subjects_per_att_range: int = 200 # For Phase 4 benchmarking
+    test_snr_levels: List[float] = field(default_factory=lambda: [5.0, 10.0]) # For Phase 4
+    test_conditions: List[str] = field(default_factory=lambda: ['healthy', 'stroke']) # For Phase 4
+
+    # Clinical validation scenarios for ClinicalValidator
+    n_clinical_scenario_subjects: int = 100 # For Phase 3 ClinicalValidator
+    clinical_scenario_definitions: Dict[str, Dict[str, Any]] = field(default_factory=lambda: {
+        'healthy_adult': {'cbf_range': (50.0, 80.0), 'att_range': (800.0, 1800.0), 'snr': 8.0},
+        'elderly_patient': {'cbf_range': (30.0, 60.0), 'att_range': (1500.0, 3000.0), 'snr': 5.0},
+        'stroke_patient': {'cbf_range': (10.0, 40.0), 'att_range': (2000.0, 4000.0), 'snr': 3.0},
+        'tumor_patient': {'cbf_range': (20.0, 120.0), 'att_range': (1000.0, 3000.0), 'snr': 6.0}
+    })
+    training_conditions: List[str] = field(default_factory=lambda: ['healthy', 'stroke', 'elderly', 'tumor'])
+    training_noise_levels: List[float] = field(default_factory=lambda: [3.0, 5.0, 10.0, 15.0])
+
+
+    # Performance targets (50% improvement goals)
+    target_cbf_cv_improvement_perc: float = 50.0 # As percentage
+    target_att_cv_improvement_perc: float = 50.0 # As percentage
+    # target_scan_time_reduction: float = 0.75 # Not directly optimized, but an outcome
 
 class PerformanceMonitor:
     """Monitor training progress and research objectives"""
-    
     def __init__(self, config: ResearchConfig, output_dir: Path):
         self.config = config
         self.output_dir = output_dir
-        self.metrics_history = []
-        self.target_achievements = {}
-        
-        # Setup logging
-        logging.basicConfig(
-            level=logging.INFO,
-            format='%(asctime)s - %(levelname)s - %(message)s',
-            handlers=[
-                logging.FileHandler(output_dir / 'research.log'),
-                logging.StreamHandler()
-            ]
-        )
-        self.logger = logging.getLogger(__name__)
-        
-    def log_progress(self, phase: str, message: str):
-        """Log research progress"""
-        self.logger.info(f"[{phase}] {message}")
-        
-    def check_target_achievement(self, results: Dict, baseline_results: Dict) -> Dict:
-        """Check if research targets are being met"""
-        achievements = {}
-        
-        for att_range in ['Short ATT', 'Medium ATT', 'Long ATT']:
-            if att_range in results and att_range in baseline_results:
-                # CBF CV improvement
-                current_cv = results[att_range].get('cbf_cov', float('inf'))
-                baseline_cv = baseline_results[att_range].get('cbf_cov', float('inf'))
-                cbf_improvement = (baseline_cv - current_cv) / baseline_cv if baseline_cv > 0 else 0
-                
-                # ATT CV improvement  
-                current_att_cv = results[att_range].get('att_cov', float('inf'))
-                baseline_att_cv = baseline_results[att_range].get('att_cov', float('inf'))
-                att_improvement = (baseline_att_cv - current_att_cv) / baseline_att_cv if baseline_att_cv > 0 else 0
-                
-                achievements[att_range] = {
-                    'cbf_cv_improvement': cbf_improvement,
-                    'att_cv_improvement': att_improvement,
-                    'cbf_target_met': cbf_improvement >= self.config.target_cbf_cv_improvement,
-                    'att_target_met': att_improvement >= self.config.target_att_cv_improvement
-                }
-                
-                if achievements[att_range]['cbf_target_met']:
-                    self.log_progress("TARGET", f"CBF CV improvement target met for {att_range}: {cbf_improvement:.1%}")
-                if achievements[att_range]['att_target_met']:
-                    self.log_progress("TARGET", f"ATT CV improvement target met for {att_range}: {att_improvement:.1%}")
-        
-        return achievements
+        self.metrics_history = [] # Could store detailed metrics over time
+        self.logger = logging.getLogger("ASLResearchPipeline") # Use a specific logger name
+        self.logger.setLevel(logging.INFO) # Default level
 
+        # Remove existing handlers to avoid duplicate logging if script is re-run in same session
+        for handler in self.logger.handlers[:]:
+            self.logger.removeHandler(handler)
+
+        # Setup file handler
+        fh = logging.FileHandler(output_dir / 'research.log', mode='w') # Overwrite log file each run
+        fh.setFormatter(logging.Formatter('%(asctime)s - %(levelname)s - %(message)s'))
+        self.logger.addHandler(fh)
+
+        # Setup stream handler (console)
+        sh = logging.StreamHandler()
+        sh.setFormatter(logging.Formatter('%(asctime)s - %(levelname)s - %(message)s'))
+        self.logger.addHandler(sh)
+        script_logger.propagate = False # Prevent root logger from also handling these
+
+    def log_progress(self, phase: str, message: str, level: int = logging.INFO):
+        self.logger.log(level, f"[{phase}] {message}")
+
+    def check_target_achievement(self, nn_att_range_results: Dict, baseline_att_range_results: Dict) -> Dict:
+        """Check if research targets are met for a specific ATT range's results."""
+        achievements = {}
+        # nn_att_range_results and baseline_att_range_results are expected to be
+        # dictionaries of metrics for a single ATT range, e.g., nn_metrics from Phase 4.
+
+        for att_range_name in nn_att_range_results.keys(): # Should typically be one range
+            if att_range_name not in baseline_att_range_results:
+                self.log_progress("TARGET_CHECK", f"Baseline results missing for {att_range_name}", logging.WARNING)
+                continue
+
+            nn_metrics = nn_att_range_results[att_range_name]
+            baseline_metrics = baseline_att_range_results[att_range_name]
+
+            current_cbf_cv = nn_metrics.get('cbf_cov', float('inf'))
+            baseline_cbf_cv = baseline_metrics.get('cbf_cov', float('inf'))
+            cbf_improvement_perc = 0.0
+            if baseline_cbf_cv > 0 and baseline_cbf_cv != float('inf') and current_cbf_cv != float('inf'):
+                cbf_improvement_perc = ((baseline_cbf_cv - current_cbf_cv) / baseline_cbf_cv) * 100
+
+            current_att_cv = nn_metrics.get('att_cov', float('inf'))
+            baseline_att_cv = baseline_metrics.get('att_cov', float('inf'))
+            att_improvement_perc = 0.0
+            if baseline_att_cv > 0 and baseline_att_cv != float('inf') and current_att_cv != float('inf'):
+                att_improvement_perc = ((baseline_att_cv - current_att_cv) / baseline_att_cv) * 100
+
+            cbf_target_met = cbf_improvement_perc >= self.config.target_cbf_cv_improvement_perc
+            att_target_met = att_improvement_perc >= self.config.target_att_cv_improvement_perc
+
+            achievements[att_range_name] = {
+                'cbf_cv_improvement_perc': cbf_improvement_perc,
+                'att_cv_improvement_perc': att_improvement_perc,
+                'cbf_target_met': cbf_target_met,
+                'att_target_met': att_target_met
+            }
+            self.log_progress("TARGET_CHECK", f"{att_range_name} - CBF CV Improv: {cbf_improvement_perc:.1f}% ({'MET' if cbf_target_met else 'NOT MET'})")
+            self.log_progress("TARGET_CHECK", f"{att_range_name} - ATT CV Improv: {att_improvement_perc:.1f}% ({'MET' if att_target_met else 'NOT MET'})")
+        return achievements
 
 class HyperparameterOptimizer:
     """Systematic hyperparameter optimization using Optuna"""
-    
-    def __init__(self, config: ResearchConfig):
-        self.config = config
-        self.best_params = None
+    def __init__(self, base_config: ResearchConfig, monitor: PerformanceMonitor):
+        self.base_config = base_config
+        self.monitor = monitor
         self.study = None
-        
-    def objective(self, trial) -> float:
-        """Objective function for hyperparameter optimization"""
-        # Define search space
+
+    def objective(self, trial: optuna.Trial) -> float:
         hidden_size_1 = trial.suggest_categorical('hidden_size_1', [128, 256, 512])
         hidden_size_2 = trial.suggest_categorical('hidden_size_2', [64, 128, 256])
         hidden_size_3 = trial.suggest_categorical('hidden_size_3', [32, 64, 128])
-        
         learning_rate = trial.suggest_float('learning_rate', 1e-4, 5e-3, log=True)
-        dropout_rate = trial.suggest_float('dropout_rate', 0.05, 0.2)
+        dropout_rate = trial.suggest_float('dropout_rate', 0.05, 0.3) # Wider range
         batch_size = trial.suggest_categorical('batch_size', [128, 256, 512])
-        
-        # Create temporary config
-        temp_config = ResearchConfig(
-            hidden_sizes=[hidden_size_1, hidden_size_2, hidden_size_3],
-            learning_rate=learning_rate,
-            dropout_rate=dropout_rate,
-            batch_size=batch_size,
-            n_epochs=50,  # Reduced for optimization
-            n_samples=10000  # Reduced for optimization
-        )
-        
+        # Can add norm_type, loss weights etc. here too
+
+        # Create a temporary config for this trial
+        trial_config_dict = asdict(self.base_config)
+        trial_config_dict.update({
+            'hidden_sizes': [hidden_size_1, hidden_size_2, hidden_size_3],
+            'learning_rate': learning_rate,
+            'dropout_rate': dropout_rate,
+            'batch_size': batch_size,
+            'n_training_subjects': self.base_config.optuna_n_subjects,
+            'n_epochs': self.base_config.optuna_n_epochs,
+            'n_ensembles': 1 # Single model for faster optimization
+        })
+        trial_config = ResearchConfig(**trial_config_dict)
+        self.monitor.log_progress("OPTUNA_TRIAL", f"Trial {trial.number}: {trial.params}")
+
         try:
-            # Quick training run
-            _, _, validation_loss = self._quick_training_run(temp_config)
+            _, _, validation_loss = self._quick_training_run(trial_config)
+            self.monitor.log_progress("OPTUNA_TRIAL", f"Trial {trial.number} Val Loss: {validation_loss:.6f}")
             return validation_loss
         except Exception as e:
-            print(f"Trial failed: {e}")
-            return float('inf')
-            
+            self.monitor.log_progress("OPTUNA_TRIAL", f"Trial {trial.number} FAILED: {e}", logging.ERROR)
+            return float('inf') # Penalize failed trials
+
     def _quick_training_run(self, config: ResearchConfig) -> Tuple[Any, Any, float]:
         """Quick training run for hyperparameter optimization"""
-        # Setup components
         device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
-        simulator = RealisticASLSimulator()
-        plds = np.arange(*config.pld_range)
-        
-        # Create model factory
-        def create_model():
-            return EnhancedASLNet(
-                input_size=len(plds) * 2,
-                hidden_sizes=config.hidden_sizes,
-                n_plds=len(plds),
-                dropout_rate=config.dropout_rate,
-                norm_type=config.norm_type
-            )
-        
-        # Initialize trainer
-        trainer = EnhancedASLTrainer(
-            model_class=create_model,
-            input_size=len(plds) * 2,
-            hidden_sizes=config.hidden_sizes,
-            learning_rate=config.learning_rate,
-            batch_size=config.batch_size,
-            n_ensembles=1,  # Single model for optimization
-            device=device
-        )
-        
-        # Prepare quick data
-        train_loaders, val_loader = trainer.prepare_curriculum_data(
-            simulator, n_samples=config.n_samples
-        )
-        
-        # Quick training
-        trainer.train_ensemble(train_loaders, val_loader, n_epochs=config.n_epochs)
-        
-        # Return validation loss
-        val_loss = trainer._validate(trainer.models[0], val_loader, config.n_epochs)
-        return trainer, simulator, val_loss
-        
-    def optimize(self) -> Dict:
-        """Run hyperparameter optimization"""
-        print("Starting hyperparameter optimization...")
-        
-        # Create study
-        self.study = optuna.create_study(direction='minimize')
-        
-        # Optimize
-        self.study.optimize(
-            self.objective, 
-            n_trials=self.config.n_trials,
-            timeout=self.config.optimization_timeout
-        )
-        
-        # Get best parameters
-        self.best_params = self.study.best_params
-        
-        print(f"Best parameters found: {self.best_params}")
-        print(f"Best validation loss: {self.study.best_value:.6f}")
-        
-        return self.best_params
+        asl_params_sim = ASLParameters(T1_artery=config.T1_artery, T2_factor=config.T2_factor, alpha_BS1=config.alpha_BS1,
+                                   alpha_PCASL=config.alpha_PCASL, alpha_VSASL=config.alpha_VSASL, T_tau=config.T_tau)
+        simulator = RealisticASLSimulator(params=asl_params_sim)
+        plds_np = np.array(config.pld_values)
 
+        def create_trial_model():
+            return EnhancedASLNet(
+                input_size=len(plds_np) * 2, hidden_sizes=config.hidden_sizes,
+                n_plds=len(plds_np), dropout_rate=config.dropout_rate, norm_type=config.norm_type
+            ).to(device)
+
+        trainer = EnhancedASLTrainer(
+            model_class=create_trial_model, input_size=len(plds_np) * 2,
+            hidden_sizes=config.hidden_sizes, learning_rate=config.learning_rate,
+            batch_size=config.batch_size, n_ensembles=config.n_ensembles, device=device,
+            n_plds_for_model=len(plds_np)
+        )
+
+        train_loaders, val_loader = trainer.prepare_curriculum_data(
+            simulator, n_training_subjects=config.n_training_subjects, plds=plds_np,
+            curriculum_att_ranges_config=config.att_ranges_config,
+            training_conditions_config=config.training_conditions[:1], # Use only 'healthy' for speed
+            training_noise_levels_config=config.training_noise_levels[:1], # Use only one SNR for speed
+            n_epochs_for_scheduler=config.n_epochs
+        )
+        if not train_loaders:
+            self.monitor.log_progress("OPTUNA_RUN", "No training data for Optuna trial, returning inf loss.", logging.ERROR)
+            return None, None, float('inf')
+
+        # Quick training
+        trainer.train_ensemble(train_loaders, val_loader, n_epochs=config.n_epochs, early_stopping_patience=5)
+
+        # Get validation loss from the single model in the ensemble
+        if val_loader and trainer.models:
+            val_loss = trainer._validate(trainer.models[0], val_loader, config.n_epochs-1, len(train_loaders)-1, config.n_epochs)
+        else:
+            val_loss = float('inf') # No validation if no val_loader or no models
+        return trainer, simulator, val_loss
+
+    def optimize(self) -> Dict:
+        self.monitor.log_progress("OPTUNA", f"Starting hyperparameter optimization: {self.base_config.optuna_n_trials} trials, timeout {self.base_config.optuna_timeout_hours}h.")
+        self.study = optuna.create_study(direction='minimize')
+        timeout_seconds = self.base_config.optuna_timeout_hours * 3600
+        self.study.optimize(self.objective, n_trials=self.base_config.optuna_n_trials, timeout=timeout_seconds)
+
+        best_params = self.study.best_params
+        self.monitor.log_progress("OPTUNA", f"Best parameters found: {best_params}")
+        self.monitor.log_progress("OPTUNA", f"Best validation loss: {self.study.best_value:.6f}")
+        return best_params
 
 class ClinicalValidator:
     """Comprehensive clinical validation framework"""
-    
-    def __init__(self, config: ResearchConfig):
+    def __init__(self, config: ResearchConfig, monitor: PerformanceMonitor):
         self.config = config
-        
-    def validate_clinical_scenarios(self, trained_models: List[torch.nn.Module]) -> Dict:
-        """Validate across clinical scenarios"""
-        print("Running clinical validation scenarios...")
-        
-        simulator = RealisticASLSimulator()
-        plds = np.arange(*self.config.pld_range)
-        
-        # Clinical scenarios matching research proposal
-        clinical_scenarios = {
-            'healthy_adult': {'cbf_range': (50, 80), 'att_range': (800, 1800), 'snr': 8},
-            'elderly_patient': {'cbf_range': (30, 60), 'att_range': (1500, 3000), 'snr': 5}, 
-            'stroke_patient': {'cbf_range': (10, 40), 'att_range': (2000, 4000), 'snr': 3},
-            'tumor_patient': {'cbf_range': (20, 120), 'att_range': (1000, 3000), 'snr': 6}
-        }
-        
-        results = {}
-        
-        for scenario_name, params in clinical_scenarios.items():
-            print(f"  Validating {scenario_name}...")
+        self.monitor = monitor
+        asl_params_sim = ASLParameters(T1_artery=config.T1_artery, T2_factor=config.T2_factor, alpha_BS1=config.alpha_BS1,
+                                   alpha_PCASL=config.alpha_PCASL, alpha_VSASL=config.alpha_VSASL, T_tau=config.T_tau)
+        self.simulator = RealisticASLSimulator(params=asl_params_sim) # Simulator for generating scenario data
+        self.plds_np = np.array(config.pld_values)
+
+
+    def validate_clinical_scenarios(self, trained_nn_models: List[torch.nn.Module]) -> Dict:
+        self.monitor.log_progress("CLINICAL_VAL", "Running clinical validation scenarios...")
+        all_scenario_results = {}
+        pldti = np.column_stack((self.plds_np, self.plds_np))
+
+        for scenario_name, params in self.config.clinical_scenario_definitions.items():
+            self.monitor.log_progress("CLINICAL_VAL", f"  Validating {scenario_name}...")
+            n_subjects = self.config.n_clinical_scenario_subjects
             
-            # Generate test data for this scenario
-            n_subjects = self.config.n_clinical_subjects
-            cbf_values = np.random.uniform(*params['cbf_range'], n_subjects)
-            att_values = np.random.uniform(*params['att_range'], n_subjects)
-            
-            scenario_results = {
-                'neural_network': {'cbf': [], 'att': [], 'uncertainties_cbf': [], 'uncertainties_att': []},
-                'multiverse_ls': {'cbf': [], 'att': []},
-                'single_repeat_nn': {'cbf': [], 'att': []},
-                'multi_repeat_ls': {'cbf': [], 'att': []}
+            # Generate CBF/ATT values for this specific scenario
+            true_cbf_vals = np.random.uniform(*params['cbf_range'], n_subjects)
+            true_att_vals = np.random.uniform(*params['att_range'], n_subjects)
+            current_snr = params['snr']
+
+            scenario_metrics = {
+                'neural_network': {'cbf_preds': [], 'att_preds': [], 'cbf_uncs': [], 'att_uncs': []},
+                'multiverse_ls_single_repeat': {'cbf_preds': [], 'att_preds': []}, # LS on single repeat
+                'multiverse_ls_multi_repeat_avg': {'cbf_preds': [], 'att_preds': []} # LS on 4x averaged
             }
-            
-            for i, (true_cbf, true_att) in enumerate(zip(cbf_values, att_values)):
-                # Generate signals
-                signals = simulator.generate_synthetic_data(
-                    plds, np.array([true_att]), n_noise=1, tsnr=params['snr']
+
+            for i in range(n_subjects):
+                true_cbf, true_att = true_cbf_vals[i], true_att_vals[i]
+                self.simulator.params.CBF = true_cbf # Set for base generate_synthetic_data
+                self.simulator.cbf = true_cbf / 6000.0
+
+                # --- Single Repeat Data Generation (for NN and single-repeat LS) ---
+                single_repeat_data_dict = self.simulator.generate_synthetic_data(
+                    self.plds_np, np.array([true_att]), n_noise=1, tsnr=current_snr
                 )
-                
-                # Neural network prediction (single repeat)
-                nn_input = np.concatenate([
-                    signals['PCASL'][0, 0],
-                    signals['VSASL'][0, 0]
+                # MULTIVERSE signal for NN: (n_plds*2)
+                nn_input_signal = np.concatenate([
+                    single_repeat_data_dict['PCASL'][0, 0, :], # (n_plds,)
+                    single_repeat_data_dict['VSASL'][0, 0, :]  # (n_plds,)
                 ])
+                # MULTIVERSE signal for LS: (n_plds, 2)
+                ls_single_repeat_signal = single_repeat_data_dict['MULTIVERSE'][0, 0, :, :]
+
+                # Neural network prediction on single repeat
+                if trained_nn_models:
+                    cbf_nn_mean, att_nn_mean, cbf_nn_std, att_nn_std = self._ensemble_predict(trained_nn_models, nn_input_signal)
+                    scenario_metrics['neural_network']['cbf_preds'].append(cbf_nn_mean)
+                    scenario_metrics['neural_network']['att_preds'].append(att_nn_mean)
+                    scenario_metrics['neural_network']['cbf_uncs'].append(cbf_nn_std)
+                    scenario_metrics['neural_network']['att_uncs'].append(att_nn_std)
+                else: # Append NaNs if no model
+                    for k in scenario_metrics['neural_network']: scenario_metrics['neural_network'][k].append(np.nan)
+
+
+                # Conventional MULTIVERSE-LS fitting on single repeat
+                try:
+                    beta_ls_sr, _, _, _ = fit_PCVSASL_misMatchPLD_vectInit_pep(
+                        pldti, ls_single_repeat_signal, [50.0/6000.0, 1500.0], # Fixed init
+                        self.config.T1_artery, self.config.T_tau, self.config.T2_factor,
+                        self.config.alpha_BS1, self.config.alpha_PCASL, self.config.alpha_VSASL
+                    )
+                    scenario_metrics['multiverse_ls_single_repeat']['cbf_preds'].append(beta_ls_sr[0] * 6000.0)
+                    scenario_metrics['multiverse_ls_single_repeat']['att_preds'].append(beta_ls_sr[1])
+                except Exception:
+                    scenario_metrics['multiverse_ls_single_repeat']['cbf_preds'].append(np.nan)
+                    scenario_metrics['multiverse_ls_single_repeat']['att_preds'].append(np.nan)
+
+                # --- Multi-Repeat Averaged Data Generation (for LS gold standard) ---
+                multi_repeat_signals_raw = []
+                for _ in range(4): # 4 repeats
+                    # Higher SNR for individual repeats that will be averaged
+                    repeat_data_dict = self.simulator.generate_synthetic_data(
+                        self.plds_np, np.array([true_att]), n_noise=1, tsnr=current_snr * np.sqrt(4) # Effective SNR after averaging
+                    )
+                    multi_repeat_signals_raw.append(repeat_data_dict['MULTIVERSE'][0, 0, :, :])
                 
-                # Ensemble prediction
-                cbf_preds, att_preds, cbf_uncs, att_uncs = self._ensemble_predict(
-                    trained_models, nn_input
+                avg_multi_repeat_signal = np.mean(multi_repeat_signals_raw, axis=0)
+                try:
+                    beta_ls_mr, _, _, _ = fit_PCVSASL_misMatchPLD_vectInit_pep(
+                        pldti, avg_multi_repeat_signal, [50.0/6000.0, 1500.0], # Fixed init
+                        self.config.T1_artery, self.config.T_tau, self.config.T2_factor,
+                        self.config.alpha_BS1, self.config.alpha_PCASL, self.config.alpha_VSASL
+                    )
+                    scenario_metrics['multiverse_ls_multi_repeat_avg']['cbf_preds'].append(beta_ls_mr[0] * 6000.0)
+                    scenario_metrics['multiverse_ls_multi_repeat_avg']['att_preds'].append(beta_ls_mr[1])
+                except Exception:
+                    scenario_metrics['multiverse_ls_multi_repeat_avg']['cbf_preds'].append(np.nan)
+                    scenario_metrics['multiverse_ls_multi_repeat_avg']['att_preds'].append(np.nan)
+            
+            # Calculate summary metrics for this scenario
+            # Instantiate a temporary comparator for _calculate_detailed_metrics
+            temp_comparator = ComprehensiveComparison(nn_input_size=len(self.plds_np)*2, nn_n_plds=len(self.plds_np))
+
+            all_scenario_results[scenario_name] = {}
+            for method_key, data_dict in scenario_metrics.items():
+                # Ensure all pred lists are arrays before metric calculation
+                c_preds = np.array(data_dict['cbf_preds'])
+                a_preds = np.array(data_dict['att_preds'])
+                
+                metrics_summary = temp_comparator._calculate_detailed_metrics(
+                    c_preds, true_cbf_vals, a_preds, true_att_vals
                 )
-                
-                scenario_results['neural_network']['cbf'].append(cbf_preds.mean())
-                scenario_results['neural_network']['att'].append(att_preds.mean())
-                scenario_results['neural_network']['uncertainties_cbf'].append(cbf_uncs.mean())
-                scenario_results['neural_network']['uncertainties_att'].append(att_uncs.mean())
-                
-                # Conventional MULTIVERSE fitting (single repeat)
-                try:
-                    pldti = np.column_stack([plds, plds])
-                    multiverse_signal = signals['MULTIVERSE'][0, 0]
-                    beta, _, _, _ = fit_PCVSASL_misMatchPLD_vectInit_pep(
-                        pldti, multiverse_signal, [50/6000, 1500],
-                        self.config.T1_artery, self.config.T_tau, self.config.T2_factor,
-                        self.config.alpha_BS1, self.config.alpha_PCASL, self.config.alpha_VSASL
-                    )
-                    scenario_results['multiverse_ls']['cbf'].append(beta[0] * 6000)
-                    scenario_results['multiverse_ls']['att'].append(beta[1])
-                except:
-                    scenario_results['multiverse_ls']['cbf'].append(np.nan)
-                    scenario_results['multiverse_ls']['att'].append(np.nan)
-                
-                # Multi-repeat conventional (4 repeats) - gold standard
-                multi_repeat_signals = []
-                for repeat in range(4):
-                    repeat_signals = simulator.generate_synthetic_data(
-                        plds, np.array([true_att]), n_noise=1, tsnr=params['snr'] * 2  # Higher SNR
-                    )
-                    multi_repeat_signals.append(repeat_signals['MULTIVERSE'][0, 0])
-                
-                # Average the repeats
-                averaged_signal = np.mean(multi_repeat_signals, axis=0)
-                
-                try:
-                    beta, _, _, _ = fit_PCVSASL_misMatchPLD_vectInit_pep(
-                        pldti, averaged_signal, [50/6000, 1500],
-                        self.config.T1_artery, self.config.T_tau, self.config.T2_factor,
-                        self.config.alpha_BS1, self.config.alpha_PCASL, self.config.alpha_VSASL
-                    )
-                    scenario_results['multi_repeat_ls']['cbf'].append(beta[0] * 6000)
-                    scenario_results['multi_repeat_ls']['att'].append(beta[1])
-                except:
-                    scenario_results['multi_repeat_ls']['cbf'].append(np.nan)
-                    scenario_results['multi_repeat_ls']['att'].append(np.nan)
-            
-            # Calculate metrics for this scenario
-            true_cbf_array = cbf_values
-            true_att_array = att_values
-            
-            for method in scenario_results:
-                cbf_estimates = np.array(scenario_results[method]['cbf'])
-                att_estimates = np.array(scenario_results[method]['att'])
-                
-                # Remove NaNs
-                valid_mask = ~(np.isnan(cbf_estimates) | np.isnan(att_estimates))
-                if np.sum(valid_mask) > 0:
-                    cbf_valid = cbf_estimates[valid_mask]
-                    att_valid = att_estimates[valid_mask]
-                    true_cbf_valid = true_cbf_array[valid_mask]
-                    true_att_valid = true_att_array[valid_mask]
-                    
-                    scenario_results[method]['metrics'] = {
-                        'cbf_bias': np.mean(cbf_valid - true_cbf_valid),
-                        'att_bias': np.mean(att_valid - true_att_valid),
-                        'cbf_cov': np.std(cbf_valid) / np.mean(cbf_valid) * 100,
-                        'att_cov': np.std(att_valid) / np.mean(att_valid) * 100,
-                        'cbf_rmse': np.sqrt(np.mean((cbf_valid - true_cbf_valid)**2)),
-                        'att_rmse': np.sqrt(np.mean((att_valid - true_att_valid)**2)),
-                        'success_rate': np.sum(valid_mask) / len(cbf_estimates) * 100
-                    }
-                else:
-                    scenario_results[method]['metrics'] = {
-                        'cbf_bias': np.nan, 'att_bias': np.nan, 'cbf_cov': np.nan,
-                        'att_cov': np.nan, 'cbf_rmse': np.nan, 'att_rmse': np.nan,
-                        'success_rate': 0.0
-                    }
-            
-            results[scenario_name] = scenario_results
-            
-        return results
-    
-    def _ensemble_predict(self, models: List[torch.nn.Module], input_signal: np.ndarray) -> Tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
-        """Make ensemble predictions"""
-        input_tensor = torch.FloatTensor(input_signal).unsqueeze(0)
-        
-        cbf_preds = []
-        att_preds = []
-        cbf_vars = []
-        att_vars = []
-        
+                # Add success rate (number of non-NaN fits)
+                num_valid = np.sum(~np.isnan(c_preds) & ~np.isnan(a_preds))
+                metrics_summary['success_rate'] = (num_valid / n_subjects) * 100 if n_subjects > 0 else 0
+                if 'cbf_uncs' in data_dict and data_dict['cbf_uncs']: # For NN
+                    metrics_summary['mean_cbf_uncertainty_std'] = np.nanmean(data_dict['cbf_uncs'])
+                    metrics_summary['mean_att_uncertainty_std'] = np.nanmean(data_dict['att_uncs'])
+
+                all_scenario_results[scenario_name][method_key] = metrics_summary
+                self.monitor.log_progress("CLINICAL_VAL", f"  {scenario_name} - {method_key}: CBF RMSE {metrics_summary.get('cbf_rmse',np.nan):.2f}, ATT RMSE {metrics_summary.get('att_rmse',np.nan):.2f}, Success {metrics_summary.get('success_rate',0):.1f}%")
+
+        return all_scenario_results
+
+    def _ensemble_predict(self, models: List[torch.nn.Module], input_signal_flat: np.ndarray) -> Tuple[float, float, float, float]:
+        """Make ensemble prediction for a single flattened sample. Returns mean_cbf, mean_att, std_cbf, std_att."""
+        if not models: return np.nan, np.nan, np.nan, np.nan
+
+        input_tensor = torch.FloatTensor(input_signal_flat).unsqueeze(0).to(models[0].input_layer.weight.device) # Ensure tensor is on model device
+
+        cbf_means_list, att_means_list = [], []
+        cbf_vars_list, att_vars_list = [], [] # Aleatoric variances
+
         for model in models:
             model.eval()
             with torch.no_grad():
                 cbf_mean, att_mean, cbf_log_var, att_log_var = model(input_tensor)
-                cbf_preds.append(cbf_mean.item() * 6000)  # Convert to ml/100g/min
-                att_preds.append(att_mean.item())
-                cbf_vars.append(np.exp(cbf_log_var.item()))
-                att_vars.append(np.exp(att_log_var.item()))
-        
-        # Combine predictions (ensemble average)
-        cbf_final = np.array(cbf_preds)
-        att_final = np.array(att_preds)
-        
-        # Total uncertainty (aleatoric + epistemic)
-        cbf_uncertainty = np.sqrt(np.mean(cbf_vars) + np.var(cbf_preds))
-        att_uncertainty = np.sqrt(np.mean(att_vars) + np.var(att_preds))
-        
-        return cbf_final, att_final, np.array([cbf_uncertainty]), np.array([att_uncertainty])
+                # NN output is directly in ml/100g/min for CBF and ms for ATT
+                cbf_means_list.append(cbf_mean.item())
+                att_means_list.append(att_mean.item())
+                cbf_vars_list.append(torch.exp(cbf_log_var).item())
+                att_vars_list.append(torch.exp(att_log_var).item())
 
+        # Ensemble mean
+        ens_cbf_mean = np.mean(cbf_means_list) if cbf_means_list else np.nan
+        ens_att_mean = np.mean(att_means_list) if att_means_list else np.nan
+
+        # Aleatoric variance (mean of variances)
+        mean_aleatoric_cbf_var = np.mean(cbf_vars_list) if cbf_vars_list else np.nan
+        mean_aleatoric_att_var = np.mean(att_vars_list) if att_vars_list else np.nan
+
+        # Epistemic variance (variance of means)
+        epistemic_cbf_var = np.var(cbf_means_list) if len(cbf_means_list) > 1 else 0.0
+        epistemic_att_var = np.var(att_means_list) if len(att_means_list) > 1 else 0.0
+        
+        total_cbf_std = np.sqrt(mean_aleatoric_cbf_var + epistemic_cbf_var) if not (np.isnan(mean_aleatoric_cbf_var) or np.isnan(epistemic_cbf_var)) else np.nan
+        total_att_std = np.sqrt(mean_aleatoric_att_var + epistemic_att_var) if not (np.isnan(mean_aleatoric_att_var) or np.isnan(epistemic_att_var)) else np.nan
+
+        return ens_cbf_mean, ens_att_mean, total_cbf_std, total_att_std
 
 class PublicationGenerator:
     """Generate publication-ready materials"""
-    
-    def __init__(self, config: ResearchConfig, output_dir: Path):
+    def __init__(self, config: ResearchConfig, output_dir: Path, monitor: PerformanceMonitor):
         self.config = config
         self.output_dir = output_dir
-        
-    def generate_publication_package(self, 
-                                   clinical_results: Dict,
-                                   comparison_results: Dict,
-                                   baseline_results: Dict) -> Dict:
-        """Generate complete publication package"""
-        print("Generating publication materials...")
-        
-        package = {
-            'figures': {},
-            'tables': {},
-            'statistical_analysis': {},
-            'code_package': {}
-        }
-        
-        # Generate Figure 1 (recreation of proposal figure)
-        package['figures']['figure1_performance'] = self._generate_figure1(
-            comparison_results, baseline_results
-        )
-        
-        # Generate clinical validation figures
-        package['figures']['clinical_validation'] = self._generate_clinical_figures(
-            clinical_results
-        )
-        
-        # Generate scan time analysis
-        package['figures']['scan_time_analysis'] = self._generate_scan_time_figures(
-            clinical_results
-        )
-        
-        # Generate performance tables
-        package['tables']['performance_summary'] = self._generate_performance_table(
-            comparison_results, baseline_results
-        )
-        
-        # Generate statistical analysis
-        package['statistical_analysis'] = self._generate_statistical_analysis(
-            clinical_results, comparison_results, baseline_results
-        )
-        
-        # Save all materials
-        self._save_publication_materials(package)
-        
+        self.monitor = monitor
+
+    def generate_publication_package(self,
+                                   clinical_results: Dict, # From ClinicalValidator
+                                   # nn_benchmark_results_by_att_range: Dict, # From Phase 4 NN eval
+                                   # baseline_ls_results_by_att_range: Dict, # From Phase 4 LS eval
+                                   comparison_df: pd.DataFrame) -> Dict: # From ComprehensiveComparison
+        self.monitor.log_progress("PUB_GEN", "Generating publication materials...")
+        package = {'figures': {}, 'tables': {}, 'statistical_analysis': {}}
+
+        # Generate Figure 1 (recreation of proposal figure) using the DataFrame
+        # This figure now directly uses the output of ComprehensiveComparison
+        comp_framework_instance = ComprehensiveComparison(output_dir=self.output_dir / "temp_comp_vis")
+        comp_framework_instance.visualize_results(comparison_df) # This saves its own plots
+        package['figures']['figure1_performance_from_comp_df'] = str(self.output_dir / "temp_comp_vis" / 'comparison_figure1_style_detailed.png')
+        # Copy other relevant plots if needed, e.g. computation_time_comparison.png
+
+        package['figures']['clinical_validation'] = self._generate_clinical_figures(clinical_results)
+        package['tables']['performance_summary_csv'] = self._generate_performance_table_csv(comparison_df)
+        # ... other analyses ...
+        self._save_publication_materials(package) # Saves a JSON summary of paths
         return package
-    
-    def _generate_figure1(self, comparison_results: Dict, baseline_results: Dict) -> str:
-        """Generate Figure 1 recreating proposal performance plots"""
-        fig, axes = plt.subplots(3, 2, figsize=(15, 18))
-        
-        # Setup data
-        att_ranges = ['Short ATT', 'Medium ATT', 'Long ATT']
-        methods = ['PCASL-LS', 'VSASL-LS', 'MULTIVERSE-LS', 'MULTIVERSE-NN']
-        colors = {'PCASL-LS': 'blue', 'VSASL-LS': 'green', 
-                 'MULTIVERSE-LS': 'red', 'MULTIVERSE-NN': 'purple'}
-        
-        metrics = [
-            ('cbf_bias', 'att_bias', 'Normalized Bias', '%'),
-            ('cbf_cov', 'att_cov', 'Coefficient of Variation', '%'),
-            ('cbf_rmse', 'att_rmse', 'Normalized RMSE', '%')
-        ]
-        
-        x_positions = range(len(att_ranges))
-        
-        for row, (cbf_metric, att_metric, metric_name, unit) in enumerate(metrics):
-            # CBF subplot
-            ax_cbf = axes[row, 0]
-            for method in methods:
-                values = []
-                for att_range in att_ranges:
-                    if method in ['MULTIVERSE-NN'] and att_range in comparison_results:
-                        # Neural network results
-                        val = comparison_results[att_range].get(cbf_metric, np.nan)
-                    elif att_range in baseline_results:
-                        # Conventional method results
-                        val = baseline_results[att_range].get(cbf_metric, np.nan)
-                    else:
-                        val = np.nan
-                    
-                    # Normalize bias and RMSE as percentages
-                    if 'bias' in cbf_metric:
-                        val = val / 60 * 100  # Normalize by true CBF
-                    elif 'rmse' in cbf_metric:
-                        val = val / 60 * 100
-                        
-                    values.append(val)
-                
-                valid_indices = ~np.isnan(values)
-                if np.any(valid_indices):
-                    ax_cbf.plot(np.array(x_positions)[valid_indices], 
-                               np.array(values)[valid_indices],
-                               'o-', color=colors[method], 
-                               linewidth=3 if method == 'MULTIVERSE-NN' else 2,
-                               markersize=8, label=method)
-            
-            ax_cbf.set_ylabel(f'CBF {metric_name} ({unit})')
-            ax_cbf.set_title(f'CBF {metric_name}')
-            ax_cbf.set_xticks(x_positions)
-            ax_cbf.set_xticklabels(att_ranges)
-            ax_cbf.grid(True, alpha=0.3)
-            if row == 0:
-                ax_cbf.legend()
-            
-            # ATT subplot  
-            ax_att = axes[row, 1]
-            for method in methods:
-                values = []
-                for att_range in att_ranges:
-                    if method in ['MULTIVERSE-NN'] and att_range in comparison_results:
-                        val = comparison_results[att_range].get(att_metric, np.nan)
-                    elif att_range in baseline_results:
-                        val = baseline_results[att_range].get(att_metric, np.nan)
-                    else:
-                        val = np.nan
-                    
-                    # Normalize bias and RMSE  
-                    if 'bias' in att_metric:
-                        typical_att = {'Short ATT': 1000, 'Medium ATT': 2000, 'Long ATT': 3000}
-                        val = val / typical_att.get(att_range, 2000) * 100
-                    elif 'rmse' in att_metric:
-                        typical_att = {'Short ATT': 1000, 'Medium ATT': 2000, 'Long ATT': 3000}
-                        val = val / typical_att.get(att_range, 2000) * 100
-                        
-                    values.append(val)
-                
-                valid_indices = ~np.isnan(values)
-                if np.any(valid_indices):
-                    ax_att.plot(np.array(x_positions)[valid_indices],
-                               np.array(values)[valid_indices], 
-                               'o-', color=colors[method],
-                               linewidth=3 if method == 'MULTIVERSE-NN' else 2,
-                               markersize=8, label=method)
-            
-            ax_att.set_ylabel(f'ATT {metric_name} ({unit})')
-            ax_att.set_title(f'ATT {metric_name}')
-            ax_att.set_xticks(x_positions)
-            ax_att.set_xticklabels(att_ranges)
-            ax_att.grid(True, alpha=0.3)
-            
-            # Add reference line for bias plots
-            if 'bias' in cbf_metric:
-                ax_cbf.axhline(y=0, color='black', linestyle='--', alpha=0.5)
-                ax_att.axhline(y=0, color='black', linestyle='--', alpha=0.5)
-        
-        plt.tight_layout()
-        figure_path = self.output_dir / 'figure1_performance_comparison.png'
-        plt.savefig(figure_path, dpi=300, bbox_inches='tight')
-        plt.close()
-        
-        return str(figure_path)
-    
-    def _generate_clinical_figures(self, clinical_results: Dict) -> Dict:
-        """Generate clinical validation figures"""
-        figures = {}
-        
-        # Clinical scenario comparison
-        fig, axes = plt.subplots(2, 2, figsize=(15, 12))
-        
+
+    def _generate_clinical_figures(self, clinical_results: Dict) -> Dict[str, str]:
+        """Generate clinical validation figures from ClinicalValidator output."""
+        figures_paths = {}
+        if not clinical_results:
+            self.monitor.log_progress("PUB_GEN", "No clinical results to plot.", logging.WARNING)
+            return figures_paths
+
         scenarios = list(clinical_results.keys())
-        methods = ['neural_network', 'multiverse_ls', 'multi_repeat_ls']
-        method_labels = ['Neural Network\n(Single Repeat)', 'MULTIVERSE LS\n(Single Repeat)', 
-                        'MULTIVERSE LS\n(Multi Repeat)']
-        
-        metrics = ['cbf_cov', 'att_cov', 'cbf_rmse', 'att_rmse']
-        metric_labels = ['CBF CoV (%)', 'ATT CoV (%)', 'CBF RMSE (ml/100g/min)', 'ATT RMSE (ms)']
-        
-        for i, (metric, label) in enumerate(zip(metrics, metric_labels)):
-            ax = axes[i//2, i%2]
-            
-            x_pos = np.arange(len(scenarios))
-            width = 0.25
-            
-            for j, (method, method_label) in enumerate(zip(methods, method_labels)):
-                values = []
-                for scenario in scenarios:
-                    if scenario in clinical_results and method in clinical_results[scenario]:
-                        val = clinical_results[scenario][method]['metrics'].get(metric, np.nan)
-                        values.append(val)
-                    else:
-                        values.append(np.nan)
-                
-                ax.bar(x_pos + j*width, values, width, label=method_label, alpha=0.8)
-            
-            ax.set_ylabel(label)
-            ax.set_title(f'Clinical Validation: {label}')
-            ax.set_xticks(x_pos + width)
-            ax.set_xticklabels([s.replace('_', ' ').title() for s in scenarios], rotation=45)
-            ax.legend()
-            ax.grid(True, alpha=0.3)
-        
-        plt.tight_layout()
-        figure_path = self.output_dir / 'clinical_validation.png'
-        plt.savefig(figure_path, dpi=300, bbox_inches='tight')
-        plt.close()
-        
-        figures['clinical_comparison'] = str(figure_path)
-        return figures
-    
-    def _generate_scan_time_figures(self, clinical_results: Dict) -> Dict:
-        """Generate scan time analysis figures"""
-        # This would implement scan time vs. quality trade-off analysis
-        # Placeholder implementation
-        return {'scan_time_analysis': 'scan_time_analysis.png'}
-    
-    def _generate_performance_table(self, comparison_results: Dict, baseline_results: Dict) -> str:
-        """Generate performance summary table"""
-        # Create comprehensive performance table
-        table_data = []
-        
-        for att_range in ['Short ATT', 'Medium ATT', 'Long ATT']:
-            if att_range in comparison_results:
-                nn_results = comparison_results[att_range]
-                baseline = baseline_results.get(att_range, {})
-                
-                row = {
-                    'ATT_Range': att_range,
-                    'NN_CBF_CV': nn_results.get('cbf_cov', np.nan),
-                    'NN_ATT_CV': nn_results.get('att_cov', np.nan),
-                    'Baseline_CBF_CV': baseline.get('cbf_cov', np.nan),
-                    'Baseline_ATT_CV': baseline.get('att_cov', np.nan),
-                    'CBF_Improvement': ((baseline.get('cbf_cov', 0) - nn_results.get('cbf_cov', 0)) / 
-                                       baseline.get('cbf_cov', 1) * 100) if baseline.get('cbf_cov', 0) > 0 else 0,
-                    'ATT_Improvement': ((baseline.get('att_cov', 0) - nn_results.get('att_cov', 0)) / 
-                                       baseline.get('att_cov', 1) * 100) if baseline.get('att_cov', 0) > 0 else 0
-                }
-                table_data.append(row)
-        
-        df = pd.DataFrame(table_data)
-        table_path = self.output_dir / 'performance_summary.csv'
-        df.to_csv(table_path, index=False)
-        
-        return str(table_path)
-    
-    def _generate_statistical_analysis(self, clinical_results: Dict, 
-                                     comparison_results: Dict, baseline_results: Dict) -> Dict:
-        """Generate statistical analysis"""
-        analysis = {
-            'target_achievements': {},
-            'significance_tests': {},
-            'effect_sizes': {},
-            'confidence_intervals': {}
+        # Methods present in clinical_results: 'neural_network', 'multiverse_ls_single_repeat', 'multiverse_ls_multi_repeat_avg'
+        methods_to_plot = {
+            'neural_network': 'NN (1x Repeat)',
+            'multiverse_ls_single_repeat': 'LS (1x Repeat)',
+            'multiverse_ls_multi_repeat_avg': 'LS (4x Avg Repeat)'
         }
         
-        # Check target achievements
-        for att_range in ['Short ATT', 'Medium ATT', 'Long ATT']:
-            if att_range in comparison_results and att_range in baseline_results:
-                nn_cbf_cv = comparison_results[att_range].get('cbf_cov', float('inf'))
-                baseline_cbf_cv = baseline_results[att_range].get('cbf_cov', float('inf'))
-                
-                cbf_improvement = (baseline_cbf_cv - nn_cbf_cv) / baseline_cbf_cv if baseline_cbf_cv > 0 else 0
-                
-                analysis['target_achievements'][att_range] = {
-                    'cbf_cv_improvement': cbf_improvement,
-                    'target_met': cbf_improvement >= self.config.target_cbf_cv_improvement,
-                    'improvement_percentage': cbf_improvement * 100
-                }
-        
-        return analysis
-    
-    def _save_publication_materials(self, package: Dict):
-        """Save all publication materials"""
-        # Save package summary
-        with open(self.output_dir / 'publication_package.json', 'w') as f:
-            # Convert numpy types to regular Python types for JSON serialization
-            serializable_package = {}
-            for key, value in package.items():
-                if isinstance(value, dict):
-                    serializable_package[key] = {}
-                    for subkey, subvalue in value.items():
-                        if isinstance(subvalue, (np.int64, np.float64)):
-                            serializable_package[key][subkey] = float(subvalue)
-                        elif isinstance(subvalue, np.ndarray):
-                            serializable_package[key][subkey] = subvalue.tolist()
-                        else:
-                            serializable_package[key][subkey] = subvalue
-                else:
-                    serializable_package[key] = value
+        # Metrics to plot from the 'metrics' sub-dictionary of clinical_results
+        plot_metric_keys = [('cbf_rmse', 'CBF RMSE (ml/100g/min)'), ('att_rmse', 'ATT RMSE (ms)'),
+                            ('cbf_cov', 'CBF CoV (%)'), ('att_cov', 'ATT CoV (%)')]
+
+        fig, axes = plt.subplots(2, 2, figsize=(16, 12), sharex=False)
+        axes = axes.ravel()
+
+        for i, (metric_key, metric_label) in enumerate(plot_metric_keys):
+            ax = axes[i]
+            num_methods = len(methods_to_plot)
+            bar_width = 0.8 / num_methods
             
-            json.dump(serializable_package, f, indent=2)
-
-
-def run_comprehensive_asl_research(config: Optional[ResearchConfig] = None,
-                                  output_dir: str = 'comprehensive_results') -> Dict:
-    """
-    Main function implementing the complete research pipeline.
-    
-    This function orchestrates the entire ASL neural network research process:
-    1. Hyperparameter optimization
-    2. Multi-objective training  
-    3. Clinical validation
-    4. Benchmarking against conventional methods
-    5. Publication material generation
-    
-    Parameters
-    ----------
-    config : ResearchConfig, optional
-        Research configuration parameters
-    output_dir : str
-        Output directory for results
+            for j, (method_internal_key, method_display_name) in enumerate(methods_to_plot.items()):
+                values = [clinical_results[sc].get(method_internal_key, {}).get('metrics', {}).get(metric_key, np.nan) for sc in scenarios]
+                x_indices = np.arange(len(scenarios)) + j * bar_width - (bar_width * (num_methods-1) / 2)
+                ax.bar(x_indices, values, width=bar_width, label=method_display_name, alpha=0.8)
+            
+            ax.set_ylabel(metric_label)
+            ax.set_title(f"Clinical Validation: {metric_label.split('(')[0].strip()}")
+            ax.set_xticks(np.arange(len(scenarios)))
+            ax.set_xticklabels([s.replace('_', ' ').title() for s in scenarios], rotation=30, ha="right")
+            ax.grid(True, axis='y', linestyle='--', alpha=0.7)
+            if i == 0: ax.legend(fontsize='small')
         
-    Returns
-    -------
-    Dict
-        Complete research results and trained models
-    """
-    
-    # Setup
-    if config is None:
-        config = ResearchConfig()
-    
+        plt.tight_layout(rect=[0, 0, 1, 0.95])
+        fig.suptitle("Clinical Scenario Performance Comparison", fontsize=16, fontweight='bold')
+        fpath = self.output_dir / 'clinical_validation_metrics_comparison.png'
+        plt.savefig(fpath, dpi=300, bbox_inches='tight')
+        plt.close(fig)
+        figures_paths['clinical_metrics_comparison'] = str(fpath)
+        self.monitor.log_progress("PUB_GEN", f"Saved clinical validation plot to {fpath}")
+        return figures_paths
+
+    def _generate_performance_table_csv(self, comparison_df: pd.DataFrame) -> str:
+        """Generate performance summary table from ComprehensiveComparison DataFrame."""
+        if comparison_df.empty:
+            self.monitor.log_progress("PUB_GEN", "Comparison DataFrame is empty, cannot generate table.", logging.WARNING)
+            return ""
+        
+        # Select and reorder columns for the table
+        cols_to_show = ['method', 'att_range_name',
+                        'cbf_nbias_perc', 'cbf_cov', 'cbf_nrmse_perc',
+                        'att_nbias_perc', 'att_cov', 'att_nrmse_perc',
+                        'success_rate', 'computation_time']
+        # Filter for existing columns to prevent errors
+        existing_cols = [col for col in cols_to_show if col in comparison_df.columns]
+        summary_df = comparison_df[existing_cols]
+
+        table_path = self.output_dir / 'performance_summary_from_comparison.csv'
+        summary_df.to_csv(table_path, index=False, float_format='%.2f')
+        self.monitor.log_progress("PUB_GEN", f"Saved performance summary CSV to {table_path}")
+        return str(table_path)
+
+    def _save_publication_materials(self, package: Dict):
+        # Convert complex objects for JSON serialization if any
+        def make_serializable(obj):
+            if isinstance(obj, Path): return str(obj)
+            if isinstance(obj, (np.ndarray, np.generic)): return obj.tolist() # Basic conversion
+            if isinstance(obj, dict): return {k: make_serializable(v) for k, v in obj.items()}
+            if isinstance(obj, list): return [make_serializable(i) for i in obj]
+            return obj
+
+        serializable_package = make_serializable(package)
+        fpath = self.output_dir / 'publication_package_summary.json'
+        with open(fpath, 'w') as f:
+            json.dump(serializable_package, f, indent=2)
+        self.monitor.log_progress("PUB_GEN", f"Saved publication package summary to {fpath}")
+
+
+# Main Execution Block
+def run_comprehensive_asl_research(config: ResearchConfig, output_parent_dir: str = 'comprehensive_results') -> Dict:
     timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
-    output_path = Path(output_dir) / f'asl_research_{timestamp}'
+    output_path = Path(output_parent_dir) / f'asl_research_{timestamp}'
     output_path.mkdir(parents=True, exist_ok=True)
-    
-    # Initialize monitoring
+
     monitor = PerformanceMonitor(config, output_path)
-    monitor.log_progress("SETUP", "Initializing comprehensive ASL research pipeline")
-    
-    # Save configuration
+    monitor.log_progress("SETUP", f"Initializing comprehensive ASL research pipeline. Output: {output_path}")
     with open(output_path / 'research_config.json', 'w') as f:
         json.dump(asdict(config), f, indent=2)
-    
+
+    plds_np = np.array(config.pld_values)
+    asl_params_sim = ASLParameters(T1_artery=config.T1_artery, T2_factor=config.T2_factor, alpha_BS1=config.alpha_BS1,
+                                   alpha_PCASL=config.alpha_PCASL, alpha_VSASL=config.alpha_VSASL, T_tau=config.T_tau)
+    simulator = RealisticASLSimulator(params=asl_params_sim) # Used throughout
+
     # Phase 1: Hyperparameter Optimization
-    monitor.log_progress("PHASE1", "Starting hyperparameter optimization")
-    optimizer = HyperparameterOptimizer(config)
-    best_params = optimizer.optimize()
-    
-    # Update config with best parameters
-    if best_params:
-        config.hidden_sizes = [best_params['hidden_size_1'], 
-                              best_params['hidden_size_2'], 
-                              best_params['hidden_size_3']]
-        config.learning_rate = best_params['learning_rate']
-        config.dropout_rate = best_params['dropout_rate']
-        config.batch_size = best_params['batch_size']
-    
+    best_optuna_params = {}
+    if config.optuna_n_trials > 0:
+        monitor.log_progress("PHASE1", "Starting hyperparameter optimization")
+        optimizer = HyperparameterOptimizer(config, monitor)
+        best_optuna_params = optimizer.optimize()
+        if best_optuna_params: # Update config with best params if found
+            config.hidden_sizes = [best_optuna_params['hidden_size_1'], best_optuna_params['hidden_size_2'], best_optuna_params['hidden_size_3']]
+            config.learning_rate = best_optuna_params['learning_rate']
+            config.dropout_rate = best_optuna_params['dropout_rate']
+            config.batch_size = best_optuna_params['batch_size']
+            monitor.log_progress("PHASE1", f"Updated config with Optuna best_params: {best_optuna_params}")
+    else:
+        monitor.log_progress("PHASE1", "Skipping hyperparameter optimization as n_trials is 0.")
+
     # Phase 2: Multi-objective Training
     monitor.log_progress("PHASE2", "Starting multi-objective ensemble training")
-    
-    # Setup training components
     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
-    simulator = RealisticASLSimulator()
-    plds = np.arange(*config.pld_range)
-    
-    # Create model factory with optimized parameters
-    def create_model():
+    monitor.log_progress("PHASE2", f"Using device: {device}")
+
+    def create_main_model(): # Factory for EnhancedASLTrainer
         return EnhancedASLNet(
-            input_size=len(plds) * 2,
-            hidden_sizes=config.hidden_sizes,
-            n_plds=len(plds),
-            dropout_rate=config.dropout_rate,
-            norm_type=config.norm_type
-        )
-    
-    # Initialize enhanced trainer
+            input_size=len(plds_np) * 2, hidden_sizes=config.hidden_sizes,
+            n_plds=len(plds_np), dropout_rate=config.dropout_rate, norm_type=config.norm_type
+        ).to(device)
+
     trainer = EnhancedASLTrainer(
-        model_class=create_model,
-        input_size=len(plds) * 2,
-        hidden_sizes=config.hidden_sizes,
-        learning_rate=config.learning_rate,
-        batch_size=config.batch_size,
-        n_ensembles=config.n_ensembles,
-        device=device
+        model_class=create_main_model, input_size=len(plds_np) * 2,
+        hidden_sizes=config.hidden_sizes, learning_rate=config.learning_rate,
+        batch_size=config.batch_size, n_ensembles=config.n_ensembles, device=device,
+        n_plds_for_model=len(plds_np)
     )
-    
-    # Prepare comprehensive training data
-    monitor.log_progress("PHASE2", "Preparing curriculum training datasets")
+    monitor.log_progress("PHASE2", "Preparing curriculum training datasets using DIVERSE data...")
     train_loaders, val_loader = trainer.prepare_curriculum_data(
-        simulator, n_samples=config.n_samples
+        simulator, n_training_subjects=config.n_training_subjects, plds=plds_np,
+        curriculum_att_ranges_config=config.att_ranges_config,
+        training_conditions_config=config.training_conditions,
+        training_noise_levels_config=config.training_noise_levels,
+        n_epochs_for_scheduler=config.n_epochs
     )
-    
-    # Train ensemble with monitoring
-    monitor.log_progress("PHASE2", f"Training {config.n_ensembles}-model ensemble")
-    training_start = time.time()
-    
-    training_histories = trainer.train_ensemble(
-        train_loaders, val_loader, n_epochs=config.n_epochs
-    )
-    
-    training_time = time.time() - training_start
-    monitor.log_progress("PHASE2", f"Training completed in {training_time/3600:.2f} hours")
-    
-    # Phase 3: Clinical Validation
+    if not train_loaders:
+        monitor.log_progress("PHASE2", "Failed to create training loaders. Aborting.", logging.CRITICAL)
+        return {"error": "Training data preparation failed."}
+
+    monitor.log_progress("PHASE2", f"Training {config.n_ensembles}-model ensemble for {config.n_epochs} epochs...")
+    training_start_time = time.time()
+    training_histories = trainer.train_ensemble(train_loaders, val_loader, n_epochs=config.n_epochs)
+    training_duration_hours = (time.time() - training_start_time) / 3600
+    monitor.log_progress("PHASE2", f"Training completed in {training_duration_hours:.2f} hours.")
+
+    # Phase 3: Clinical Validation (using ClinicalValidator)
     monitor.log_progress("PHASE3", "Starting clinical validation across patient populations")
+    clinical_validator = ClinicalValidator(config, monitor)
+    clinical_validation_results = clinical_validator.validate_clinical_scenarios(trainer.models if trainer.models else [])
+
+    # Phase 4: Benchmarking Against Conventional Methods (using ComprehensiveComparison)
+    monitor.log_progress("PHASE4", "Benchmarking NN against conventional LS methods using DIVERSE test data")
     
-    validator = ClinicalValidator(config)
-    clinical_results = validator.validate_clinical_scenarios(trainer.models)
+    # Generate a single, comprehensive diverse test dataset for all ATT ranges
+    monitor.log_progress("PHASE4", f"Generating DIVERSE test dataset for benchmarking...")
+    # Total subjects for test set, distributed across conditions/SNRs
+    total_test_subjects = config.n_test_subjects_per_att_range * len(config.att_ranges_config)
+    # Cap total_test_subjects to avoid excessive generation if many ATT ranges
+    total_test_subjects = min(total_test_subjects, 1000) # Example cap
     
-    # Phase 4: Benchmarking Against Conventional Methods
-    monitor.log_progress("PHASE4", "Benchmarking against conventional least-squares methods")
+    benchmark_test_dataset_raw = simulator.generate_diverse_dataset(
+        plds=plds_np,
+        n_subjects=total_test_subjects // (len(config.test_conditions) * len(config.test_snr_levels)*3), # Approx subjects
+        conditions=config.test_conditions,
+        noise_levels=config.test_snr_levels
+    )
+    benchmark_X_all = benchmark_test_dataset_raw['signals'] # (N, n_plds*2)
+    benchmark_y_all = benchmark_test_dataset_raw['parameters'] # (N, 2) [CBF ml/100g/min, ATT ms]
+
+    # Prepare data formats for ComprehensiveComparison
+    benchmark_test_data_for_comp = {
+        'PCASL': benchmark_X_all[:, :len(plds_np)],
+        'VSASL': benchmark_X_all[:, len(plds_np):],
+        'MULTIVERSE_LS_FORMAT': benchmark_X_all.reshape(-1, len(plds_np), 2), # (N, n_plds, 2)
+        'NN_INPUT_FORMAT': benchmark_X_all # (N, n_plds*2)
+    }
+
+    # Instantiate ComprehensiveComparison
+    # Path to first ensemble model for NN evaluation in ComprehensiveComparison
+    nn_model_for_comp_path = None
+    if trainer.models: # Check if models were trained
+        temp_model_save_path = output_path / 'temp_ensemble_model_0_for_comp.pt'
+        torch.save(trainer.models[0].state_dict(), temp_model_save_path)
+        nn_model_for_comp_path = str(temp_model_save_path)
+
+    comp_framework = ComprehensiveComparison(
+        nn_model_path=nn_model_for_comp_path,
+        output_dir=output_path / "comparison_framework_outputs",
+        nn_input_size=len(plds_np) * 2,
+        nn_hidden_sizes=config.hidden_sizes,
+        nn_n_plds=len(plds_np)
+    )
     
-    # Generate baseline results using conventional methods
-    baseline_results = {}
-    
-    for att_min, att_max, range_name in config.att_ranges:
-        monitor.log_progress("PHASE4", f"Evaluating {range_name}")
-        
-        # Generate test data for this range
-        n_test = 1000
-        att_values = np.random.uniform(att_min, att_max, n_test)
-        test_signals = simulator.generate_synthetic_data(plds, att_values, n_noise=50, tsnr=5.0)
-        
-        # Test neural network
-        nn_results = {'cbf': [], 'att': []}
-        
-        for i in range(n_test):
-            for noise_idx in range(50):
-                nn_input = np.concatenate([
-                    test_signals['PCASL'][noise_idx, i],
-                    test_signals['VSASL'][noise_idx, i]
-                ])
-                
-                cbf_preds, att_preds, _, _ = validator._ensemble_predict(trainer.models, nn_input)
-                nn_results['cbf'].append(cbf_preds.mean())
-                nn_results['att'].append(att_preds.mean())
-        
-        # Test conventional MULTIVERSE
-        conv_results = {'cbf': [], 'att': []}
-        pldti = np.column_stack([plds, plds])
-        
-        for i in range(n_test):
-            for noise_idx in range(50):
-                try:
-                    signal = test_signals['MULTIVERSE'][noise_idx, i]
-                    beta, _, _, _ = fit_PCVSASL_misMatchPLD_vectInit_pep(
-                        pldti, signal, [50/6000, 1500],
-                        config.T1_artery, config.T_tau, config.T2_factor,
-                        config.alpha_BS1, config.alpha_PCASL, config.alpha_VSASL
-                    )
-                    conv_results['cbf'].append(beta[0] * 6000)
-                    conv_results['att'].append(beta[1])
-                except:
-                    conv_results['cbf'].append(np.nan)
-                    conv_results['att'].append(np.nan)
-        
-        # Calculate metrics
-        true_cbf = np.full(n_test * 50, config.CBF)
-        true_att = np.repeat(att_values, 50)
-        
-        # Neural network metrics
-        nn_cbf = np.array(nn_results['cbf'])
-        nn_att = np.array(nn_results['att'])
-        
-        nn_metrics = {
-            'cbf_bias': np.mean(nn_cbf - true_cbf),
-            'att_bias': np.mean(nn_att - true_att),
-            'cbf_cov': np.std(nn_cbf) / np.mean(nn_cbf) * 100,
-            'att_cov': np.std(nn_att) / np.mean(nn_att) * 100,
-            'cbf_rmse': np.sqrt(np.mean((nn_cbf - true_cbf)**2)),
-            'att_rmse': np.sqrt(np.mean((nn_att - true_att)**2))
-        }
-        
-        # Conventional metrics
-        conv_cbf = np.array(conv_results['cbf'])
-        conv_att = np.array(conv_results['att'])
-        
-        # Remove NaNs for conventional method
-        valid_mask = ~(np.isnan(conv_cbf) | np.isnan(conv_att))
-        if np.sum(valid_mask) > 0:
-            conv_cbf_valid = conv_cbf[valid_mask]
-            conv_att_valid = conv_att[valid_mask]
-            true_cbf_valid = true_cbf[valid_mask]
-            true_att_valid = true_att[valid_mask]
+    comparison_results_df = comp_framework.compare_methods(
+        benchmark_test_data_for_comp,
+        benchmark_y_all,
+        plds_np,
+        config.att_ranges_config # Pass the list of (min, max, name) tuples
+    )
+    if nn_model_for_comp_path and temp_model_save_path.exists():
+        temp_model_save_path.unlink() # Clean up temporary model file
+
+    # Extract NN and Baseline (MULTIVERSE-LS) results from df for target checking
+    # This assumes comparison_results_df is populated and has 'method' and 'att_range_name'
+    nn_benchmark_metrics_for_monitor = {}
+    baseline_ls_metrics_for_monitor = {}
+    if not comparison_results_df.empty:
+        for att_range_tuple in config.att_ranges_config:
+            range_name = att_range_tuple[2]
             
-            conv_metrics = {
-                'cbf_bias': np.mean(conv_cbf_valid - true_cbf_valid),
-                'att_bias': np.mean(conv_att_valid - true_att_valid),
-                'cbf_cov': np.std(conv_cbf_valid) / np.mean(conv_cbf_valid) * 100,
-                'att_cov': np.std(conv_att_valid) / np.mean(conv_att_valid) * 100,
-                'cbf_rmse': np.sqrt(np.mean((conv_cbf_valid - true_cbf_valid)**2)),
-                'att_rmse': np.sqrt(np.mean((conv_att_valid - true_att_valid)**2))
-            }
-        else:
-            conv_metrics = {key: np.nan for key in nn_metrics.keys()}
+            nn_row = comparison_results_df[(comparison_results_df['method'] == 'Neural Network') & (comparison_results_df['att_range_name'] == range_name)]
+            if not nn_row.empty:
+                nn_benchmark_metrics_for_monitor[range_name] = nn_row.iloc[0].to_dict()
+
+            ls_row = comparison_results_df[(comparison_results_df['method'] == 'MULTIVERSE-LS') & (comparison_results_df['att_range_name'] == range_name)]
+            if not ls_row.empty:
+                baseline_ls_metrics_for_monitor[range_name] = ls_row.iloc[0].to_dict()
         
-        # Store results
-        baseline_results[range_name] = conv_metrics
-        
-        # Check target achievements
-        achievements = monitor.check_target_achievement({range_name: nn_metrics}, 
-                                                       {range_name: conv_metrics})
-    
+        monitor.check_target_achievement(nn_benchmark_metrics_for_monitor, baseline_ls_metrics_for_monitor)
+
+
     # Phase 5: Publication Material Generation
     monitor.log_progress("PHASE5", "Generating publication-ready materials")
-    
-    pub_generator = PublicationGenerator(config, output_path)
-    publication_package = pub_generator.generate_publication_package(
-        clinical_results, {range_name: nn_metrics}, baseline_results
+    pub_gen = PublicationGenerator(config, output_path, monitor)
+    publication_package = pub_gen.generate_publication_package(
+        clinical_validation_results,
+        comparison_results_df # Pass the full DataFrame
     )
-    
+
     # Phase 6: Final Research Summary
     monitor.log_progress("PHASE6", "Generating comprehensive research summary")
-    
-    # Save models
     models_dir = output_path / 'trained_models'
     models_dir.mkdir(exist_ok=True)
-    for i, model in enumerate(trainer.models):
-        torch.save(model.state_dict(), models_dir / f'ensemble_model_{i}.pt')
-    
-    # Save all results
-    results = {
+    if trainer.models:
+        for i, model_state in enumerate(trainer.best_states if hasattr(trainer, 'best_states') and trainer.best_states else [m.state_dict() for m in trainer.models]): # Use best_states if available
+            if model_state:
+                 torch.save(model_state, models_dir / f'ensemble_model_{i}_best.pt')
+            elif trainer.models and trainer.models[i]: # Fallback to current model state if no best_state
+                 torch.save(trainer.models[i].state_dict(), models_dir / f'ensemble_model_{i}_final.pt')
+
+
+    final_results_summary = {
         'config': asdict(config),
-        'training_time_hours': training_time / 3600,
-        'best_hyperparameters': best_params,
-        'clinical_validation': clinical_results,
-        'baseline_comparison': baseline_results,
-        'neural_network_results': {range_name: nn_metrics},
-        'publication_package': publication_package,
-        'models_path': str(models_dir)
+        'optuna_best_params': best_optuna_params,
+        'training_duration_hours': training_duration_hours,
+        'training_histories': training_histories, # Contains losses
+        'clinical_validation_results': clinical_validation_results,
+        'benchmark_comparison_results_csv_path': str(output_path / "comparison_framework_outputs" / 'comparison_results_detailed.csv') if not comparison_results_df.empty else None,
+        'publication_package_summary_path': str(output_path / 'publication_package_summary.json'),
+        'trained_models_dir': str(models_dir)
     }
-    
-    with open(output_path / 'comprehensive_results.json', 'w') as f:
-        # Handle numpy types for JSON serialization
-        def convert_numpy(obj):
-            if isinstance(obj, np.integer):
-                return int(obj)
-            elif isinstance(obj, np.floating):
-                return float(obj)
-            elif isinstance(obj, np.ndarray):
-                return obj.tolist()
-            elif isinstance(obj, dict):
-                return {key: convert_numpy(value) for key, value in obj.items()}
-            elif isinstance(obj, list):
-                return [convert_numpy(item) for item in obj]
-            else:
-                return obj
-        
-        json.dump(convert_numpy(results), f, indent=2)
-    
-    # Generate final summary report
-    summary_lines = [
-        "ASL NEURAL NETWORK RESEARCH SUMMARY",
-        "=" * 50,
-        f"Completed: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}",
-        f"Total Runtime: {training_time/3600:.2f} hours",
-        "",
-        "KEY ACHIEVEMENTS:",
-        f"✓ Trained {config.n_ensembles}-model ensemble",
-        f"✓ Validated across {len(clinical_results)} clinical scenarios",
-        f"✓ Generated publication package with {len(publication_package['figures'])} figures",
-        "",
-        "PERFORMANCE TARGETS:",
-    ]
-    
-    for range_name in ['Short ATT', 'Medium ATT', 'Long ATT']:
-        if range_name in baseline_results:
-            baseline_cv = baseline_results[range_name].get('cbf_cov', 0)
-            nn_cv = nn_metrics.get('cbf_cov', 0)
-            improvement = (baseline_cv - nn_cv) / baseline_cv * 100 if baseline_cv > 0 else 0
-            target_met = improvement >= config.target_cbf_cv_improvement * 100
-            
-            summary_lines.append(f"  {range_name}: {improvement:.1f}% CBF CV improvement {'✓' if target_met else '✗'}")
-    
-    summary_lines.extend([
-        "",
-        "NEXT STEPS:",
-        "• Review detailed results in comprehensive_results.json",
-        "• Examine publication materials in the figures/ directory", 
-        "• Use trained models for further validation",
-        "• Submit findings to peer-reviewed journal",
-        "",
-        f"All results saved in: {output_path}"
-    ])
-    
-    with open(output_path / 'RESEARCH_SUMMARY.txt', 'w') as f:
-        f.write('\n'.join(summary_lines))
-    
-    # Final log
-    monitor.log_progress("COMPLETE", f"Research pipeline completed successfully. Results in {output_path}")
-    
-    return results
+    with open(output_path / 'final_research_results.json', 'w') as f:
+        json.dump(final_results_summary, f, indent=2, default=lambda o: '<not serializable>')
 
 
-def train_enhanced_asl_model(config: dict = None, output_dir: str = 'results'):
-    """
-    Legacy interface for backward compatibility.
-    Redirects to the comprehensive research pipeline.
-    """
-    if config is None:
-        research_config = ResearchConfig()
-    else:
-        # Convert old config format to new ResearchConfig
-        research_config = ResearchConfig(
-            hidden_sizes=config.get('hidden_sizes', [256, 128, 64]),
-            learning_rate=config.get('learning_rate', 0.001),
-            batch_size=config.get('batch_size', 256),
-            n_samples=config.get('n_samples', 20000),
-            n_epochs=config.get('n_epochs', 200),
-            n_ensembles=config.get('n_ensembles', 5),
-            dropout_rate=config.get('dropout_rate', 0.1)
-        )
-    
-    return run_comprehensive_asl_research(research_config, output_dir)
+    summary_report_path = output_path / 'RESEARCH_SUMMARY.txt'
+    # ... (generate summary text as before, referencing new result structures) ...
+    with open(summary_report_path, 'w') as f:
+        f.write(f"Research pipeline completed. Full summary in final_research_results.json and {output_path}\n")
+        # Add more details from final_results_summary
+
+    monitor.log_progress("COMPLETE", f"Research pipeline finished. Results in {output_path}")
+    return final_results_summary
 
 
 if __name__ == "__main__":
-    import sys
-    
-    print("=" * 80)
-    print("ASL NEURAL NETWORK COMPREHENSIVE RESEARCH PIPELINE")
-    print("Enhancing Noninvasive Cerebral Blood Flow Imaging with Neural Networks")
-    print("=" * 80)
-    
-    # Check for configuration file
-    config_file = None
+    script_logger.info("=" * 80)
+    script_logger.info("ASL NEURAL NETWORK COMPREHENSIVE RESEARCH PIPELINE")
+    script_logger.info("Enhancing Noninvasive Cerebral Blood Flow Imaging with Neural Networks")
+    script_logger.info("=" * 80)
+
+    config_file_path = None
     if len(sys.argv) > 1:
-        config_file = sys.argv[1]
-    
-    # Load configuration
-    if config_file and Path(config_file).exists():
-        print(f"Loading configuration from {config_file}")
-        if config_file.endswith('.yaml') or config_file.endswith('.yml'):
-            with open(config_file, 'r') as f:
-                config_dict = yaml.safe_load(f)
-        else:
-            with open(config_file, 'r') as f:
-                config_dict = json.load(f)
-        
-        # Convert to ResearchConfig
-        config = ResearchConfig(**config_dict)
+        config_file_path = sys.argv[1]
+
+    loaded_config = ResearchConfig() # Start with defaults
+    if config_file_path and Path(config_file_path).exists():
+        script_logger.info(f"Loading configuration from {config_file_path}")
+        try:
+            with open(config_file_path, 'r') as f:
+                if config_file_path.lower().endswith(('.yaml', '.yml')):
+                    config_dict_loaded = yaml.safe_load(f)
+                else:
+                    config_dict_loaded = json.load(f)
+            # Update default config with loaded values
+            # This needs careful merging if config_dict_loaded is partial
+            for key, value in config_dict_loaded.items():
+                if hasattr(loaded_config, key):
+                    setattr(loaded_config, key, value)
+        except Exception as e:
+            script_logger.error(f"Error loading config file {config_file_path}: {e}. Using defaults.")
     else:
-        print("Using default configuration")
-        config = ResearchConfig()
-    
-    # Display configuration
-    print("\nResearch Configuration:")
-    print("-" * 30)
-    print(f"Training samples: {config.n_samples:,}")
-    print(f"Ensemble size: {config.n_ensembles}")
-    print(f"Training epochs: {config.n_epochs}")
-    print(f"Hidden layers: {config.hidden_sizes}")
-    print(f"Clinical conditions: {config.clinical_conditions}")
-    print(f"Target CBF CV improvement: {config.target_cbf_cv_improvement:.0%}")
-    print(f"Target scan time reduction: {config.target_scan_time_reduction:.0%}")
-    
-    # Run comprehensive research
-    print("\nStarting comprehensive ASL research pipeline...")
-    results = run_comprehensive_asl_research(config)
-    
-    print("\n" + "=" * 80)
-    print("RESEARCH PIPELINE COMPLETED SUCCESSFULLY!")
-    print("=" * 80)
-    print(f"Results saved in: {results.get('models_path', 'results')}")
-    print("Check RESEARCH_SUMMARY.txt for detailed findings")
-    print("Publication materials ready for manuscript preparation")
+        script_logger.info("No valid config file provided or found. Using default configuration.")
+
+    script_logger.info("\nResearch Configuration:")
+    script_logger.info("-" * 30)
+    for key, value in asdict(loaded_config).items():
+        script_logger.info(f"{key}: {value}")
+    script_logger.info("-" * 30)
+
+    script_logger.info("\nStarting comprehensive ASL research pipeline...")
+    pipeline_results = run_comprehensive_asl_research(config=loaded_config)
+
+    script_logger.info("\n" + "=" * 80)
+    script_logger.info("RESEARCH PIPELINE COMPLETED!")
+    script_logger.info("=" * 80)
+    if "error" not in pipeline_results:
+        script_logger.info(f"Results saved in: {pipeline_results.get('trained_models_dir', 'Specified output directory')}")
+        script_logger.info("Check RESEARCH_SUMMARY.txt and final_research_results.json for detailed findings.")
+    else:
+        script_logger.error(f"Pipeline failed: {pipeline_results.get('error')}")

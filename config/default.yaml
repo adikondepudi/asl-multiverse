@@ -10,7 +10,7 @@ training:
 data:
   n_samples: 20000
   val_split: 0.2
-  pld_range: [500, 3000, 500]  # start, end, step
+  pld_range: [500, 3001, 500]  # start, end, step
   att_ranges:
     - [500, 1500, "Short ATT"]
     - [1500, 2500, "Medium ATT"]
