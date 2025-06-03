@@ -1,5 +1,5 @@
 /papers/
-/codes/
+/codes/*.docx
 /results/
 /logs/
 __pycache__/
