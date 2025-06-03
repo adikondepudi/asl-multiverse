@@ -9,3 +9,4 @@ nibabel>=3.2.0
 tqdm>=4.64.0
 pyyaml>=6.0
 seaborn>=0.11.2
+optuna>=2.10.0
