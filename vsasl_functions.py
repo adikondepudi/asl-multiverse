@@ -169,12 +169,48 @@ def fit_VSASL_vect_nopep(PLD, diff_sig):
     Init = [50/6000, 1500]
     
     # Use the main fitting function with default parameters
-    return fit_VSASL_vect_pep(PLD, diff_sig, Init, T1_artery, T2_factor, 
-                             alpha_BS1, alpha_VSASL)
+    return fit_VSASL_vectInit_pep(PLD, diff_sig, Init, T1_artery, T2_factor, 
+                                 alpha_BS1, alpha_VSASL)
 
-# def fit_VSASL_vectInit_pep(PLD, diff_sig, Init, T1_artery, T2_factor, alpha_BS1, alpha_VSASL):
-#     """
-#     Fit VSASL data to estimate CBF and ATT using provided initial values.
-#     Same as fit_VSASL_vect_pep but with explicit initialization.
-#     """
-#     return fit_VSASL_vect_pep(PLD, diff_sig, Init, T1_artery, T2_factor, alpha_BS1, alpha_VSASL)
+def fit_VSASL_vect_pep(PLD, diff_sig, T1_artery, T2_factor, alpha_BS1, alpha_VSASL):
+    """
+    Fit VSASL data to estimate CBF and ATT with external parameters.
+    
+    This is the missing function that bridges fit_VSASL_vect_nopep and fit_VSASL_vectInit_pep.
+    It takes external parameters but uses default initialization values.
+    
+    Based on the MATLAB version fit_VSASL_vect_pep.m
+    
+    Parameters
+    ----------
+    PLD : array_like
+        Post-labeling delays in ms
+    diff_sig : array_like
+        Measured difference signals
+    T1_artery : float
+        T1 of arterial blood in ms
+    T2_factor : float
+        T2 decay factor
+    alpha_BS1 : float
+        Background suppression factor
+    alpha_VSASL : float
+        VSASL labeling efficiency
+        
+    Returns
+    -------
+    beta : ndarray
+        Fitted parameters [CBF, ATT]
+    conintval : ndarray
+        95% confidence intervals for parameters
+    rmse : float
+        Root mean square error of the fit
+    df : int
+        Degrees of freedom
+    """
+    # Default initial values (same as in MATLAB version)
+    # cbf0 = 50/6000; ATT0 = 1500;
+    Init = [50/6000, 1500]
+    
+    # Use the existing function with initialization
+    return fit_VSASL_vectInit_pep(PLD, diff_sig, Init, T1_artery, T2_factor, 
+                                 alpha_BS1, alpha_VSASL)
