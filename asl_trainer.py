@@ -8,6 +8,8 @@ from dataclasses import dataclass
 from collections import defaultdict
 from torch.optim.lr_scheduler import OneCycleLR # Import was missing for EnhancedASLTrainer
 import math # Import was missing
+import multiprocessing as mp
+num_workers = mp.cpu_count()
 
 # Assuming EnhancedASLNet and CustomLoss are correctly imported from enhanced_asl_network
 from enhanced_asl_network import EnhancedASLNet, CustomLoss
@@ -443,7 +445,7 @@ class EnhancedASLTrainer:
 
 
             dataset = EnhancedASLDataset(stage_X, stage_y)
-            loader = DataLoader(dataset, batch_size=self.batch_size, sampler=sampler, num_workers=0, drop_last= (len(stage_X) > self.batch_size) ) # drop_last if more than one batch
+            loader = DataLoader(dataset, batch_size=self.batch_size, sampler=sampler, num_workers=num_workers, pin_memory=True, drop_last= (len(stage_X) > self.batch_size) ) # drop_last if more than one batch
             train_loaders.append(loader)
 
         if not train_loaders:
@@ -455,7 +457,7 @@ class EnhancedASLTrainer:
         val_loader = None
         if X_val.shape[0] > 0:
             val_dataset = EnhancedASLDataset(X_val, y_val) # Use EnhancedASLDataset for val too for consistency in input
-            val_loader = DataLoader(val_dataset, batch_size=self.batch_size, num_workers=0)
+            val_loader = DataLoader(val_dataset, batch_size=self.batch_size, num_workers=num_workers, pin_memory=True, drop_last=False) # No need to drop last for validation
         else:
             logger.warning("Validation set is empty. Validation loader will not be created.")
 
