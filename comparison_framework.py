@@ -1,21 +1,21 @@
 import numpy as np
 import torch
-import matplotlib.pyplot as plt
-import seaborn as sns
+import matplotlib.pyplot as plt # Kept for plt.show() if needed during interactive use
+import seaborn as sns # Kept for plt.show() if needed during interactive use
 from typing import Dict, List, Tuple, Optional
 import pandas as pd
 from pathlib import Path
 import time
 from scipy import stats
-from dataclasses import dataclass, asdict 
+from dataclasses import dataclass, asdict
 import json
+import wandb # Added for potential W&B artifact logging
 
 from vsasl_functions import fit_VSASL_vectInit_pep
 from pcasl_functions import fit_PCASL_vectInit_pep
 from multiverse_functions import fit_PCVSASL_misMatchPLD_vectInit_pep
-from enhanced_asl_network import EnhancedASLNet # For loading model
+from enhanced_asl_network import EnhancedASLNet
 
-# For logging within this file
 import logging
 logger = logging.getLogger(__name__)
 if not logger.hasHandlers():
@@ -24,42 +24,35 @@ if not logger.hasHandlers():
 
 @dataclass
 class ComparisonResult:
-    """Container for comparison results"""
     method: str
-    att_range_name: str 
+    att_range_name: str
     cbf_bias: float
     att_bias: float
     cbf_cov: float
     att_cov: float
     cbf_rmse: float
     att_rmse: float
-    # Normalized metrics
-    cbf_nbias_perc: float 
+    cbf_nbias_perc: float
     att_nbias_perc: float
-    cbf_nrmse_perc: float 
+    cbf_nrmse_perc: float
     att_nrmse_perc: float
-    # CI and success
-    cbf_ci_width: float # For LS methods, this is from nlparci; for NN, from uncertainty prediction
+    cbf_ci_width: float
     att_ci_width: float
-    computation_time: float # Per sample
+    computation_time: float
     success_rate: float
 
 
 class ComprehensiveComparison:
-    """Compare neural network and least-squares fitting methods"""
-
     def __init__(self,
                  nn_model_path: Optional[str] = None,
                  output_dir: str = 'comparison_results',
-                 # NN model config (should come from main config)
                  nn_input_size: int = 12,
                  nn_hidden_sizes: Optional[List[int]] = None,
                  nn_n_plds: int = 6,
-                 nn_m0_input_feature: bool = False # Added flag
+                 nn_m0_input_feature: bool = False
                  ):
         self.output_dir = Path(output_dir)
         self.output_dir.mkdir(parents=True, exist_ok=True)
-
         self.nn_input_size = nn_input_size
         self.nn_hidden_sizes = nn_hidden_sizes if nn_hidden_sizes is not None else [256, 128, 64]
         self.nn_n_plds = nn_n_plds
@@ -75,32 +68,21 @@ class ComprehensiveComparison:
             self.nn_model = None
             logger.info("No NN model path provided. NN evaluation will be skipped.")
 
-        self.asl_params = {
-            'T1_artery': 1850.0, 'T2_factor': 1.0, 'alpha_BS1': 1.0,
-            'alpha_PCASL': 0.85, 'alpha_VSASL': 0.56, 'T_tau': 1800.0
-        }
-        self.results_list = [] 
+        self.asl_params = {'T1_artery': 1850.0, 'T2_factor': 1.0, 'alpha_BS1': 1.0,
+                           'alpha_PCASL': 0.85, 'alpha_VSASL': 0.56, 'T_tau': 1800.0}
+        self.results_list = []
 
     def _load_nn_model(self, model_path: str) -> torch.nn.Module:
-        """Load trained neural network model"""
-        # Assuming EnhancedASLNet constructor matches its definition (including transformer flags etc.)
-        # For simplicity, hardcoding use_transformer_temporal=True as it's the new default.
-        # This should ideally be passed from config if EnhancedASLNet constructor varies significantly.
-        model = EnhancedASLNet(
-            input_size=self.nn_input_size, # This is base_input_size for EnhancedASLNet
-            hidden_sizes=self.nn_hidden_sizes,
-            n_plds=self.nn_n_plds,
-            use_transformer_temporal=True, # Assuming this is the intended config
-            m0_input_feature=self.nn_m0_input_feature # Pass M0 flag
-        )
+        model = EnhancedASLNet(input_size=self.nn_input_size, hidden_sizes=self.nn_hidden_sizes,
+                               n_plds=self.nn_n_plds, use_transformer_temporal=True,
+                               m0_input_feature=self.nn_m0_input_feature)
         model.load_state_dict(torch.load(model_path, map_location=torch.device('cpu')))
         model.eval()
         return model
 
     def _calculate_detailed_metrics(self, pred_cbf, true_cbf, pred_att, true_att):
         pred_cbf, true_cbf, pred_att, true_att = map(np.asarray, [pred_cbf, true_cbf, pred_att, true_att])
-        valid_mask_cbf = ~np.isnan(pred_cbf) & ~np.isnan(true_cbf)
-        valid_mask_att = ~np.isnan(pred_att) & ~np.isnan(true_att)
+        valid_mask_cbf, valid_mask_att = ~np.isnan(pred_cbf) & ~np.isnan(true_cbf), ~np.isnan(pred_att) & ~np.isnan(true_att)
         metrics = {k: np.nan for k in ['cbf_bias', 'att_bias', 'cbf_cov', 'att_cov', 'cbf_rmse', 'att_rmse',
                                        'cbf_nbias_perc', 'att_nbias_perc', 'cbf_nrmse_perc', 'att_nrmse_perc']}
         if np.sum(valid_mask_cbf) > 0:
@@ -123,11 +105,8 @@ class ComprehensiveComparison:
             metrics['att_nrmse_perc'] = (metrics['att_rmse'] / mean_true_att_safe) * 100
         return metrics
 
-    def compare_methods(self,
-                       test_data_dict: Dict[str, np.ndarray], 
-                       true_params_arr: np.ndarray, 
-                       plds_arr: np.ndarray,
-                       att_ranges_list: List[Tuple[float, float, str]]) -> pd.DataFrame:
+    def compare_methods(self, test_data_dict: Dict[str, np.ndarray], true_params_arr: np.ndarray,
+                       plds_arr: np.ndarray, att_ranges_list: List[Tuple[float, float, str]]) -> pd.DataFrame:
         self.results_list = []
         for att_min, att_max, range_name_str in att_ranges_list:
             mask = (true_params_arr[:, 1] >= att_min) & (true_params_arr[:, 1] < att_max)
@@ -135,12 +114,9 @@ class ComprehensiveComparison:
                 logger.warning(f"No test data for ATT range {range_name_str}. Skipping.")
                 continue
             range_true_params = true_params_arr[mask]
-            range_data_signals = {
-                'PCASL_LS': test_data_dict['PCASL'][mask],
-                'VSASL_LS': test_data_dict['VSASL'][mask],
-                'MULTIVERSE_LS_FORMAT': test_data_dict['MULTIVERSE_LS_FORMAT'][mask],
-                'NN_INPUT_FORMAT': test_data_dict['NN_INPUT_FORMAT'][mask]
-            }
+            range_data_signals = {'PCASL_LS': test_data_dict['PCASL'][mask], 'VSASL_LS': test_data_dict['VSASL'][mask],
+                                  'MULTIVERSE_LS_FORMAT': test_data_dict['MULTIVERSE_LS_FORMAT'][mask],
+                                  'NN_INPUT_FORMAT': test_data_dict['NN_INPUT_FORMAT'][mask]}
             logger.info(f"\nEvaluating {range_name_str} (n={mask.sum()})...")
             ls_eval_results = self._evaluate_least_squares(range_data_signals, range_true_params, plds_arr, range_name_str)
             self.results_list.extend(ls_eval_results)
@@ -149,14 +125,15 @@ class ComprehensiveComparison:
                 self.results_list.extend(nn_eval_results)
                 hybrid_eval_results = self._evaluate_hybrid(range_data_signals['MULTIVERSE_LS_FORMAT'], range_data_signals['NN_INPUT_FORMAT'], range_true_params, plds_arr, range_name_str)
                 self.results_list.extend(hybrid_eval_results)
-            else:
-                logger.info("Skipping Neural Network and Hybrid evaluations as model is not loaded.")
+            else: logger.info("Skipping Neural Network and Hybrid evaluations as model is not loaded.")
         if not self.results_list:
             logger.warning("No results generated from comparison. Returning empty DataFrame.")
             return pd.DataFrame()
-        df_data = [asdict(r) for r in self.results_list]
-        df = pd.DataFrame(df_data)
-        df.to_csv(self.output_dir / 'comparison_results_detailed.csv', index=False)
+        df = pd.DataFrame([asdict(r) for r in self.results_list])
+        df_path = self.output_dir / 'comparison_results_detailed.csv'
+        df.to_csv(df_path, index=False)
+        logger.info(f"Comparison results saved to {df_path}")
+        if wandb.run: wandb.save(str(df_path)) # Log to W&B artifacts
         return df
 
     def _evaluate_least_squares(self, data_signals: Dict[str, np.ndarray], true_params: np.ndarray, plds: np.ndarray, range_name: str) -> List[ComparisonResult]:
@@ -173,141 +150,102 @@ class ComprehensiveComparison:
         return ls_results_list
 
     def _fit_multiverse_ls(self, signals_arr: np.ndarray, true_params_arr: np.ndarray, plds_arr: np.ndarray, range_name_str: str) -> Optional[ComparisonResult]:
-        n_samples = signals_arr.shape[0]
+        n_samples = signals_arr.shape[0]; successes = 0
         if n_samples == 0: return None
-        cbf_estimates, att_estimates, ci_widths_cbf, ci_widths_att, fit_times, successes = [], [], [], [], [], 0
+        cbf_estimates, att_estimates, ci_widths_cbf, ci_widths_att, fit_times = [], [], [], [], []
         pldti = np.column_stack([plds_arr, plds_arr])
         for i in range(n_samples):
-            signal_sample = signals_arr[i]
-            init_cbf, init_att = 50.0 / 6000.0, 1500.0
             start_time = time.time()
             try:
-                beta, conintval, _, _ = fit_PCVSASL_misMatchPLD_vectInit_pep(pldti, signal_sample, [init_cbf, init_att], **self.asl_params)
-                fit_times.append(time.time() - start_time)
-                cbf_estimates.append(beta[0] * 6000); att_estimates.append(beta[1])
-                ci_widths_cbf.append((conintval[0,1] - conintval[0,0]) * 6000)
-                ci_widths_att.append(conintval[1,1] - conintval[1,0])
-                successes += 1
-            except Exception:
-                fit_times.append(time.time() - start_time)
-                cbf_estimates.append(np.nan); att_estimates.append(np.nan)
-                ci_widths_cbf.append(np.nan); ci_widths_att.append(np.nan)
+                beta, conintval, _, _ = fit_PCVSASL_misMatchPLD_vectInit_pep(pldti, signals_arr[i], [50.0/6000.0, 1500.0], **self.asl_params)
+                fit_times.append(time.time() - start_time); cbf_estimates.append(beta[0]*6000); att_estimates.append(beta[1])
+                ci_widths_cbf.append((conintval[0,1]-conintval[0,0])*6000); ci_widths_att.append(conintval[1,1]-conintval[1,0]); successes += 1
+            except Exception: fit_times.append(time.time()-start_time); cbf_estimates.append(np.nan); att_estimates.append(np.nan); ci_widths_cbf.append(np.nan); ci_widths_att.append(np.nan)
         metrics = self._calculate_detailed_metrics(cbf_estimates, true_params_arr[:,0], att_estimates, true_params_arr[:,1])
-        return ComparisonResult(method="MULTIVERSE-LS", att_range_name=range_name_str, **metrics, 
+        return ComparisonResult(method="MULTIVERSE-LS", att_range_name=range_name_str, **metrics,
                                 cbf_ci_width=np.nanmean(ci_widths_cbf), att_ci_width=np.nanmean(ci_widths_att),
-                                computation_time=np.nanmean(fit_times) if fit_times else np.nan,
-                                success_rate=(successes / n_samples * 100) if n_samples > 0 else 0)
+                                computation_time=np.nanmean(fit_times) if fit_times else np.nan, success_rate=(successes/n_samples*100) if n_samples > 0 else 0)
 
     def _fit_pcasl_ls(self, signals_arr: np.ndarray, true_params_arr: np.ndarray, plds_arr: np.ndarray, range_name_str: str) -> Optional[ComparisonResult]:
-        n_samples = signals_arr.shape[0]
+        n_samples = signals_arr.shape[0]; successes = 0
         if n_samples == 0: return None
-        cbf_estimates, att_estimates, fit_times, successes = [], [], [], 0
-        pcasl_params_subset = {k: v for k,v in self.asl_params.items() if 'VSASL' not in k}
+        cbf_estimates, att_estimates, fit_times = [], [], []
+        pcasl_params_subset = {k:v for k,v in self.asl_params.items() if 'VSASL' not in k}
         for i in range(n_samples):
-            init_cbf, init_att = 50.0 / 6000.0, 1500.0
             start_time = time.time()
             try:
-                beta, _, _, _ = fit_PCASL_vectInit_pep(plds_arr, signals_arr[i], [init_cbf, init_att], **pcasl_params_subset)
-                fit_times.append(time.time() - start_time)
-                cbf_estimates.append(beta[0] * 6000); att_estimates.append(beta[1])
-                successes += 1
-            except Exception:
-                fit_times.append(time.time() - start_time)
-                cbf_estimates.append(np.nan); att_estimates.append(np.nan)
+                beta, _, _, _ = fit_PCASL_vectInit_pep(plds_arr, signals_arr[i], [50.0/6000.0, 1500.0], **pcasl_params_subset)
+                fit_times.append(time.time()-start_time); cbf_estimates.append(beta[0]*6000); att_estimates.append(beta[1]); successes += 1
+            except Exception: fit_times.append(time.time()-start_time); cbf_estimates.append(np.nan); att_estimates.append(np.nan)
         metrics = self._calculate_detailed_metrics(cbf_estimates, true_params_arr[:,0], att_estimates, true_params_arr[:,1])
-        return ComparisonResult(method="PCASL-LS", att_range_name=range_name_str, **metrics,
-                                cbf_ci_width=np.nan, att_ci_width=np.nan,
-                                computation_time=np.nanmean(fit_times) if fit_times else np.nan,
-                                success_rate=(successes / n_samples * 100) if n_samples > 0 else 0)
+        return ComparisonResult(method="PCASL-LS", att_range_name=range_name_str, **metrics, cbf_ci_width=np.nan, att_ci_width=np.nan,
+                                computation_time=np.nanmean(fit_times) if fit_times else np.nan, success_rate=(successes/n_samples*100) if n_samples > 0 else 0)
 
     def _fit_vsasl_ls(self, signals_arr: np.ndarray, true_params_arr: np.ndarray, plds_arr: np.ndarray, range_name_str: str) -> Optional[ComparisonResult]:
-        n_samples = signals_arr.shape[0]
+        n_samples = signals_arr.shape[0]; successes = 0
         if n_samples == 0: return None
-        cbf_estimates, att_estimates, fit_times, successes = [], [], [], 0
-        vsasl_params_subset = {k: v for k,v in self.asl_params.items() if 'PCASL' not in k and 'T_tau' not in k}
+        cbf_estimates, att_estimates, fit_times = [], [], []
+        vsasl_params_subset = {k:v for k,v in self.asl_params.items() if 'PCASL' not in k and 'T_tau' not in k}
         for i in range(n_samples):
-            init_cbf, init_att = 50.0 / 6000.0, 1500.0
             start_time = time.time()
             try:
-                beta, _, _, _ = fit_VSASL_vectInit_pep(plds_arr, signals_arr[i], [init_cbf, init_att], **vsasl_params_subset)
-                fit_times.append(time.time() - start_time)
-                cbf_estimates.append(beta[0] * 6000); att_estimates.append(beta[1])
-                successes += 1
-            except Exception:
-                fit_times.append(time.time() - start_time)
-                cbf_estimates.append(np.nan); att_estimates.append(np.nan)
+                beta, _, _, _ = fit_VSASL_vectInit_pep(plds_arr, signals_arr[i], [50.0/6000.0, 1500.0], **vsasl_params_subset)
+                fit_times.append(time.time()-start_time); cbf_estimates.append(beta[0]*6000); att_estimates.append(beta[1]); successes += 1
+            except Exception: fit_times.append(time.time()-start_time); cbf_estimates.append(np.nan); att_estimates.append(np.nan)
         metrics = self._calculate_detailed_metrics(cbf_estimates, true_params_arr[:,0], att_estimates, true_params_arr[:,1])
-        return ComparisonResult(method="VSASL-LS", att_range_name=range_name_str, **metrics,
-                                cbf_ci_width=np.nan, att_ci_width=np.nan,
-                                computation_time=np.nanmean(fit_times) if fit_times else np.nan,
-                                success_rate=(successes / n_samples * 100) if n_samples > 0 else 0)
+        return ComparisonResult(method="VSASL-LS", att_range_name=range_name_str, **metrics, cbf_ci_width=np.nan, att_ci_width=np.nan,
+                                computation_time=np.nanmean(fit_times) if fit_times else np.nan, success_rate=(successes/n_samples*100) if n_samples > 0 else 0)
 
     def _evaluate_neural_network(self, nn_input_arr: np.ndarray, true_params_arr: np.ndarray, plds_arr: np.ndarray, range_name_str: str) -> List[ComparisonResult]:
         if self.nn_model is None or nn_input_arr.shape[0] == 0: return []
         logger.info("  Evaluating Neural Network...")
-        # Note: If nn_m0_input_feature is True for the model, nn_input_arr must contain M0 values.
-        # This check assumes that nn_input_arr is correctly formatted by the caller.
         if self.nn_m0_input_feature and nn_input_arr.shape[1] != (self.nn_n_plds * 2 + 1):
-            logger.error(f"NN model expects M0 input, but nn_input_arr has {nn_input_arr.shape[1]} features. Expected {self.nn_n_plds * 2 + 1}.")
-            return [] # Or handle error appropriately
-
+            logger.error(f"NN expects M0, but input has {nn_input_arr.shape[1]} features. Expected {self.nn_n_plds*2+1}.")
+            return []
         input_tensor = torch.FloatTensor(nn_input_arr)
         start_time = time.time()
-        with torch.no_grad():
-            cbf_pred, att_pred, cbf_log_var, att_log_var = self.nn_model(input_tensor)
+        with torch.no_grad(): cbf_pred, att_pred, cbf_log_var, att_log_var = self.nn_model(input_tensor)
         inference_time_total = time.time() - start_time
-        cbf_estimates = cbf_pred.numpy().squeeze()
-        att_estimates = att_pred.numpy().squeeze()
-        cbf_uncertainty_std = np.exp(cbf_log_var.numpy().squeeze() / 2.0)
-        att_uncertainty_std = np.exp(att_log_var.numpy().squeeze() / 2.0)
-        metrics = self._calculate_detailed_metrics(cbf_estimates, true_params_arr[:,0], att_estimates, true_params_arr[:,1])
+        cbf_est, att_est = cbf_pred.numpy().squeeze(), att_pred.numpy().squeeze()
+        cbf_unc_std, att_unc_std = np.exp(cbf_log_var.numpy().squeeze()/2.0), np.exp(att_log_var.numpy().squeeze()/2.0)
+        metrics = self._calculate_detailed_metrics(cbf_est, true_params_arr[:,0], att_est, true_params_arr[:,1])
         return [ComparisonResult(method="Neural Network", att_range_name=range_name_str, **metrics,
-                                 cbf_ci_width=np.nanmean(cbf_uncertainty_std) * 1.96 * 2, 
-                                 att_ci_width=np.nanmean(att_uncertainty_std) * 1.96 * 2,
-                                 computation_time=inference_time_total / len(nn_input_arr) if len(nn_input_arr) > 0 else np.nan,
-                                 success_rate=100.0)] # NN always gives a prediction
+                                 cbf_ci_width=np.nanmean(cbf_unc_std)*1.96*2, att_ci_width=np.nanmean(att_unc_std)*1.96*2,
+                                 computation_time=inference_time_total/len(nn_input_arr) if len(nn_input_arr)>0 else np.nan, success_rate=100.0)]
 
     def _evaluate_hybrid(self, multiverse_ls_signals: np.ndarray, nn_input_signals: np.ndarray, true_params_arr: np.ndarray, plds_arr: np.ndarray, range_name_str: str) -> List[ComparisonResult]:
         if self.nn_model is None or nn_input_signals.shape[0] == 0: return []
         logger.info("  Evaluating Hybrid approach...")
         input_tensor = torch.FloatTensor(nn_input_signals)
-        with torch.no_grad():
-            cbf_init_nn, att_init_nn, _, _ = self.nn_model(input_tensor)
-        cbf_init_ls = cbf_init_nn.numpy().squeeze() / 6000.0
-        att_init_ls = att_init_nn.numpy().squeeze()
-        n_samples = multiverse_ls_signals.shape[0]
-        cbf_estimates, att_estimates, fit_times, successes = [], [], [], 0
+        with torch.no_grad(): cbf_init_nn, att_init_nn, _, _ = self.nn_model(input_tensor)
+        cbf_init_ls, att_init_ls = cbf_init_nn.numpy().squeeze()/6000.0, att_init_nn.numpy().squeeze()
+        n_samples = multiverse_ls_signals.shape[0]; successes = 0
+        cbf_estimates, att_estimates, fit_times = [], [], []
         pldti = np.column_stack([plds_arr, plds_arr])
         for i in range(n_samples):
-            signal_sample_ls = multiverse_ls_signals[i]
-            init_for_ls = [cbf_init_ls[i], att_init_ls[i]]
             start_time = time.time()
             try:
-                beta, _, _, _ = fit_PCVSASL_misMatchPLD_vectInit_pep(pldti, signal_sample_ls, init_for_ls, **self.asl_params)
-                fit_times.append(time.time() - start_time)
-                cbf_estimates.append(beta[0] * 6000); att_estimates.append(beta[1])
-                successes += 1
-            except Exception:
-                fit_times.append(time.time() - start_time)
-                cbf_estimates.append(cbf_init_nn.numpy().squeeze()[i]) 
-                att_estimates.append(att_init_ls[i]) 
-                successes +=1 
+                beta, _, _, _ = fit_PCVSASL_misMatchPLD_vectInit_pep(pldti, multiverse_ls_signals[i], [cbf_init_ls[i], att_init_ls[i]], **self.asl_params)
+                fit_times.append(time.time()-start_time); cbf_estimates.append(beta[0]*6000); att_estimates.append(beta[1]); successes += 1
+            except Exception: fit_times.append(time.time()-start_time); cbf_estimates.append(cbf_init_nn.numpy().squeeze()[i]); att_estimates.append(att_init_ls[i]); successes +=1
         metrics = self._calculate_detailed_metrics(cbf_estimates, true_params_arr[:,0], att_estimates, true_params_arr[:,1])
         return [ComparisonResult(method="Hybrid (NN+LS)", att_range_name=range_name_str, **metrics,
                                  cbf_ci_width=np.nan, att_ci_width=np.nan,
-                                 computation_time=np.nanmean(fit_times) if fit_times else np.nan,
-                                 success_rate=(successes / n_samples * 100) if n_samples > 0 else 0)]
+                                 computation_time=np.nanmean(fit_times) if fit_times else np.nan, success_rate=(successes/n_samples*100) if n_samples > 0 else 0)]
 
-    def visualize_results(self, results_df: pd.DataFrame):
+    def visualize_results(self, results_df: pd.DataFrame, show_plots: bool = False): # Added show_plots
         if results_df.empty:
             logger.warning("Results DataFrame is empty. Skipping visualization.")
             return
+        if not show_plots: # If not showing, just log that visualization data is available
+            logger.info("Visualization data prepared. Set show_plots=True to display.")
+            return
+
         sns.set_style("whitegrid")
-        # Visualization of primary metrics (Bias, CoV, RMSE)
         fig_metrics, axes_metrics = plt.subplots(3, 2, figsize=(16, 20))
         all_method_names = results_df['method'].unique()
         method_order = [m for m in ['PCASL-LS', 'VSASL-LS', 'MULTIVERSE-LS', 'Neural Network', 'Hybrid (NN+LS)'] if m in all_method_names]
-        colors = {'PCASL-LS': 'blue', 'VSASL-LS': 'green', 'MULTIVERSE-LS': 'red', 
+        colors = {'PCASL-LS': 'blue', 'VSASL-LS': 'green', 'MULTIVERSE-LS': 'red',
                   'Neural Network': 'purple', 'Hybrid (NN+LS)': 'orange', 'Other': 'grey'}
         metrics_to_plot = [
             ('cbf_nbias_perc', 'att_nbias_perc', 'Normalized Bias', '%', '%'),
@@ -323,63 +261,57 @@ class ComprehensiveComparison:
                 ax_cbf.plot(x_pos, method_df[cbf_metric_key], 'o-', color=colors.get(method_name, colors['Other']), label=method_name, linewidth=2.5 if 'Neural' in method_name or 'Hybrid' in method_name else 2, markersize=7)
                 ax_att.plot(x_pos, method_df[att_metric_key], 'o-', color=colors.get(method_name, colors['Other']), label=method_name, linewidth=2.5 if 'Neural' in method_name or 'Hybrid' in method_name else 2, markersize=7)
             for ax, param_name, unit in [(ax_cbf, "CBF", cbf_unit), (ax_att, "ATT", att_unit)]:
-                ax.set_ylabel(f'{param_name} {metric_disp_name} ({unit})')
-                ax.set_title(f'{param_name} {metric_disp_name}')
+                ax.set_ylabel(f'{param_name} {metric_disp_name} ({unit})'); ax.set_title(f'{param_name} {metric_disp_name}')
                 ax.set_xticks(x_pos); ax.set_xticklabels(att_range_names_sorted, rotation=30, ha='right')
                 if 'Bias' in metric_disp_name: ax.axhline(0, color='k', linestyle='--', alpha=0.7)
                 if row == 0: ax.legend(fontsize='small')
         plt.tight_layout(rect=[0, 0, 1, 0.96]); fig_metrics.suptitle("Performance Comparison Across Methods and ATT Ranges", fontsize=16, fontweight='bold')
-        plt.savefig(self.output_dir / 'comparison_metrics_summary.png', dpi=300, bbox_inches='tight'); plt.show(); plt.close(fig_metrics)
+        # plt.savefig(self.output_dir / 'comparison_metrics_summary.png', dpi=300, bbox_inches='tight'); # Removed savefig
+        if show_plots: plt.show()
+        plt.close(fig_metrics)
 
-        self._plot_computation_time(results_df)
-        self._plot_success_rates(results_df)
-        self._plot_calibration_placeholder(results_df) # Placeholder for calibration plots
+        self._plot_computation_time(results_df, show_plots)
+        self._plot_success_rates(results_df, show_plots)
+        self._plot_calibration_placeholder(show_plots) # Placeholder, does not save real data
 
-    def _plot_computation_time(self, results_df: pd.DataFrame):
+    def _plot_computation_time(self, results_df: pd.DataFrame, show_plots: bool = False):
         if results_df.empty or 'computation_time' not in results_df.columns: logger.warning("Cannot plot computation time."); return
+        if not show_plots: return
         fig, ax = plt.subplots(figsize=(12, 7))
         avg_times = results_df.groupby('method')['computation_time'].mean().sort_values() * 1000 # ms
         bars = ax.bar(avg_times.index, avg_times.values)
-        ax.set_ylabel('Avg. Computation Time per Sample (ms)'); ax.set_title('Average Computation Time Comparison')
-        ax.set_yscale('log')
+        ax.set_ylabel('Avg. Computation Time per Sample (ms)'); ax.set_title('Average Computation Time Comparison'); ax.set_yscale('log')
         for bar in bars:
             height = bar.get_height()
             if np.isfinite(height) and height > 0: ax.text(bar.get_x() + bar.get_width()/2., height, f'{height:.2f}', ha='center', va='bottom')
         plt.xticks(rotation=45, ha='right'); plt.tight_layout()
-        plt.savefig(self.output_dir / 'computation_time_comparison.png', dpi=300, bbox_inches='tight'); plt.show(); plt.close(fig)
+        # plt.savefig(self.output_dir / 'computation_time_comparison.png', dpi=300, bbox_inches='tight'); # Removed savefig
+        if show_plots: plt.show()
+        plt.close(fig)
 
-    def _plot_success_rates(self, results_df: pd.DataFrame):
+    def _plot_success_rates(self, results_df: pd.DataFrame, show_plots: bool = False):
         if results_df.empty or 'success_rate' not in results_df.columns: logger.warning("Cannot plot success rates."); return
+        if not show_plots: return
         try:
             pivot_data = results_df.pivot_table(values='success_rate', index='att_range_name', columns='method', aggfunc='mean').reindex(sorted(results_df['att_range_name'].unique()))
             if pivot_data.empty: logger.warning("Pivot table for success rates is empty."); return
-            pivot_data.plot(kind='bar', figsize=(12,7), width=0.8) # Uses current figure context
+            pivot_data.plot(kind='bar', figsize=(12,7), width=0.8)
             plt.ylabel('Success Rate (%)'); plt.xlabel('ATT Range'); plt.title('Fitting Success Rates by Method and ATT Range')
             plt.legend(title='Method', bbox_to_anchor=(1.02, 1), loc='upper left'); plt.xticks(rotation=30, ha='right')
             plt.ylim(0, 105); plt.tight_layout()
-            plt.savefig(self.output_dir / 'success_rates_comparison.png', dpi=300, bbox_inches='tight'); plt.show(); plt.close()
+            # plt.savefig(self.output_dir / 'success_rates_comparison.png', dpi=300, bbox_inches='tight'); # Removed savefig
+            if show_plots: plt.show()
+            plt.close()
         except Exception as e: logger.error(f"Error plotting success rates: {e}")
 
-    def _plot_calibration_placeholder(self, results_df: pd.DataFrame):
-        """Placeholder for calibration plots."""
-        logger.info("Calibration plot generation is a placeholder. Full implementation requires predicted uncertainties and true values.")
-        # Example structure for future implementation:
-        # if self.nn_model and 'Neural Network' in results_df['method'].unique():
-        #   nn_results = results_df[results_df['method'] == 'Neural Network']
-        #   # Need access to individual predictions and their uncertainties, not just summary stats.
-        #   # This would typically be done with the raw output from _evaluate_neural_network
-        #   # before metrics are aggregated.
-        #   # E.g., true_cbfs, pred_cbfs_mean, pred_cbfs_std = ...
-        #   # from reliability_diagrams import reliability_diagram # (requires a library or custom code)
-        #   # reliability_diagram(true_cbfs, pred_cbfs_mean, pred_cbfs_std, n_bins=10)
-        #   # plt.savefig(self.output_dir / 'cbf_calibration_plot.png')
-        #   pass
-        # Create a dummy placeholder plot if needed for the report
+    def _plot_calibration_placeholder(self, show_plots: bool = False):
+        logger.info("Calibration plot generation is a placeholder.")
+        if not show_plots: return
         fig, ax = plt.subplots(1,1,figsize=(8,6))
-        ax.text(0.5, 0.5, "Calibration Plot Placeholder\n(Requires full implementation)", 
+        ax.text(0.5, 0.5, "Calibration Plot Placeholder\n(Requires full implementation with raw predictions)",
                 horizontalalignment='center', verticalalignment='center', fontsize=14,
                 bbox=dict(boxstyle="round,pad=0.5", fc="aliceblue", ec="lightsteelblue", lw=2))
-        ax.set_xticks([])
-        ax.set_yticks([])
-        plt.savefig(self.output_dir / 'calibration_plot_placeholder.png', dpi=150)
+        ax.set_xticks([]); ax.set_yticks([])
+        # plt.savefig(self.output_dir / 'calibration_plot_placeholder.png', dpi=150); # Removed savefig
+        if show_plots: plt.show()
         plt.close(fig)
