@@ -521,7 +521,7 @@ class EnhancedASLTrainer:
                    train_loaders: List[DataLoader],
                    val_loader: Optional[DataLoader], 
                    n_epochs: int = 200,
-                   early_stopping_patience: int = 20) -> Dict[str, Any]: # Return type changed
+                   early_stopping_patience: int = 20) -> Dict[str, any]: # Return type changed
         """Train ensemble models with curriculum learning"""
 
         best_val_losses = [float('inf')] * self.n_ensembles
