@@ -1,25 +1,3 @@
-"""
-Enhanced main.py - Comprehensive ASL Neural Network Research Pipeline
-
-This module implements a complete end-to-end framework for developing, validating,
-and benchmarking neural networks against clinical requirements for ASL parameter estimation.
-
-Primary Purpose:
-Comprehensive ASL Neural Network Research Pipeline - A complete framework that transforms
-research hypotheses into validated clinical improvements through systematic development,
-optimization, and validation of neural networks for ASL parameter estimation.
-
-Core Objectives:
-1. Demonstrate 50% precision improvement over conventional methods
-2. Enable single-repeat acquisition with maintained quality
-3. Ensure clinical robustness across patient populations
-4. Generate publication-ready figures and metrics
-5. Provide reproducible research framework
-
-Author: Enhanced ASL Research Team (with modifications for diverse data)
-Date: 2025 (Updated)
-"""
-
 import torch
 import numpy as np
 from pathlib import Path
@@ -36,6 +14,7 @@ from tqdm import tqdm
 import optuna
 from dataclasses import dataclass, asdict, field # Added field
 import warnings
+import sys
 warnings.filterwarnings('ignore') # Use with caution
 
 # Import enhanced ASL components
