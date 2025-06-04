@@ -6,9 +6,11 @@ import numpy as np
 from typing import Dict, List, Tuple, Optional, Union
 from dataclasses import dataclass
 from collections import defaultdict
-from torch.optim.lr_scheduler import OneCycleLR # Import was missing for EnhancedASLTrainer
-import math # Import was missing
+from torch.optim.lr_scheduler import OneCycleLR 
+import math 
 import multiprocessing as mp
+from pathlib import Path # Added Path
+
 num_workers = mp.cpu_count()
 
 # Assuming EnhancedASLNet and CustomLoss are correctly imported from enhanced_asl_network
@@ -101,7 +103,11 @@ class ASLTrainer:
         att_values = np.arange(0, 4001, 100) # This generates many ATT points per noise realization
         # The original generate_synthetic_data creates (n_noise, n_att, n_plds)
         # n_samples here refers to n_noise in generate_synthetic_data
-        signals_dict = simulator.generate_synthetic_data(plds, att_values, n_noise=n_samples, tsnr=5.0)
+        # Pass current simulator CBF for data generation
+        signals_dict = simulator.generate_synthetic_data(
+            plds, att_values, n_noise=n_samples, tsnr=5.0, 
+            cbf_val=simulator.params.CBF # Explicitly pass CBF from simulator config
+        )
 
 
         # Correctly reshape the signals
@@ -190,7 +196,8 @@ class ASLTrainer:
                 loss = self.criterion(outputs, params)
                 total_loss += loss.item()
 
-        return total_loss / len(val_loader)
+        return total_loss / len(val_loader) if len(val_loader) > 0 else float('inf') # Added check for len
+
 
     def train(self,
               train_loader: DataLoader,
@@ -226,9 +233,14 @@ class ASLTrainer:
             if (epoch + 1) % 10 == 0:
                 logger.info(f'Epoch {epoch + 1}: Train Loss = {train_loss:.6f}, Val Loss = {val_loss:.6f}')
 
-        # Load best model
-        if Path('best_model_ASLTrainer.pt').exists():
-            self.model.load_state_dict(torch.load('best_model_ASLTrainer.pt'))
+        # Load best model if it exists
+        model_path = Path('best_model_ASLTrainer.pt')
+        if model_path.exists():
+            self.model.load_state_dict(torch.load(str(model_path))) # Use str(model_path) for PyTorch
+            logger.info(f"Loaded best model from {model_path}")
+        else:
+            logger.warning(f"Best model file {model_path} not found. Current model state will be used.")
+
 
         return {
             'train_losses': self.train_losses,
@@ -240,6 +252,8 @@ class ASLTrainer:
         self.model.eval()
         with torch.no_grad():
             signals_tensor = torch.FloatTensor(signals).to(self.device)
+            if signals_tensor.ndim == 1: # Handle single sample case
+                signals_tensor = signals_tensor.unsqueeze(0)
             predictions = self.model(signals_tensor)
             return predictions.cpu().numpy()
 
@@ -274,14 +288,20 @@ class EnhancedASLDataset(Dataset):
     """Enhanced dataset with noise augmentation and weighted sampling"""
 
     def __init__(self,
-                 signals: np.ndarray,
-                 params: np.ndarray,
-                 noise_levels: List[float] = [0.01, 0.02, 0.05], # Relative to signal max, or absolute? Needs clarification. Assuming absolute for now.
-                 dropout_range: Tuple[float, float] = (0.05, 0.15)):
+                 signals: np.ndarray, # Expected shape (N_samples, N_features)
+                 params: np.ndarray,  # Expected shape (N_samples, N_param_outputs e.g. 2 for CBF,ATT)
+                 noise_levels: List[float] = [0.01, 0.02, 0.05], # Relative to signal std dev
+                 dropout_range: Tuple[float, float] = (0.05, 0.15),
+                 global_scale_range: Tuple[float, float] = (0.95, 1.05), # For global signal scaling
+                 baseline_shift_std_factor: float = 0.01 # Factor of signal mean for baseline shift std
+                ):
         self.signals = torch.FloatTensor(signals)
         self.params = torch.FloatTensor(params)
         self.noise_levels = noise_levels
         self.dropout_range = dropout_range
+        self.global_scale_range = global_scale_range
+        self.baseline_shift_std_factor = baseline_shift_std_factor
+
 
     def __len__(self) -> int:
         return len(self.signals)
@@ -290,23 +310,33 @@ class EnhancedASLDataset(Dataset):
         signal = self.signals[idx].clone()
         param = self.params[idx].clone()
 
-        # Apply noise augmentation
-        if self.noise_levels and np.random.rand() < 0.5: # Apply with some probability
-            noise_level_val = np.random.choice(self.noise_levels)
-            # Scale noise_level_val by signal magnitude if it's meant to be relative
-            # For now, assuming absolute noise values if they are small (e.g. 0.01)
-            # If signals are e.g. ~0.005, noise of 0.01 is very high.
-            # Let's assume noise_levels are relative to current signal's std for more robustness
-            effective_noise_level = noise_level_val * torch.std(signal) if torch.std(signal) > 1e-6 else noise_level_val
+        # Apply noise augmentation (relative to signal's std dev)
+        if self.noise_levels and np.random.rand() < 0.5: 
+            noise_level_factor = np.random.choice(self.noise_levels)
+            signal_std = torch.std(signal)
+            if signal_std > 1e-6: # Avoid division by zero or amplification of noise for zero signals
+                effective_noise_std = noise_level_factor * signal_std
+                noise = torch.randn_like(signal) * effective_noise_std
+                signal += noise
 
-            noise = torch.randn_like(signal) * effective_noise_level
-            signal += noise
-
-        # Apply random signal dropout
-        if self.dropout_range and np.random.rand() < 0.5: # Apply with some probability
+        # Apply random signal dropout (zeroing out some PLD points)
+        if self.dropout_range and np.random.rand() < 0.5: 
             dropout_prob = np.random.uniform(*self.dropout_range)
             mask = torch.rand_like(signal) > dropout_prob
             signal *= mask
+        
+        # Apply global signal scaling
+        if self.global_scale_range and np.random.rand() < 0.5:
+            scale_factor = np.random.uniform(*self.global_scale_range)
+            signal *= scale_factor
+
+        # Apply baseline shift
+        if self.baseline_shift_std_factor > 0 and np.random.rand() < 0.5:
+            signal_mean_abs = torch.mean(torch.abs(signal))
+            if signal_mean_abs > 1e-6: # Avoid large shifts for near-zero signals
+                shift_std = self.baseline_shift_std_factor * signal_mean_abs
+                shift = torch.randn(1) * shift_std 
+                signal += shift.item() # Add scalar shift to all elements
 
         return signal, param
 
@@ -315,59 +345,65 @@ class EnhancedASLTrainer:
 
     def __init__(self,
                  model_class, # This is a callable that returns a model instance
-                 input_size: int, # Will be determined by plds
+                 input_size: int, # Will be determined by plds (+1 if M0 used)
                  hidden_sizes: List[int] = [256, 128, 64], # Passed to model_class
                  learning_rate: float = 0.001,
                  batch_size: int = 256,
                  n_ensembles: int = 5,
                  device: str = 'cuda' if torch.cuda.is_available() else 'cpu',
-                 n_plds_for_model: Optional[int] = None): # Add n_plds for model init
+                 n_plds_for_model: Optional[int] = None, # Num PLDs for model (e.g. transformer seq_len)
+                 m0_input_feature_model: bool = False # For model_class if it needs this flag
+                ): 
 
         self.device = device
         self.batch_size = batch_size
         self.n_ensembles = n_ensembles
-        self.n_plds_for_model = n_plds_for_model
-        self.hidden_sizes = hidden_sizes # Store for model creation
+        self.n_plds_for_model = n_plds_for_model # Used by EnhancedASLNet if it has transformer
+        self.m0_input_feature_model = m0_input_feature_model # For model instantiation
+
+        self.hidden_sizes = hidden_sizes 
+        self.input_size_model = input_size # Store input size for model factory
 
         # Initialize ensemble models using the factory function
         self.models = [
-            model_class().to(device) # model_class should be a factory, e.g., lambda: EnhancedASLNet(...)
+            model_class().to(device) # model_class() creates EnhancedASLNet with current config
             for _ in range(n_ensembles)
         ]
+        self.best_states = [None] * self.n_ensembles # To store state_dict of best model per ensemble member
 
-        # Initialize optimizers with OneCycleLR scheduler
         self.optimizers = [
             torch.optim.Adam(model.parameters(), lr=learning_rate)
             for model in self.models
         ]
-
         self.schedulers = []  # Will be initialized after dataloader creation
 
-        # Track training progress
         self.train_losses = defaultdict(list)
         self.val_losses = defaultdict(list)
         self.metrics_history = defaultdict(lambda: defaultdict(list))
 
     def prepare_curriculum_data(self,
                                 simulator, # Instance of RealisticASLSimulator
-                                n_training_subjects: int = 10000, # Renamed from n_samples for clarity
+                                n_training_subjects: int = 10000, 
                                 val_split: float = 0.2,
                                 plds: Optional[np.ndarray] = None,
-                                curriculum_att_ranges_config: Optional[List[Tuple[float, float, float]]] = None,
+                                curriculum_att_ranges_config: Optional[List[Tuple[float, float, str]]] = None,
                                 training_conditions_config: Optional[List[str]] = None,
                                 training_noise_levels_config: Optional[List[float]] = None,
-                                n_epochs_for_scheduler: int = 200
+                                n_epochs_for_scheduler: int = 200,
+                                include_m0_in_data: bool = False # Flag to generate M0 with data
                                 ) -> Tuple[List[DataLoader], Optional[DataLoader]]:
         """Prepare curriculum learning datasets using diverse data from RealisticASLSimulator."""
         if plds is None:
             plds = np.arange(500, 3001, 500)  # Default PLDs
 
-        # Use config or defaults for diverse data generation
         conditions = training_conditions_config if training_conditions_config is not None else ['healthy', 'stroke', 'tumor', 'elderly']
         noise_levels = training_noise_levels_config if training_noise_levels_config is not None else [3.0, 5.0, 10.0, 15.0]
 
         logger.info(f"Generating diverse training data with {n_training_subjects} base subjects, conditions: {conditions}, SNRs: {noise_levels}")
 
+        # NOTE: `generate_diverse_dataset` currently returns signals (N, n_plds*2) and parameters (N,2)
+        # If include_m0_in_data is True, this function (or RealisticASLSimulator) needs to be updated
+        # to also return M0 values. For now, assuming M0 is not included in `raw_dataset` output directly.
         raw_dataset = simulator.generate_diverse_dataset(
             plds=plds,
             n_subjects=n_training_subjects,
@@ -375,21 +411,31 @@ class EnhancedASLTrainer:
             noise_levels=noise_levels
         )
 
-        X_all = raw_dataset['signals']  # Shape: (total_generated_samples, num_plds * 2)
+        X_all_asl = raw_dataset['signals']  # Shape: (total_generated_samples, num_plds * 2)
         y_all = raw_dataset['parameters'] # Shape: (total_generated_samples, 2) for [CBF_ml/100g/min, ATT_ms]
+
+        if include_m0_in_data:
+            # Placeholder: M0 generation logic would go here.
+            # For example, M0 could be a fixed value, or drawn from a distribution,
+            # or related to the tissue type/condition.
+            # For now, if include_m0_in_data is True but not generated, we might add a dummy M0 or raise error.
+            # Let's assume a dummy M0 (e.g., scaled by CBF) for demonstration if M0 is needed.
+            # This part needs proper implementation if M0 is a true feature.
+            m0_dummy_values = np.random.normal(1.0, 0.1, size=(X_all_asl.shape[0], 1)) # Example: M0 around 1.0
+            X_all = np.concatenate((X_all_asl, m0_dummy_values), axis=1)
+            logger.info("Included dummy M0 feature in X_all.")
+        else:
+            X_all = X_all_asl
 
         logger.info(f"Total generated diverse samples for training/validation: {X_all.shape[0]}")
 
         if X_all.shape[0] == 0:
             raise ValueError("No data generated by simulator.generate_diverse_dataset. Check parameters.")
 
-        # Split into train/val
         n_total_samples = X_all.shape[0]
         n_val = int(n_total_samples * val_split)
-        
-        if n_val == 0 and n_total_samples > 1: n_val = 1 # Ensure at least one val sample if possible
+        if n_val == 0 and n_total_samples > 1: n_val = 1 
         if n_val >= n_total_samples : n_val = n_total_samples - 1 if n_total_samples > 0 else 0
-
 
         indices = np.random.permutation(n_total_samples)
         train_idx, val_idx = indices[:-n_val], indices[-n_val:]
@@ -401,30 +447,22 @@ class EnhancedASLTrainer:
         if X_train.shape[0] == 0:
             raise ValueError("Training set is empty after split.")
 
-
-        # Create curriculum stages based on ATT
-        # Default ATT ranges for curriculum stages if not provided
         if curriculum_att_ranges_config is None:
-             # Use ATT range from simulator if available, or default
             min_att_sim, max_att_sim = simulator.physio_var.att_range
             curriculum_stages_def = [
-                (min_att_sim, 1500.0),
-                (1500.0, 2500.0),
-                (2500.0, max_att_sim)
+                (min_att_sim, 1500.0), (1500.0, 2500.0), (2500.0, max_att_sim)
             ]
-        else: # expect format [(min_att1, max_att1), (min_att2, max_att2), ...]
+        else: 
             curriculum_stages_def = [(r[0], r[1]) for r in curriculum_att_ranges_config]
-
 
         train_loaders = []
         for i, (att_min_stage, att_max_stage) in enumerate(curriculum_stages_def):
-            if i == len(curriculum_stages_def) - 1: # Last stage, include upper bound
+            if i == len(curriculum_stages_def) - 1: 
                 mask = (y_train[:, 1] >= att_min_stage) & (y_train[:, 1] <= att_max_stage)
             else:
                 mask = (y_train[:, 1] >= att_min_stage) & (y_train[:, 1] < att_max_stage)
 
-            stage_X = X_train[mask]
-            stage_y = y_train[mask]
+            stage_X, stage_y = X_train[mask], y_train[mask]
 
             if len(stage_X) == 0:
                 logger.warning(f"Curriculum stage {i+1} (ATT {att_min_stage}-{att_max_stage}ms) has no samples. Skipping.")
@@ -432,46 +470,43 @@ class EnhancedASLTrainer:
             logger.info(f"Curriculum stage {i+1} (ATT {att_min_stage}-{att_max_stage}ms): {len(stage_X)} samples.")
 
             att_for_weights = np.clip(stage_y[:, 1], a_min=100.0, a_max=None)
-            weights = np.exp(-att_for_weights / 2000.0)
+            weights = np.exp(-att_for_weights / 2000.0) # Higher weight for shorter ATT
             
             sampler = None
-            if np.sum(weights) > 1e-9 and np.all(np.isfinite(weights)):
+            if np.sum(weights) > 1e-9 and np.all(np.isfinite(weights)) and len(weights) > 0:
                 try:
                     sampler = WeightedRandomSampler(weights, num_samples=len(weights), replacement=True)
-                except Exception as e:
+                except RuntimeError as e: # Can happen if weights sum to zero or are invalid
                     logger.warning(f"Failed to create WeightedRandomSampler for stage {i+1}: {e}. Using uniform sampling.")
             else:
-                 logger.warning(f"Invalid weights in curriculum stage {i+1}. Using uniform sampling.")
+                 logger.warning(f"Invalid weights (sum too small, NaNs, or empty) in curriculum stage {i+1}. Using uniform sampling.")
 
-
-            dataset = EnhancedASLDataset(stage_X, stage_y)
-            loader = DataLoader(dataset, batch_size=self.batch_size, sampler=sampler, num_workers=num_workers, pin_memory=True, drop_last= (len(stage_X) > self.batch_size) ) # drop_last if more than one batch
+            # Use EnhancedASLDataset which applies augmentations
+            dataset = EnhancedASLDataset(stage_X, stage_y) 
+            loader = DataLoader(dataset, batch_size=self.batch_size, sampler=sampler, 
+                                num_workers=num_workers if num_workers > 0 else 0, # Ensure num_workers >=0
+                                pin_memory=True, drop_last=(len(stage_X) > self.batch_size))
             train_loaders.append(loader)
 
         if not train_loaders:
              logger.error("No training data loaders created. All curriculum stages might be empty.")
-             # Depending on strictness, could raise ValueError or return empty list
-             # return [], None # Or handle as error in main.py
 
-        # Create validation loader
         val_loader = None
         if X_val.shape[0] > 0:
-            val_dataset = EnhancedASLDataset(X_val, y_val) # Use EnhancedASLDataset for val too for consistency in input
-            val_loader = DataLoader(val_dataset, batch_size=self.batch_size, num_workers=num_workers, pin_memory=True, drop_last=False) # No need to drop last for validation
+            val_dataset = EnhancedASLDataset(X_val, y_val) 
+            val_loader = DataLoader(val_dataset, batch_size=self.batch_size, 
+                                    num_workers=num_workers if num_workers > 0 else 0, 
+                                    pin_memory=True, drop_last=False)
         else:
             logger.warning("Validation set is empty. Validation loader will not be created.")
 
-
-        # Initialize schedulers
-        self.schedulers = [] # Reset schedulers
+        self.schedulers = [] 
         if train_loaders:
             total_steps_per_epoch = sum(len(loader) for loader in train_loaders)
             if total_steps_per_epoch > 0 :
                 total_steps = total_steps_per_epoch * n_epochs_for_scheduler
                 for opt_idx, opt in enumerate(self.optimizers):
-                    # Ensure model learning rate is used if optimizer's default LR is not set by Adam.
-                    # Adam's lr parameter sets opt.defaults['lr'].
-                    current_lr = opt.param_groups[0]['lr'] if opt.param_groups else self.models[opt_idx].learning_rate_placeholder # Assuming model has such a placeholder
+                    current_lr = opt.param_groups[0]['lr'] if opt.param_groups else self.learning_rate # Fallback
                     scheduler = OneCycleLR(opt, max_lr=current_lr, total_steps=total_steps)
                     self.schedulers.append(scheduler)
             else:
@@ -484,20 +519,21 @@ class EnhancedASLTrainer:
 
     def train_ensemble(self,
                    train_loaders: List[DataLoader],
-                   val_loader: Optional[DataLoader], # Can be None
+                   val_loader: Optional[DataLoader], 
                    n_epochs: int = 200,
-                   early_stopping_patience: int = 20) -> Dict[str, List[float]]: # Return type changed
+                   early_stopping_patience: int = 20) -> Dict[str, Any]: # Return type changed
         """Train ensemble models with curriculum learning"""
 
         best_val_losses = [float('inf')] * self.n_ensembles
         patience_counters = [0] * self.n_ensembles
-        best_states = [None] * self.n_ensembles # To store state_dict of best model per ensemble member
+        # self.best_states already initialized in __init__
 
-        histories = defaultdict(lambda: defaultdict(list)) # Store train/val loss per model
+        histories = defaultdict(lambda: defaultdict(list)) 
 
         if not train_loaders:
             logger.error("train_loaders is empty. Aborting training.")
-            return histories # Return empty histories
+            return {'final_mean_train_loss': float('nan'), 'final_mean_val_loss': float('nan'), 'all_histories': histories}
+
 
         for stage, train_loader in enumerate(train_loaders):
             logger.info(f"\nStarting curriculum stage {stage + 1}/{len(train_loaders)} with {len(train_loader)} batches.")
@@ -508,66 +544,67 @@ class EnhancedASLTrainer:
             for epoch in range(n_epochs):
                 active_models_in_stage = 0
                 for model_idx in range(self.n_ensembles):
-                    if patience_counters[model_idx] >= early_stopping_patience and best_states[model_idx] is not None:
-                        # This model has already early-stopped in a previous stage or epoch
-                        # Or, if we want to reset patience per stage, remove `and best_states[model_idx] is not None`
-                        continue
+                    # If a model has early stopped (its best_state is saved and patience ran out),
+                    # it might skip further training in this stage or subsequent stages.
+                    # This logic depends on whether patience resets per stage or is global.
+                    # Current: Global patience. If it met patience in a prev stage, it might not train more.
+                    if patience_counters[model_idx] >= early_stopping_patience and self.best_states[model_idx] is not None:
+                        continue 
                     active_models_in_stage +=1
 
                     model = self.models[model_idx]
                     optimizer = self.optimizers[model_idx]
-                    # Scheduler step is per batch, not per epoch for OneCycleLR
-                    # scheduler = self.schedulers[model_idx] # Access scheduler if it exists
-
+                    
                     train_loss = self._train_epoch(model, train_loader, optimizer,
                                                  self.schedulers[model_idx] if self.schedulers and len(self.schedulers) > model_idx else None,
-                                                 epoch, stage, n_epochs) # Pass n_epochs for CustomLoss epoch calculation
+                                                 epoch, stage, n_epochs) 
                     histories[model_idx]['train_losses'].append(train_loss)
 
                     if val_loader:
-                        val_loss = self._validate(model, val_loader, epoch, stage, n_epochs) # Pass n_epochs for CustomLoss
+                        val_loss = self._validate(model, val_loader, epoch, stage, n_epochs)
                         histories[model_idx]['val_losses'].append(val_loss)
 
                         if val_loss < best_val_losses[model_idx]:
                             best_val_losses[model_idx] = val_loss
                             patience_counters[model_idx] = 0
-                            best_states[model_idx] = model.state_dict() # Save best state
-                            # torch.save(model.state_dict(), f'best_model_ensemble_{model_idx}_stage_{stage}.pt') # Optional: save per stage
+                            self.best_states[model_idx] = model.state_dict() # Save best state
                         else:
                             patience_counters[model_idx] += 1
-                    else: # No validation loader
-                        histories[model_idx]['val_losses'].append(float('inf')) # Or some other indicator
+                    else: 
+                        histories[model_idx]['val_losses'].append(float('inf'))
 
 
-                if active_models_in_stage == 0 and epoch > 0: # All models early stopped
-                    logger.info(f"All models early stopped at stage {stage+1}, epoch {epoch+1}. Moving to next stage or finishing.")
-                    break # Break epoch loop for this stage
+                if active_models_in_stage == 0 and epoch > 0: 
+                    logger.info(f"All active models early stopped at stage {stage+1}, epoch {epoch+1}. Moving to next stage or finishing.")
+                    break 
 
                 if (epoch + 1) % 10 == 0:
-                    mean_train_loss_epoch = np.nanmean([h['train_losses'][-1] for h_idx, h in histories.items() if h['train_losses']])
-                    mean_val_loss_epoch = np.nanmean([h['val_losses'][-1] for h_idx, h in histories.items() if h['val_losses'] and h['val_losses'][-1] != float('inf')])
-                    logger.info(f"Stage {stage+1}, Epoch {epoch + 1}: Mean Train Loss = {mean_train_loss_epoch:.6f}, Mean Val Loss = {mean_val_loss_epoch:.6f}")
+                    current_train_losses = [h['train_losses'][-1] for h_idx, h in histories.items() if h['train_losses'] and (patience_counters[h_idx] < early_stopping_patience or self.best_states[h_idx] is None)]
+                    current_val_losses = [h['val_losses'][-1] for h_idx, h in histories.items() if h['val_losses'] and h['val_losses'][-1] != float('inf') and (patience_counters[h_idx] < early_stopping_patience or self.best_states[h_idx] is None)]
+                    
+                    mean_train_loss_epoch = np.nanmean(current_train_losses) if current_train_losses else float('nan')
+                    mean_val_loss_epoch = np.nanmean(current_val_losses) if current_val_losses else float('nan')
+                    logger.info(f"Stage {stage+1}, Epoch {epoch + 1}: Mean Active Train Loss = {mean_train_loss_epoch:.6f}, Mean Active Val Loss = {mean_val_loss_epoch:.6f}")
             
             # Optional: reset patience for each new stage if desired
-            # patience_counters = [0] * self.n_ensembles
+            # patience_counters = [0] * self.n_ensembles # If reset, models train fully on each stage.
 
         # Restore best states found across all epochs and stages for each model
-        for model_idx, state in enumerate(best_states):
+        for model_idx, state in enumerate(self.best_states):
             if state is not None:
                 self.models[model_idx].load_state_dict(state)
                 logger.info(f"Loaded best state for model {model_idx} (Val Loss: {best_val_losses[model_idx]:.4f})")
-            else:
-                logger.warning(f"No best state found for model {model_idx} (possibly no validation or training).")
+            else: # This can happen if no validation was done, or model never improved.
+                logger.warning(f"No best state found for model {model_idx} (Val Loss: {best_val_losses[model_idx]:.4f}). Using final state.")
 
 
-        # For returning, maybe average losses or return all histories
         final_train_losses = [np.nanmean(histories[i]['train_losses']) for i in range(self.n_ensembles) if histories[i]['train_losses']]
-        final_val_losses = [np.nanmean(histories[i]['val_losses']) for i in range(self.n_ensembles) if histories[i]['val_losses'] and histories[i]['val_losses'][-1] != float('inf')]
+        final_val_losses = [best_val_losses[i] for i in range(self.n_ensembles) if best_val_losses[i] != float('inf')]
 
         return {
             'final_mean_train_loss': np.nanmean(final_train_losses) if final_train_losses else float('nan'),
             'final_mean_val_loss': np.nanmean(final_val_losses) if final_val_losses else float('nan'),
-            'all_histories': histories # For detailed analysis
+            'all_histories': histories 
         }
 
 
@@ -575,39 +612,33 @@ class EnhancedASLTrainer:
                     model: torch.nn.Module,
                     train_loader: DataLoader,
                     optimizer: torch.optim.Optimizer,
-                    scheduler: Optional[torch.optim.lr_scheduler._LRScheduler], # Scheduler can be None
-                    epoch: int, # Current epoch within a stage
-                    stage: int, # Current curriculum stage
-                    n_epochs_per_stage: int) -> float: # Total epochs for this stage
-        """Train for one epoch"""
+                    scheduler: Optional[torch.optim.lr_scheduler._LRScheduler], 
+                    epoch: int, 
+                    stage: int, 
+                    n_epochs_per_stage: int) -> float: 
         model.train()
         total_loss = 0.0
-        
-        # Calculate global epoch for CustomLoss or other epoch-dependent logic
-        # This assumes each stage runs for n_epochs_per_stage
-        # If curriculum stages have different epoch counts, this needs adjustment.
-        # For OneCycleLR, scheduler.step() is per batch.
         global_epoch_for_loss = stage * n_epochs_per_stage + epoch
-
 
         for signals, params in train_loader:
             signals = signals.to(self.device)
-            params = params.to(self.device) # params[:,0] is CBF, params[:,1] is ATT
+            params = params.to(self.device) 
 
             optimizer.zero_grad()
-
+            # Model expects (batch, features); if M0 is used, it should be part of `signals`
             cbf_mean, att_mean, cbf_log_var, att_log_var = model(signals)
 
-            loss = CustomLoss()( # Assuming CustomLoss handles epoch-dependent weighting
+            loss = CustomLoss()( 
                 cbf_mean, att_mean,
-                params[:, 0:1], params[:, 1:2], # Ensure targets are (batch, 1)
+                params[:, 0:1], params[:, 1:2], 
                 cbf_log_var, att_log_var,
                 global_epoch_for_loss
             )
 
             loss.backward()
+            torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0) # Gradient clipping
             optimizer.step()
-            if scheduler: # Scheduler steps per batch for OneCycleLR
+            if scheduler: 
                 scheduler.step()
 
             total_loss += loss.item()
@@ -617,14 +648,12 @@ class EnhancedASLTrainer:
     def _validate(self,
                  model: torch.nn.Module,
                  val_loader: DataLoader,
-                 epoch: int, # Current epoch
-                 stage: int, # Current stage
-                 n_epochs_per_stage: int) -> float: # Total epochs for this stage
-        """Validate the model"""
+                 epoch: int, 
+                 stage: int, 
+                 n_epochs_per_stage: int) -> float: 
         model.eval()
         total_loss = 0.0
         global_epoch_for_loss = stage * n_epochs_per_stage + epoch
-
 
         with torch.no_grad():
             for signals, params in val_loader:
@@ -637,7 +666,7 @@ class EnhancedASLTrainer:
                     cbf_mean, att_mean,
                     params[:, 0:1], params[:, 1:2],
                     cbf_log_var, att_log_var,
-                    global_epoch_for_loss # Use consistent epoch for loss calculation
+                    global_epoch_for_loss 
                 )
                 total_loss += loss.item()
 
@@ -646,60 +675,44 @@ class EnhancedASLTrainer:
 
     def predict(self, signals: np.ndarray) -> Tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
         """
-        Make predictions with uncertainty estimation using the ensemble
-
-        Returns
-        -------
-        Tuple containing:
-            - Mean CBF predictions (N,)
-            - Mean ATT predictions (N,)
-            - CBF uncertainties (std dev) (N,)
-            - ATT uncertainties (std dev) (N,)
+        Make predictions with uncertainty estimation using the ensemble.
+        `signals` is a numpy array of shape (N_samples, N_features).
+        If M0 is used by the model, N_features should include M0.
         """
         signals_tensor = torch.FloatTensor(signals).to(self.device)
-        if signals_tensor.ndim == 1: # Single sample
+        if signals_tensor.ndim == 1: 
             signals_tensor = signals_tensor.unsqueeze(0)
 
-
-        all_cbf_means = []
-        all_att_means = []
-        all_cbf_aleatoric_vars = [] # Aleatoric variance from each model
-        all_att_aleatoric_vars = []
-
+        all_cbf_means, all_att_means = [], []
+        all_cbf_aleatoric_vars, all_att_aleatoric_vars = [], []
 
         for model in self.models:
             model.eval()
             with torch.no_grad():
                 cbf_mean, att_mean, cbf_log_var, att_log_var = model(signals_tensor)
-                all_cbf_means.append(cbf_mean.cpu().numpy()) # Shape (N, 1)
-                all_att_means.append(att_mean.cpu().numpy()) # Shape (N, 1)
-                all_cbf_aleatoric_vars.append(torch.exp(cbf_log_var).cpu().numpy()) # Shape (N, 1)
-                all_att_aleatoric_vars.append(torch.exp(att_log_var).cpu().numpy()) # Shape (N, 1)
+                all_cbf_means.append(cbf_mean.cpu().numpy()) 
+                all_att_means.append(att_mean.cpu().numpy()) 
+                all_cbf_aleatoric_vars.append(torch.exp(cbf_log_var).cpu().numpy()) 
+                all_att_aleatoric_vars.append(torch.exp(att_log_var).cpu().numpy())
 
-        # Stack along a new dimension (models) -> (num_models, N, 1)
-        all_cbf_means_np = np.stack(all_cbf_means, axis=0)
-        all_att_means_np = np.stack(all_att_means, axis=0)
-        all_cbf_aleatoric_vars_np = np.stack(all_cbf_aleatoric_vars, axis=0)
-        all_att_aleatoric_vars_np = np.stack(all_att_aleatoric_vars, axis=0)
+        all_cbf_means_np = np.concatenate(all_cbf_means, axis=1) # (N_samples, N_ensemble)
+        all_att_means_np = np.concatenate(all_att_means, axis=1) # (N_samples, N_ensemble)
+        all_cbf_aleatoric_vars_np = np.concatenate(all_cbf_aleatoric_vars, axis=1)
+        all_att_aleatoric_vars_np = np.concatenate(all_att_aleatoric_vars, axis=1)
 
-        # Ensemble mean prediction (average over models) -> (N, 1)
-        ensemble_cbf_mean = np.mean(all_cbf_means_np, axis=0).squeeze(-1) # -> (N,)
-        ensemble_att_mean = np.mean(all_att_means_np, axis=0).squeeze(-1) # -> (N,)
+        ensemble_cbf_mean = np.mean(all_cbf_means_np, axis=1) 
+        ensemble_att_mean = np.mean(all_att_means_np, axis=1) 
 
-        # Aleatoric uncertainty (average of individual model variances) -> (N, 1)
-        mean_aleatoric_cbf_var = np.mean(all_cbf_aleatoric_vars_np, axis=0).squeeze(-1)
-        mean_aleatoric_att_var = np.mean(all_att_aleatoric_vars_np, axis=0).squeeze(-1)
+        mean_aleatoric_cbf_var = np.mean(all_cbf_aleatoric_vars_np, axis=1)
+        mean_aleatoric_att_var = np.mean(all_att_aleatoric_vars_np, axis=1)
 
-        # Epistemic uncertainty (variance of ensemble model means) -> (N, 1)
-        epistemic_cbf_var = np.var(all_cbf_means_np, axis=0).squeeze(-1)
-        epistemic_att_var = np.var(all_att_means_np, axis=0).squeeze(-1)
+        epistemic_cbf_var = np.var(all_cbf_means_np, axis=1)
+        epistemic_att_var = np.var(all_att_means_np, axis=1)
 
-        # Total variance = mean aleatoric + epistemic -> (N, 1)
         total_cbf_var = mean_aleatoric_cbf_var + epistemic_cbf_var
         total_att_var = mean_aleatoric_att_var + epistemic_att_var
 
-        # Return standard deviations
-        total_cbf_std = np.sqrt(total_cbf_var)
-        total_att_std = np.sqrt(total_att_var)
+        total_cbf_std = np.sqrt(np.maximum(total_cbf_var, 0)) # Ensure non-negative before sqrt
+        total_att_std = np.sqrt(np.maximum(total_att_var, 0))
 
         return ensemble_cbf_mean, ensemble_att_mean, total_cbf_std, total_att_std

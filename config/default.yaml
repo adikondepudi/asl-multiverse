@@ -1,41 +1,56 @@
 training:
   batch_size: 256
   learning_rate: 0.001
-  hidden_sizes: [256, 128, 64]
+  hidden_sizes: [256, 128, 64] # For EnhancedASLNet MLP part
   n_epochs: 200
   n_ensembles: 5
   dropout_rate: 0.1
   norm_type: "batch"
+  # New model-specific params for EnhancedASLNet (Transformer part)
+  use_transformer_temporal_model: true
+  transformer_nhead_model: 4
+  transformer_nlayers_model: 2
+  m0_input_feature_model: false # Set to true if M0 is an input feature to EnhancedASLNet
 
 data:
-  n_samples: 20000
+  n_samples: 20000 # Number of base subjects for diverse dataset generation
   val_split: 0.2
-  pld_range: [500, 3001, 500]  # start, end, step
-  att_ranges:
+  pld_values: [500, 1000, 1500, 2000, 2500, 3000] # Explicit list of PLDs in ms
+  att_ranges: # For curriculum learning and evaluation splitting
     - [500, 1500, "Short ATT"]
     - [1500, 2500, "Medium ATT"]
     - [2500, 4000, "Long ATT"]
+  include_m0_in_training_data: false # If true, data pipeline must provide M0
 
+# Model config (legacy, largely superseded by specific params in 'training' for EnhancedASLNet)
+# but might be used by ComprehensiveComparison if it instantiates a model
 model:
-  input_size: 12  # 6 PLDs * 2 (PCASL + VSASL)
-  use_curriculum: true
+  # input_size is now dynamic: len(pld_values) * 2 (+1 if m0_input_feature_model)
+  use_curriculum: true # This is a strategy, not a model param
   early_stopping_patience: 20
 
-simulation:
-  T1_artery: 1850
-  T2_factor: 1
-  alpha_BS1: 1
+simulation: # Base parameters for ASLSimulator/RealisticASLSimulator
+  T1_artery: 1850.0
+  T2_factor: 1.0
+  alpha_BS1: 1.0
   alpha_PCASL: 0.85
   alpha_VSASL: 0.56
-  T_tau: 1800
-  CBF: 60
+  T_tau: 1800.0
+  CBF: 60.0 # Reference CBF, actual CBF varies in diverse dataset
+
+# Optuna specific settings (can be overridden by main.py's ResearchConfig defaults)
+optuna:
+  n_trials: 20
+  timeout_hours: 0.5
+  n_subjects: 500 # Subjects per Optuna trial
+  n_epochs: 20    # Epochs per Optuna trial
 
 logging:
   level: "INFO"
-  log_dir: "logs"
-  save_frequency: 10  # epochs
+  log_dir: "logs" # Relative to main output directory for the run
+  # save_frequency: 10 # epochs (This might be specific to a callback not used here)
 
-paths:
-  model_dir: "models"
-  results_dir: "results"
-  data_dir: "data"
+paths: # These are more like subdirectories within the main run's output folder
+  model_dir: "trained_models"
+  results_dir: "results_data" # e.g. for CSVs, JSONs of detailed metrics
+  data_dir: "generated_datasets" # If datasets are saved to disk
