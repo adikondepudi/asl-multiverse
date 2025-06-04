@@ -41,7 +41,7 @@ The project encompasses:
 ## Directory Structure
 
 ```
-adikondepudi-asl-multiverse/
+asl-multiverse/
 ├── asl_simulation.py                # Core ASL signal generation logic and parameters
 ├── asl_trainer.py                   # Trainers and datasets for NNs (basic and enhanced)
 ├── compare_methods.py               # Standalone Monte Carlo comparison of LS methods
