@@ -86,7 +86,6 @@ class ComprehensiveComparison:
                                use_transformer_temporal=self.nn_use_transformer_temporal,
                                transformer_nlayers=self.nn_transformer_nlayers,
                                transformer_nhead=self.nn_transformer_nhead,
-                               use_transformer_temporal=True,
                                m0_input_feature=self.nn_m0_input_feature)
         model.load_state_dict(torch.load(model_path, map_location=torch.device('cpu')))
         model.eval()

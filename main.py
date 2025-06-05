@@ -42,7 +42,7 @@ class ResearchConfig:
     learning_rate: float = 0.001
     batch_size: int = 256
     n_training_subjects: int = 10000
-    n_epochs: int = 200
+    training_n_epochs: int = 200
     n_ensembles: int = 5
     dropout_rate: float = 0.1
     norm_type: str = 'batch'
@@ -248,14 +248,14 @@ class HyperparameterOptimizer:
             curriculum_att_ranges_config=config.att_ranges_config,
             training_conditions_config=config.training_conditions[:1],
             training_noise_levels_config=config.training_noise_levels[:1],
-            n_epochs_for_scheduler=config.n_epochs,
+            n_epochs_for_scheduler=config.training_n_epochs,
             include_m0_in_data=config.include_m0_in_training_data
         )
         if not train_loaders:
             self.monitor.log_progress("OPTUNA_RUN", "No training data for Optuna trial.", logging.ERROR)
             return None, None, {'val_loss': float('inf')}
         
-        trainer.train_ensemble(train_loaders, val_loader, n_epochs=config.n_epochs, early_stopping_patience=5)
+        trainer.train_ensemble(train_loaders, val_loader, n_epochs=config.training_n_epochs, early_stopping_patience=5)
         
         final_val_metrics = {'val_loss': float('inf')}
         if val_loader and trainer.models and trainer.val_metrics[0]: # Check if val_metrics has data for model 0
@@ -263,7 +263,7 @@ class HyperparameterOptimizer:
         elif val_loader and trainer.models: # Fallback if val_metrics structure is different or empty
             # Try to re-validate to get metrics if val_metrics not populated as expected
              try:
-                final_val_metrics = trainer._validate(trainer.models[0], val_loader, config.n_epochs-1, len(train_loaders)-1, config.n_epochs)
+                final_val_metrics = trainer._validate(trainer.models[0], val_loader, config.training_n_epochs-1, len(train_loaders)-1, config.training_n_epochs)
              except Exception:
                 pass # Keep default float('inf')
 
@@ -523,16 +523,16 @@ def run_comprehensive_asl_research(config: ResearchConfig, output_parent_dir: st
         curriculum_att_ranges_config=config.att_ranges_config,
         training_conditions_config=config.training_conditions,
         training_noise_levels_config=config.training_noise_levels,
-        n_epochs_for_scheduler=config.n_epochs,
+        n_epochs_for_scheduler=config.training_n_epochs,
         include_m0_in_data=config.include_m0_in_training_data
     )
     if not train_loaders:
         monitor.log_progress("PHASE2", "Failed to create training loaders. Aborting.", logging.CRITICAL)
-        if wandb_run: wandb_run.finish(exit_code=1);
+        if wandb_run: wandb_run.finish(exit_code=1)
         return {"error": "Training data preparation failed."}
-    monitor.log_progress("PHASE2", f"Training {config.n_ensembles}-model ensemble for {config.n_epochs} epochs...")
+    monitor.log_progress("PHASE2", f"Training {config.n_ensembles}-model ensemble for {config.training_n_epochs} epochs...")
     training_start_time = time.time()
-    training_histories_dict = trainer.train_ensemble(train_loaders, val_loader, n_epochs=config.n_epochs) # Now contains more metrics
+    training_histories_dict = trainer.train_ensemble(train_loaders, val_loader, n_epochs=config.training_n_epochs) # Now contains more metrics
     training_duration_hours = (time.time() - training_start_time) / 3600
     monitor.log_progress("PHASE2", f"Training completed in {training_duration_hours:.2f} hours.")
     if wandb_run: wandb.summary['training_duration_hours'] = training_duration_hours
