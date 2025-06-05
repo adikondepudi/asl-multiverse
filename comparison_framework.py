@@ -49,7 +49,10 @@ class ComprehensiveComparison:
                  nn_input_size: int = 12,
                  nn_hidden_sizes: Optional[List[int]] = None,
                  nn_n_plds: int = 6,
-                 nn_m0_input_feature: bool = False
+                 nn_m0_input_feature: bool = False,
+                 nn_use_transformer_temporal: bool = True,
+                 nn_transformer_nlayers: int = 2,
+                 nn_transformer_nhead: int = 4
                  ):
         self.output_dir = Path(output_dir)
         self.output_dir.mkdir(parents=True, exist_ok=True)
@@ -57,6 +60,10 @@ class ComprehensiveComparison:
         self.nn_hidden_sizes = nn_hidden_sizes if nn_hidden_sizes is not None else [256, 128, 64]
         self.nn_n_plds = nn_n_plds
         self.nn_m0_input_feature = nn_m0_input_feature
+        self.nn_use_transformer_temporal = nn_use_transformer_temporal
+        self.nn_transformer_nlayers = nn_transformer_nlayers
+        self.nn_transformer_nhead = nn_transformer_nhead
+
 
         if nn_model_path and Path(nn_model_path).exists():
             self.nn_model = self._load_nn_model(nn_model_path)
@@ -73,8 +80,13 @@ class ComprehensiveComparison:
         self.results_list = []
 
     def _load_nn_model(self, model_path: str) -> torch.nn.Module:
-        model = EnhancedASLNet(input_size=self.nn_input_size, hidden_sizes=self.nn_hidden_sizes,
-                               n_plds=self.nn_n_plds, use_transformer_temporal=True,
+        model = EnhancedASLNet(input_size=self.nn_input_size,
+                               hidden_sizes=self.nn_hidden_sizes,
+                               n_plds=self.nn_n_plds,
+                               use_transformer_temporal=self.nn_use_transformer_temporal,
+                               transformer_nlayers=self.nn_transformer_nlayers,
+                               transformer_nhead=self.nn_transformer_nhead,
+                               use_transformer_temporal=True,
                                m0_input_feature=self.nn_m0_input_feature)
         model.load_state_dict(torch.load(model_path, map_location=torch.device('cpu')))
         model.eval()

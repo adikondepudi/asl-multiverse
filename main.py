@@ -567,9 +567,15 @@ def run_comprehensive_asl_research(config: ResearchConfig, output_parent_dir: st
 
     comp_framework_output_dir = output_path / "comparison_framework_outputs"
     comp_framework = ComprehensiveComparison(
-        nn_model_path=nn_model_for_comp_path, output_dir=comp_framework_output_dir,
-        nn_input_size=base_input_size_nn, nn_hidden_sizes=config.hidden_sizes,
-        nn_n_plds=len(plds_np), nn_m0_input_feature=config.m0_input_feature_model
+        nn_model_path=nn_model_for_comp_path,
+        output_dir=comp_framework_output_dir,
+        nn_input_size=base_input_size_nn,
+        nn_hidden_sizes=config.hidden_sizes,
+        nn_n_plds=len(plds_np),
+        nn_m0_input_feature=config.m0_input_feature_model,
+        nn_use_transformer_temporal=config.use_transformer_temporal_model,
+        nn_transformer_nlayers=config.transformer_nlayers_model,
+        nn_transformer_nhead=config.transformer_nhead_model,
     )
     comparison_results_df = comp_framework.compare_methods(benchmark_test_data_for_comp, benchmark_y_all, plds_np, config.att_ranges_config)
     # The visualize_results in comp_framework no longer saves PNGs.
