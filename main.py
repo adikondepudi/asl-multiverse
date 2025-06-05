@@ -208,7 +208,7 @@ class HyperparameterOptimizer:
                 trial_wandb_run.finish()
             
             # Re-initialize the main W&B run if it was active
-            if current_wandb_run_id and wandb.sdk.wandb_run.RUN_ปัจจัย is None : # Check if no active run
+            if current_wandb_run_id and wandb.run is None : # Check if no active run
                 wandb.init(project=current_wandb_project, entity=current_wandb_entity, id=current_wandb_run_id, resume="must")
 
 
@@ -219,7 +219,7 @@ class HyperparameterOptimizer:
                 trial_wandb_run.summary['status'] = 'failed'
                 trial_wandb_run.finish()
             # Re-initialize the main W&B run
-            if current_wandb_run_id and wandb.sdk.wandb_run.RUN_ปัจจัย is None:
+            if current_wandb_run_id and wandb.run is None:
                  wandb.init(project=current_wandb_project, entity=current_wandb_entity, id=current_wandb_run_id, resume="must")
             return float('inf')
 
