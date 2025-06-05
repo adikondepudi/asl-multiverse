@@ -165,7 +165,7 @@ class HyperparameterOptimizer:
         trial_config_dict.update(trial_params_for_wandb)
         trial_config_dict.update({ # Optuna specific overrides
             'n_training_subjects': self.base_config.optuna_n_subjects,
-            'n_epochs': self.base_config.optuna_n_epochs, 'n_ensembles': 1,
+            'training_n_epochs': self.base_config.optuna_n_epochs, 'n_ensembles': 1,
         })
         trial_config = ResearchConfig(**trial_config_dict)
         self.monitor.log_progress("OPTUNA_TRIAL", f"Trial {trial.number}: {trial.params}")
