@@ -318,17 +318,30 @@ class EnhancedASLTrainer:
 
     def prepare_curriculum_data(self,
                                 simulator, # RealisticASLSimulator instance
+                                plds: np.ndarray,
                                 n_training_subjects: int = 10000,
                                 val_split: float = 0.2,
-                                plds: Optional[np.ndarray] = None, # List/array of PLD values
                                 curriculum_att_ranges_config: Optional[List[Tuple[float, float, str]]] = None,
                                 training_conditions_config: Optional[List[str]] = None,
                                 training_noise_levels_config: Optional[List[float]] = None,
                                 n_epochs_for_scheduler: int = 200,
-                                include_m0_in_data: bool = False, # If M0 should be part of generated X
-                                # Augmentation dataset params
-                                dataset_aug_config: Optional[Dict] = None
-                                ) -> Tuple[List[DataLoader], List[Optional[DataLoader]], Optional[Dict]]: # Changed val_loader to List[Optional[DataLoader]]
+                                include_m0_in_data: bool = False,
+                                dataset_aug_config: Optional[Dict] = None,
+                                precomputed_dataset: Optional[Dict] = None # <-- NEW ARGUMENT
+                                ) -> Tuple[List[DataLoader], List[Optional[DataLoader]], Optional[Dict]]:
+        if precomputed_dataset:
+            logger.info("Using pre-computed dataset for training data preparation.")
+            raw_dataset = precomputed_dataset
+        else:
+            # This is the original data generation logic, which now serves as a fallback.
+            logger.info("No pre-computed dataset provided. Generating diverse dataset now...")
+            conditions = training_conditions_config if training_conditions_config is not None else ['healthy', 'stroke', 'tumor', 'elderly']
+            noise_levels = training_noise_levels_config if training_noise_levels_config is not None else [3.0, 5.0, 10.0, 15.0]
+            logger.info(f"Generating diverse training data: {n_training_subjects} base subjects, cond: {conditions}, SNRs: {noise_levels}")
+            raw_dataset = simulator.generate_diverse_dataset(
+                plds=plds, n_subjects=n_training_subjects, conditions=conditions, noise_levels=noise_levels
+            )
+        
         if plds is None: plds = np.arange(500, 3001, 500)
         num_plds_per_modality = len(plds) # Assuming plds refers to one modality's PLDs
 

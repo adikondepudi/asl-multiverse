@@ -710,15 +710,33 @@ def run_comprehensive_asl_research(config: ResearchConfig, output_parent_dir: st
                                  n_plds_for_model=len(plds_np), 
                                  m0_input_feature_model=config.m0_input_feature_model)
     
-    monitor.log_progress("PHASE2", "Preparing curriculum training datasets...")
-    train_loaders, val_loaders, norm_stats_final = trainer.prepare_curriculum_data( # Get norm_stats_final
-        simulator, n_training_subjects=config.n_training_subjects, plds=plds_np,
+    # --- FIX: Generate a balanced dataset with a uniform ATT distribution ---
+    monitor.log_progress("PHASE2", "Generating balanced (uniform ATT) training dataset...")
+    precomputed_training_data = simulator.generate_balanced_dataset(
+        plds=plds_np,
+        total_subjects=config.n_training_subjects,
+        noise_levels=config.training_noise_levels
+    )
+    
+    # Log the mean ATT of the new dataset to verify the fix
+    if 'parameters' in precomputed_training_data and precomputed_training_data['parameters'].size > 0:
+        mean_att_balanced = np.mean(precomputed_training_data['parameters'][:, 1])
+        monitor.log_progress("PHASE2", f"Mean ATT of new balanced dataset: {mean_att_balanced:.2f} ms (Target is ~2250 ms)")
+        if wandb.run:
+            wandb.summary['balanced_dataset_mean_att'] = mean_att_balanced
+            
+    # --- FIX: Pass the pre-generated balanced data to the trainer ---
+    monitor.log_progress("PHASE2", "Preparing curriculum data loaders from balanced dataset...")
+    train_loaders, val_loaders, norm_stats_final = trainer.prepare_curriculum_data(
+        simulator=simulator,  # Still passed for some internal config values
+        plds=plds_np,
+        precomputed_dataset=precomputed_training_data, # <-- PASSING THE NEW DATA
+        # The following arguments are now used by the data processing part of the function
         curriculum_att_ranges_config=config.att_ranges_config,
-        training_conditions_config=config.training_conditions,
-        training_noise_levels_config=config.training_noise_levels,
         n_epochs_for_scheduler=config.training_n_epochs,
         include_m0_in_data=config.include_m0_in_training_data
     )
+
     if norm_stats_final: 
         norm_stats_path = output_path / 'norm_stats.json'
         serializable_norm_stats = {k: (v.tolist() if isinstance(v, np.ndarray) else v) for k, v in norm_stats_final.items()}
