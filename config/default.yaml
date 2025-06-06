@@ -39,10 +39,14 @@ data:
     - [2500, 4000, "Long ATT"]
   include_m0_in_training_data: false
 
-simulation: 
-  T1_artery: 1850.0; T2_factor: 1.0; alpha_BS1: 1.0
-  alpha_PCASL: 0.85; alpha_VSASL: 0.56; T_tau: 1800.0
-  reference_CBF: 60.0 # Renamed from CBF for clarity
+simulation:
+  T1_artery: 1850.0
+  T2_factor: 1.0
+  alpha_BS1: 1.0
+  alpha_PCASL: 0.85
+  alpha_VSASL: 0.56
+  T_tau: 1800.0
+  reference_CBF: 60.0
 
 optuna:
   optuna_n_trials: 20 # Renamed for clarity

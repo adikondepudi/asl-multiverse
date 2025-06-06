@@ -286,7 +286,35 @@ class HyperparameterOptimizer:
         }
 
         def create_hpo_model(**kwargs_from_trainer): # Closure to capture trial_model_config
-            return EnhancedASLNet(input_size=base_nn_input_size, **kwargs_from_trainer).to(device)
+            # Map config keys to EnhancedASLNet constructor parameter names
+            # and select only valid parameters for the model.
+            net_params_map = {
+                'use_transformer_temporal_model': 'use_transformer_temporal',
+                'use_focused_transformer_model': 'use_focused_transformer',
+                'transformer_nhead_model': 'transformer_nhead',
+                'transformer_nlayers_model': 'transformer_nlayers',
+                'm0_input_feature_model': 'm0_input_feature',
+            }
+            # Parameters that have direct name match or are always needed from config
+            ENHANCED_ASL_NET_DIRECT_PARAMS = [
+                'hidden_sizes', 'n_plds', 'dropout_rate', 'norm_type',
+                'transformer_d_model', 'transformer_d_model_focused',
+                'log_var_cbf_min', 'log_var_cbf_max',
+                'log_var_att_min', 'log_var_att_max'
+            ]
+            
+            model_specific_kwargs = {}
+            # Apply mapping for keys that differ
+            for config_key, net_key in net_params_map.items():
+                if config_key in kwargs_from_trainer:
+                    model_specific_kwargs[net_key] = kwargs_from_trainer[config_key]
+            
+            # Add directly named parameters
+            for param_key in ENHANCED_ASL_NET_DIRECT_PARAMS:
+                if param_key in kwargs_from_trainer:
+                    model_specific_kwargs[param_key] = kwargs_from_trainer[param_key]
+            
+            return EnhancedASLNet(input_size=base_nn_input_size, **model_specific_kwargs).to(device)
 
         trainer_obj = EnhancedASLTrainer(model_config=trial_model_config, 
                                      model_class=create_hpo_model, 
@@ -563,7 +591,8 @@ class PublicationGenerator: # No major changes needed here based on plan, alread
     def _generate_performance_table_csv(self, comparison_df: pd.DataFrame) -> str: # Existing
         if comparison_df.empty: return ""
         cols_to_show = ['method', 'att_range_name', 'cbf_nbias_perc', 'cbf_cov', 'cbf_nrmse_perc', 
-                        'att_nbias_perc', 'att_cov', 'att_nrmse_perc', 'success_rate', 'computation_time']
+                        'att_nbias_perc', 'att_cov', 'att_nrmse_perc', 'success_rate', 'computation_time'
+        ]
         existing_cols = [col for col in cols_to_show if col in comparison_df.columns]
         summary_df = comparison_df[existing_cols]
         table_path = self.output_dir / 'benchmark_performance_summary.csv'
@@ -654,7 +683,35 @@ def run_comprehensive_asl_research(config: ResearchConfig, output_parent_dir: st
     }
 
     def create_main_model_closure(**kwargs_from_trainer):
-        return EnhancedASLNet(input_size=base_input_size_nn, **kwargs_from_trainer).to(device)
+        # Map config keys to EnhancedASLNet constructor parameter names
+        # and select only valid parameters for the model.
+        net_params_map = {
+            'use_transformer_temporal_model': 'use_transformer_temporal',
+            'use_focused_transformer_model': 'use_focused_transformer',
+            'transformer_nhead_model': 'transformer_nhead',
+            'transformer_nlayers_model': 'transformer_nlayers',
+            'm0_input_feature_model': 'm0_input_feature',
+        }
+        # Parameters that have direct name match or are always needed from config
+        ENHANCED_ASL_NET_DIRECT_PARAMS = [
+            'hidden_sizes', 'n_plds', 'dropout_rate', 'norm_type',
+            'transformer_d_model', 'transformer_d_model_focused',
+            'log_var_cbf_min', 'log_var_cbf_max',
+            'log_var_att_min', 'log_var_att_max'
+        ]
+        
+        model_specific_kwargs = {}
+        # Apply mapping for keys that differ
+        for config_key, net_key in net_params_map.items():
+            if config_key in kwargs_from_trainer:
+                model_specific_kwargs[net_key] = kwargs_from_trainer[config_key]
+        
+        # Add directly named parameters
+        for param_key in ENHANCED_ASL_NET_DIRECT_PARAMS:
+            if param_key in kwargs_from_trainer:
+                model_specific_kwargs[param_key] = kwargs_from_trainer[param_key]
+
+        return EnhancedASLNet(input_size=base_input_size_nn, **model_specific_kwargs).to(device)
 
     trainer = EnhancedASLTrainer(model_config=model_creation_config, 
                                  model_class=create_main_model_closure, 
