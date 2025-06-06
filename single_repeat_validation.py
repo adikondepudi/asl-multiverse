@@ -8,6 +8,7 @@ import numpy as np
 import torch
 from typing import Dict, Tuple, Optional, List 
 from pathlib import Path 
+import inspect # Added for the fix
 
 from enhanced_asl_network import EnhancedASLNet
 from enhanced_simulation import RealisticASLSimulator, ASLParameters
@@ -70,11 +71,17 @@ class SingleRepeatValidator:
             logger.info("No trained model path provided. NN predictions will be NaN.")
 
     def _load_trained_model(self, model_path: str) -> Optional[EnhancedASLNet]:
+        # FIX: Filter the config dictionary to only pass valid arguments to EnhancedASLNet
+        model_param_keys = inspect.signature(EnhancedASLNet).parameters.keys()
+        filtered_arch_config = {
+            key: self.nn_model_arch_config[key]
+            for key in self.nn_model_arch_config if key in model_param_keys
+        }
+
         model = EnhancedASLNet(
-            input_size=self.base_nn_input_size, # Base size (num_plds*2)
-            # Unpack the rest of the architecture config
-            **self.nn_model_arch_config 
-            )
+            input_size=self.base_nn_input_size,
+            **filtered_arch_config
+        )
         try:
             model.load_state_dict(torch.load(model_path, map_location=torch.device('cpu')))
             model.eval()

@@ -10,6 +10,7 @@ from scipy import stats
 from dataclasses import dataclass, asdict
 import json
 import wandb # Added for potential W&B artifact logging
+import inspect # Added for the fix
 
 from vsasl_functions import fit_VSASL_vectInit_pep
 from pcasl_functions import fit_PCASL_vectInit_pep
@@ -109,9 +110,13 @@ class ComprehensiveComparison:
 
     def _load_nn_model(self, model_path: str) -> torch.nn.Module:
         if self.nn_model_arch_config:
-            # EnhancedASLNet's input_size is the base size (num_plds*2)
-            # It internally handles m0_input_feature from its config.
-            model = EnhancedASLNet(input_size=self.base_nn_input_size, **self.nn_model_arch_config)
+            # FIX: Filter the config dictionary to only pass valid arguments to EnhancedASLNet
+            model_param_keys = inspect.signature(EnhancedASLNet).parameters.keys()
+            filtered_arch_config = {
+                key: self.nn_model_arch_config[key]
+                for key in self.nn_model_arch_config if key in model_param_keys
+            }
+            model = EnhancedASLNet(input_size=self.base_nn_input_size, **filtered_arch_config)
         else: # Fallback to individual parameters
             logger.warning("Loading NN model using individual parameters as nn_model_arch_config not provided.")
             model = EnhancedASLNet(input_size=self.base_nn_input_size,
