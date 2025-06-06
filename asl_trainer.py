@@ -333,8 +333,9 @@ class EnhancedASLTrainer:
             logger.info("Using pre-computed dataset for training data preparation.")
             raw_dataset = precomputed_dataset
         else:
-            # This is the original data generation logic, which now serves as a fallback.
+            # This logic now ONLY runs if precomputed_dataset is None.
             logger.info("No pre-computed dataset provided. Generating diverse dataset now...")
+            if plds is None: plds = np.arange(500, 3001, 500)
             conditions = training_conditions_config if training_conditions_config is not None else ['healthy', 'stroke', 'tumor', 'elderly']
             noise_levels = training_noise_levels_config if training_noise_levels_config is not None else [3.0, 5.0, 10.0, 15.0]
             logger.info(f"Generating diverse training data: {n_training_subjects} base subjects, cond: {conditions}, SNRs: {noise_levels}")
@@ -345,13 +346,15 @@ class EnhancedASLTrainer:
         if plds is None: plds = np.arange(500, 3001, 500)
         num_plds_per_modality = len(plds) # Assuming plds refers to one modality's PLDs
 
-        conditions = training_conditions_config if training_conditions_config is not None else ['healthy', 'stroke', 'tumor', 'elderly']
-        noise_levels = training_noise_levels_config if training_noise_levels_config is not None else [3.0, 5.0, 10.0, 15.0]
-        logger.info(f"Generating diverse training data: {n_training_subjects} base subjects, cond: {conditions}, SNRs: {noise_levels}")
+        # erroneous code
+        # conditions = training_conditions_config if training_conditions_config is not None else ['healthy', 'stroke', 'tumor', 'elderly']
+        # noise_levels = training_noise_levels_config if training_noise_levels_config is not None else [3.0, 5.0, 10.0, 15.0]
+        # logger.info(f"Generating diverse training data: {n_training_subjects} base subjects, cond: {conditions}, SNRs: {noise_levels}")
 
-        raw_dataset = simulator.generate_diverse_dataset(
-            plds=plds, n_subjects=n_training_subjects, conditions=conditions, noise_levels=noise_levels
-        )
+        # raw_dataset = simulator.generate_diverse_dataset(
+        #     plds=plds, n_subjects=n_training_subjects, conditions=conditions, noise_levels=noise_levels
+        # )
+
         X_all_asl_raw, y_all_raw = raw_dataset['signals'], raw_dataset['parameters'] # X_all_asl_raw is (N, num_plds*2)
 
         # --- Phase 2, Item 2.1: Per-Modality Input Normalization & Target Normalization ---
