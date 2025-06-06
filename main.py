@@ -109,20 +109,20 @@ def apply_normalization_to_input_flat(flat_signal: np.ndarray,
                                       norm_stats: Dict, 
                                       num_plds_per_modality: int, 
                                       has_m0: bool) -> np.ndarray:
-    if not norm_stats: return flat_signal 
+    if not norm_stats or not isinstance(norm_stats, dict): return flat_signal 
 
     pcasl_signal_part = flat_signal[:num_plds_per_modality]
     vsasl_signal_part = flat_signal[num_plds_per_modality : num_plds_per_modality*2]
     
-    pcasl_norm = (pcasl_signal_part - norm_stats['pcasl_mean']) / norm_stats['pcasl_std']
-    vsasl_norm = (vsasl_signal_part - norm_stats['vsasl_mean']) / norm_stats['vsasl_std']
+    pcasl_norm = (pcasl_signal_part - norm_stats.get('pcasl_mean', 0)) / norm_stats.get('pcasl_std', 1)
+    vsasl_norm = (vsasl_signal_part - norm_stats.get('vsasl_mean', 0)) / norm_stats.get('vsasl_std', 1)
     
     normalized_parts = [pcasl_norm, vsasl_norm]
     
     if has_m0:
         m0_signal_part = flat_signal[num_plds_per_modality*2:] # Assumes M0 is at the end
         if m0_signal_part.size > 0 : # Ensure M0 part exists
-            m0_norm = (m0_signal_part - norm_stats['m0_mean']) / norm_stats['m0_std']
+            m0_norm = (m0_signal_part - norm_stats.get('m0_mean', 0)) / norm_stats.get('m0_std', 1)
             normalized_parts.append(m0_norm)
         else: # Should not happen if has_m0 is true and data is consistent
             script_logger.warning("has_m0 is true, but M0 part is missing in flat_signal for normalization.")
@@ -254,8 +254,8 @@ class HyperparameterOptimizer:
             return float('inf') # Prune failed trials
         finally: # Ensure main W&B run is restored if it was active
             if self.main_wandb_run_id and (wandb.run is None or wandb.run.id != self.main_wandb_run_id):
-                wandb.init(project=self.main_wandb_project, entity=self.main_wandb_entity, 
-                           id=self.main_wandb_run_id, resume="must", quiet=True)
+                wandb.init(project=self.main_wandb_project, entity=self.main_wandb_entity,
+                           id=self.main_wandb_run_id, resume="must") # Removed quiet=True
 
 
     def _quick_training_run(self, config_obj: ResearchConfig) -> Tuple[Any, Any, Dict[str, float]]:
@@ -281,11 +281,12 @@ class HyperparameterOptimizer:
             'log_var_att_min': config_obj.log_var_att_min, 'log_var_att_max': config_obj.log_var_att_max,
             'loss_weight_cbf': config_obj.loss_weight_cbf, 
             'loss_weight_att': config_obj.loss_weight_att,
-            'loss_log_var_reg_lambda': config_obj.loss_log_var_reg_lambda
+            'loss_log_var_reg_lambda': config_obj.loss_log_var_reg_lambda,
+            'n_plds': len(plds_numpy_arr) # Add n_plds to model_config
         }
 
-        def create_hpo_model(): # Closure to capture trial_model_config
-            return EnhancedASLNet(input_size=base_nn_input_size, **trial_model_config).to(device)
+        def create_hpo_model(**kwargs_from_trainer): # Closure to capture trial_model_config
+            return EnhancedASLNet(input_size=base_nn_input_size, **kwargs_from_trainer).to(device)
 
         trainer_obj = EnhancedASLTrainer(model_config=trial_model_config, 
                                      model_class=create_hpo_model, 
@@ -617,9 +618,9 @@ def run_comprehensive_asl_research(config: ResearchConfig, output_parent_dir: st
         optimizer = HyperparameterOptimizer(config, monitor, output_path) # Pass output_path for saving study
         best_optuna_params = optimizer.optimize()
         if best_optuna_params:
-            config.hidden_sizes = best_optuna_params.get('hidden_size_1', config.hidden_sizes[0]), \
-                                  best_optuna_params.get('hidden_size_2', config.hidden_sizes[1]), \
-                                  best_optuna_params.get('hidden_size_3', config.hidden_sizes[2])
+            config.hidden_sizes = [best_optuna_params.get('hidden_size_1', config.hidden_sizes[0]),
+                                   best_optuna_params.get('hidden_size_2', config.hidden_sizes[1]),
+                                   best_optuna_params.get('hidden_size_3', config.hidden_sizes[2])]
             config.learning_rate = best_optuna_params.get('learning_rate', config.learning_rate)
             config.dropout_rate = best_optuna_params.get('dropout_rate', config.dropout_rate)
             config.batch_size = best_optuna_params.get('batch_size', config.batch_size)
@@ -648,11 +649,12 @@ def run_comprehensive_asl_research(config: ResearchConfig, output_parent_dir: st
         'log_var_att_min': config.log_var_att_min, 'log_var_att_max': config.log_var_att_max,
         'loss_weight_cbf': config.loss_weight_cbf, 
         'loss_weight_att': config.loss_weight_att,
-        'loss_log_var_reg_lambda': config.loss_log_var_reg_lambda
+        'loss_log_var_reg_lambda': config.loss_log_var_reg_lambda,
+        'n_plds': len(plds_np) # Add n_plds to model_creation_config
     }
 
-    def create_main_model_closure():
-        return EnhancedASLNet(input_size=base_input_size_nn, **model_creation_config).to(device)
+    def create_main_model_closure(**kwargs_from_trainer):
+        return EnhancedASLNet(input_size=base_input_size_nn, **kwargs_from_trainer).to(device)
 
     trainer = EnhancedASLTrainer(model_config=model_creation_config, 
                                  model_class=create_main_model_closure, 
@@ -711,10 +713,10 @@ def run_comprehensive_asl_research(config: ResearchConfig, output_parent_dir: st
 
     _, single_repeat_val_metrics = run_single_repeat_validation_main(
         model_path=srs_model_path,
-        nn_config_for_model_load=nn_config_srs,
-        num_plds_per_modality_for_norm=len(plds_np),
-        m0_feature_for_norm=config.m0_input_feature_model,
-        norm_stats_for_nn=norm_stats
+        base_nn_input_size_for_model_load=base_input_size_nn, # Added
+        nn_arch_config_for_model_load=nn_config_srs, # Renamed for clarity
+        # num_plds_per_modality_for_norm and m0_feature_for_norm can be derived from nn_config_srs inside
+        norm_stats_for_nn=norm_stats # Pass norm_stats
     )
     if srs_model_path and temp_srs_model_path.exists(): temp_srs_model_path.unlink()
 
@@ -757,11 +759,11 @@ def run_comprehensive_asl_research(config: ResearchConfig, output_parent_dir: st
     comp_framework = ComprehensiveComparison(
         nn_model_path=nn_model_for_comp_path,
         output_dir=str(comp_framework_output_dir), # Ensure it's string
-        nn_input_size=base_input_size_nn,
+        base_nn_input_size=base_input_size_nn, # Pass base_nn_input_size
         nn_n_plds=len(plds_np),
         nn_m0_input_feature=config.m0_input_feature_model,
-        nn_model_arch_config=model_creation_config, # Pass the full arch config
-        norm_stats=norm_stats 
+        nn_model_arch_config=model_creation_config, 
+        norm_stats=norm_stats
     )
     comparison_results_df = comp_framework.compare_methods(benchmark_test_data_for_comp, benchmark_y_all, plds_np, config.att_ranges_config)
     if nn_model_for_comp_path and temp_comp_model_save_path.exists(): temp_comp_model_save_path.unlink() # Clean up temp model

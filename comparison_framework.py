@@ -21,6 +21,28 @@ logger = logging.getLogger(__name__)
 if not logger.hasHandlers():
     logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(name)s - %(levelname)s - %(message)s')
 
+# Helper function for normalization (can be moved to a utils.py later)
+def apply_normalization_to_input_flat(flat_signal: np.ndarray,
+                                      norm_stats: Dict,
+                                      num_plds_per_modality: int,
+                                      has_m0: bool) -> np.ndarray:
+    if not norm_stats or not isinstance(norm_stats, dict): return flat_signal
+
+    pcasl_signal_part = flat_signal[:num_plds_per_modality]
+    vsasl_signal_part = flat_signal[num_plds_per_modality : num_plds_per_modality*2]
+
+    pcasl_norm = (pcasl_signal_part - norm_stats.get('pcasl_mean', 0)) / norm_stats.get('pcasl_std', 1)
+    vsasl_norm = (vsasl_signal_part - norm_stats.get('vsasl_mean', 0)) / norm_stats.get('vsasl_std', 1)
+
+    normalized_parts = [pcasl_norm, vsasl_norm]
+
+    if has_m0:
+        m0_signal_part = flat_signal[num_plds_per_modality*2:] # Assumes M0 is at the end
+        if m0_signal_part.size > 0 : # Ensure M0 part exists
+            m0_norm = (m0_signal_part - norm_stats.get('m0_mean', 0)) / norm_stats.get('m0_std', 1)
+            normalized_parts.append(m0_norm)
+
+    return np.concatenate(normalized_parts)
 
 @dataclass
 class ComparisonResult:
@@ -46,17 +68,23 @@ class ComprehensiveComparison:
     def __init__(self,
                  nn_model_path: Optional[str] = None,
                  output_dir: str = 'comparison_results',
-                 nn_input_size: int = 12,
+                 base_nn_input_size: int = 12, # Renamed from nn_input_size for clarity
                  nn_hidden_sizes: Optional[List[int]] = None,
                  nn_n_plds: int = 6,
                  nn_m0_input_feature: bool = False,
                  nn_use_transformer_temporal: bool = True,
                  nn_transformer_nlayers: int = 2,
-                 nn_transformer_nhead: int = 4
+                 nn_transformer_nhead: int = 4,
+                 nn_model_arch_config: Optional[Dict] = None, # Added
+                 norm_stats: Optional[Dict] = None # Added
                  ):
         self.output_dir = Path(output_dir)
         self.output_dir.mkdir(parents=True, exist_ok=True)
-        self.nn_input_size = nn_input_size
+        self.base_nn_input_size = base_nn_input_size # This is num_plds * 2
+        self.nn_model_arch_config = nn_model_arch_config
+        self.norm_stats = norm_stats
+
+        # These are fallbacks if nn_model_arch_config is not provided
         self.nn_hidden_sizes = nn_hidden_sizes if nn_hidden_sizes is not None else [256, 128, 64]
         self.nn_n_plds = nn_n_plds
         self.nn_m0_input_feature = nn_m0_input_feature
@@ -80,13 +108,19 @@ class ComprehensiveComparison:
         self.results_list = []
 
     def _load_nn_model(self, model_path: str) -> torch.nn.Module:
-        model = EnhancedASLNet(input_size=self.nn_input_size,
-                               hidden_sizes=self.nn_hidden_sizes,
-                               n_plds=self.nn_n_plds,
-                               use_transformer_temporal=self.nn_use_transformer_temporal,
-                               transformer_nlayers=self.nn_transformer_nlayers,
-                               transformer_nhead=self.nn_transformer_nhead,
-                               m0_input_feature=self.nn_m0_input_feature)
+        if self.nn_model_arch_config:
+            # EnhancedASLNet's input_size is the base size (num_plds*2)
+            # It internally handles m0_input_feature from its config.
+            model = EnhancedASLNet(input_size=self.base_nn_input_size, **self.nn_model_arch_config)
+        else: # Fallback to individual parameters
+            logger.warning("Loading NN model using individual parameters as nn_model_arch_config not provided.")
+            model = EnhancedASLNet(input_size=self.base_nn_input_size,
+                                   hidden_sizes=self.nn_hidden_sizes,
+                                   n_plds=self.nn_n_plds,
+                                   use_transformer_temporal=self.nn_use_transformer_temporal,
+                                   transformer_nlayers=self.nn_transformer_nlayers,
+                                   transformer_nhead=self.nn_transformer_nhead,
+                                   m0_input_feature=self.nn_m0_input_feature)
         model.load_state_dict(torch.load(model_path, map_location=torch.device('cpu')))
         model.eval()
         return model
@@ -210,9 +244,21 @@ class ComprehensiveComparison:
     def _evaluate_neural_network(self, nn_input_arr: np.ndarray, true_params_arr: np.ndarray, plds_arr: np.ndarray, range_name_str: str) -> List[ComparisonResult]:
         if self.nn_model is None or nn_input_arr.shape[0] == 0: return []
         logger.info("  Evaluating Neural Network...")
-        if self.nn_m0_input_feature and nn_input_arr.shape[1] != (self.nn_n_plds * 2 + 1):
-            logger.error(f"NN expects M0, but input has {nn_input_arr.shape[1]} features. Expected {self.nn_n_plds*2+1}.")
+
+        current_m0_feature_flag = self.nn_model_arch_config.get('m0_input_feature', self.nn_m0_input_feature) if self.nn_model_arch_config else self.nn_m0_input_feature
+        current_n_plds = self.nn_model_arch_config.get('n_plds', self.nn_n_plds) if self.nn_model_arch_config else self.nn_n_plds
+
+        if current_m0_feature_flag and nn_input_arr.shape[1] != (current_n_plds * 2 + 1):
+            logger.error(f"NN expects M0, but input has {nn_input_arr.shape[1]} features. Expected {current_n_plds*2+1}.")
             return []
+
+        # Apply normalization if norm_stats are available
+        if self.norm_stats:
+            normalized_nn_input_arr = np.array([
+                apply_normalization_to_input_flat(sig, self.norm_stats, current_n_plds, current_m0_feature_flag)
+                for sig in nn_input_arr])
+            nn_input_arr = normalized_nn_input_arr
+
         input_tensor = torch.FloatTensor(nn_input_arr)
         start_time = time.time()
         with torch.no_grad(): cbf_pred, att_pred, cbf_log_var, att_log_var = self.nn_model(input_tensor)
@@ -227,10 +273,21 @@ class ComprehensiveComparison:
     def _evaluate_hybrid(self, multiverse_ls_signals: np.ndarray, nn_input_signals: np.ndarray, true_params_arr: np.ndarray, plds_arr: np.ndarray, range_name_str: str) -> List[ComparisonResult]:
         if self.nn_model is None or nn_input_signals.shape[0] == 0: return []
         logger.info("  Evaluating Hybrid approach...")
+
+        current_m0_feature_flag = self.nn_model_arch_config.get('m0_input_feature', self.nn_m0_input_feature) if self.nn_model_arch_config else self.nn_m0_input_feature
+        current_n_plds = self.nn_model_arch_config.get('n_plds', self.nn_n_plds) if self.nn_model_arch_config else self.nn_n_plds
+
+        # Apply normalization to NN input signals for hybrid initialization
+        if self.norm_stats:
+            normalized_nn_input_signals = np.array([
+                apply_normalization_to_input_flat(sig, self.norm_stats, current_n_plds, current_m0_feature_flag)
+                for sig in nn_input_signals])
+            nn_input_signals = normalized_nn_input_signals
+
         input_tensor = torch.FloatTensor(nn_input_signals)
         with torch.no_grad(): cbf_init_nn, att_init_nn, _, _ = self.nn_model(input_tensor)
         cbf_init_ls, att_init_ls = cbf_init_nn.numpy().squeeze()/6000.0, att_init_nn.numpy().squeeze()
-        n_samples = multiverse_ls_signals.shape[0]; successes = 0
+        n_samples = multiverse_ls_signals.shape[0]; successes = 0 # Ensure n_samples is defined for this loop
         cbf_estimates, att_estimates, fit_times = [], [], []
         pldti = np.column_stack([plds_arr, plds_arr])
         for i in range(n_samples):
