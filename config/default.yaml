@@ -1,7 +1,7 @@
 training:
   batch_size: 256
   learning_rate: 0.001
-  weight_decay: 1e-5 # Added weight_decay
+  weight_decay: 0.00001 # Added weight_decay
   hidden_sizes: [256, 128, 64] 
   training_n_epochs: 200
   n_ensembles: 5

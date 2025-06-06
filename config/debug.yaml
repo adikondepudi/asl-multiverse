@@ -14,7 +14,7 @@ training:
   # Ensure these are on for the test
   loss_weight_cbf: 1.0
   loss_weight_att: 1.0
-  weight_decay: 1e-4       # Make sure your new regularization is active
+  weight_decay: 0.0001       # Make sure your new regularization is active
 
   # Keep other training params from default or specify if needed for debug
   learning_rate: 0.001 
