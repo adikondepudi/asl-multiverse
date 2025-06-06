@@ -618,9 +618,16 @@ class EnhancedASLTrainer:
 
                 # Log mean metrics for the epoch across active models for this stage
                 if wandb.run:
-                    mean_epoch_train_loss = np.nanmean(epoch_train_losses_agg) if epoch_train_losses_agg else float('nan')
+                    mean_epoch_train_loss = np.nanmean(epoch_train_losses_all_models) if epoch_train_losses_all_models else float('nan')
                     wandb.log({f'Epoch_Stage{stage_idx}/Mean_Train_Loss': mean_epoch_train_loss, 'epoch_global': self.global_step, 'epoch_stage': epoch})
-                    if current_val_loader and len(current_val_loader) > 0 and epoch_val_metrics_agg:
+                    if current_val_loader and len(current_val_loader) > 0 and epoch_val_metrics_all_models:
+                        # Aggregate validation metrics from the list of dicts
+                        epoch_val_metrics_agg = defaultdict(list)
+                        for model_metrics in epoch_val_metrics_all_models:
+                            for metric_name, value in model_metrics.items():
+                                epoch_val_metrics_agg[metric_name].append(value)
+                        
+                        # Now log the aggregated metrics
                         for metric_name, values_list in epoch_val_metrics_agg.items():
                             mean_val_metric = np.nanmean(values_list) if values_list else float('nan')
                             wandb.log({f'Epoch_Stage{stage_idx}/Mean_Val_{metric_name.capitalize()}': mean_val_metric, 'epoch_global': self.global_step, 'epoch_stage': epoch})
