@@ -45,6 +45,41 @@ def apply_normalization_to_input_flat(flat_signal: np.ndarray,
 
     return np.concatenate(normalized_parts)
 
+def denormalize_predictions(cbf_pred_norm: np.ndarray, att_pred_norm: np.ndarray,
+                            cbf_log_var_norm: Optional[np.ndarray], att_log_var_norm: Optional[np.ndarray],
+                            norm_stats: Dict) -> Tuple[np.ndarray, np.ndarray, Optional[np.ndarray], Optional[np.ndarray]]:
+    if not norm_stats:
+        logger.warning("No norm_stats provided for de-normalization. Returning predictions as is.")
+        cbf_unc_std_denorm = np.exp(cbf_log_var_norm / 2.0) if cbf_log_var_norm is not None else None
+        att_unc_std_denorm = np.exp(att_log_var_norm / 2.0) if att_log_var_norm is not None else None
+        return cbf_pred_norm, att_pred_norm, cbf_unc_std_denorm, att_unc_std_denorm
+
+    y_mean_cbf = norm_stats.get('y_mean_cbf', 0.0)
+    y_std_cbf = norm_stats.get('y_std_cbf', 1.0)
+    if y_std_cbf < 1e-6: y_std_cbf = 1.0
+    
+    y_mean_att = norm_stats.get('y_mean_att', 0.0)
+    y_std_att = norm_stats.get('y_std_att', 1.0)
+    if y_std_att < 1e-6: y_std_att = 1.0
+
+    cbf_pred_denorm = cbf_pred_norm * y_std_cbf + y_mean_cbf
+    att_pred_denorm = att_pred_norm * y_std_att + y_mean_att
+
+    cbf_unc_std_denorm = None
+    if cbf_log_var_norm is not None:
+        # Var(aX+b) = a^2 Var(X). So Std(aX+b) = |a| Std(X)
+        # cbf_log_var_norm is log(Var_norm), so exp(cbf_log_var_norm) is Var_norm
+        # Std_norm = sqrt(exp(cbf_log_var_norm)) = exp(cbf_log_var_norm / 2.0)
+        # Std_denorm = Std_norm * y_std_cbf
+        cbf_unc_std_denorm = np.exp(cbf_log_var_norm / 2.0) * y_std_cbf
+        
+    att_unc_std_denorm = None
+    if att_log_var_norm is not None:
+        att_unc_std_denorm = np.exp(att_log_var_norm / 2.0) * y_std_att
+        
+    return cbf_pred_denorm, att_pred_denorm, cbf_unc_std_denorm, att_unc_std_denorm
+
+
 @dataclass
 class ComparisonResult:
     method: str
@@ -69,23 +104,22 @@ class ComprehensiveComparison:
     def __init__(self,
                  nn_model_path: Optional[str] = None,
                  output_dir: str = 'comparison_results',
-                 base_nn_input_size: int = 12, # Renamed from nn_input_size for clarity
+                 base_nn_input_size: int = 12, 
                  nn_hidden_sizes: Optional[List[int]] = None,
                  nn_n_plds: int = 6,
                  nn_m0_input_feature: bool = False,
                  nn_use_transformer_temporal: bool = True,
                  nn_transformer_nlayers: int = 2,
                  nn_transformer_nhead: int = 4,
-                 nn_model_arch_config: Optional[Dict] = None, # Added
-                 norm_stats: Optional[Dict] = None # Added
+                 nn_model_arch_config: Optional[Dict] = None, 
+                 norm_stats: Optional[Dict] = None 
                  ):
         self.output_dir = Path(output_dir)
         self.output_dir.mkdir(parents=True, exist_ok=True)
-        self.base_nn_input_size = base_nn_input_size # This is num_plds * 2
+        self.base_nn_input_size = base_nn_input_size 
         self.nn_model_arch_config = nn_model_arch_config
-        self.norm_stats = norm_stats
+        self.norm_stats = norm_stats # Store norm_stats for de-normalizing predictions
 
-        # These are fallbacks if nn_model_arch_config is not provided
         self.nn_hidden_sizes = nn_hidden_sizes if nn_hidden_sizes is not None else [256, 128, 64]
         self.nn_n_plds = nn_n_plds
         self.nn_m0_input_feature = nn_m0_input_feature
@@ -109,23 +143,26 @@ class ComprehensiveComparison:
         self.results_list = []
 
     def _load_nn_model(self, model_path: str) -> torch.nn.Module:
+        model_params_to_use = {}
         if self.nn_model_arch_config:
-            # FIX: Filter the config dictionary to only pass valid arguments to EnhancedASLNet
             model_param_keys = inspect.signature(EnhancedASLNet).parameters.keys()
             filtered_arch_config = {
                 key: self.nn_model_arch_config[key]
                 for key in self.nn_model_arch_config if key in model_param_keys
             }
-            model = EnhancedASLNet(input_size=self.base_nn_input_size, **filtered_arch_config)
-        else: # Fallback to individual parameters
+            model_params_to_use = filtered_arch_config
+        else: 
             logger.warning("Loading NN model using individual parameters as nn_model_arch_config not provided.")
-            model = EnhancedASLNet(input_size=self.base_nn_input_size,
-                                   hidden_sizes=self.nn_hidden_sizes,
-                                   n_plds=self.nn_n_plds,
-                                   use_transformer_temporal=self.nn_use_transformer_temporal,
-                                   transformer_nlayers=self.nn_transformer_nlayers,
-                                   transformer_nhead=self.nn_transformer_nhead,
-                                   m0_input_feature=self.nn_m0_input_feature)
+            model_params_to_use = {
+                'hidden_sizes':self.nn_hidden_sizes,
+                'n_plds':self.nn_n_plds,
+                'use_transformer_temporal':self.nn_use_transformer_temporal,
+                'transformer_nlayers':self.nn_transformer_nlayers,
+                'transformer_nhead':self.nn_transformer_nhead,
+                'm0_input_feature':self.nn_m0_input_feature
+            }
+        
+        model = EnhancedASLNet(input_size=self.base_nn_input_size, **model_params_to_use)
         model.load_state_dict(torch.load(model_path, map_location=torch.device('cpu')))
         model.eval()
         return model
@@ -141,7 +178,7 @@ class ComprehensiveComparison:
             mean_true_cbf_safe = np.mean(vc_true_cbf) if np.mean(vc_true_cbf) != 0 else 1e-9
             metrics['cbf_nbias_perc'] = (metrics['cbf_bias'] / mean_true_cbf_safe) * 100
             mean_pred_cbf_safe = np.mean(vc_pred_cbf) if np.mean(vc_pred_cbf) != 0 else 1e-9
-            metrics['cbf_cov'] = (np.std(vc_pred_cbf) / mean_pred_cbf_safe) * 100
+            metrics['cbf_cov'] = (np.std(vc_pred_cbf) / mean_pred_cbf_safe) * 100 if mean_pred_cbf_safe != 0 else np.nan
             metrics['cbf_rmse'] = np.sqrt(np.mean((vc_pred_cbf - vc_true_cbf)**2))
             metrics['cbf_nrmse_perc'] = (metrics['cbf_rmse'] / mean_true_cbf_safe) * 100
         if np.sum(valid_mask_att) > 0:
@@ -150,7 +187,7 @@ class ComprehensiveComparison:
             mean_true_att_safe = np.mean(va_true_att) if np.mean(va_true_att) != 0 else 1e-9
             metrics['att_nbias_perc'] = (metrics['att_bias'] / mean_true_att_safe) * 100
             mean_pred_att_safe = np.mean(va_pred_att) if np.mean(va_pred_att) != 0 else 1e-9
-            metrics['att_cov'] = (np.std(va_pred_att) / mean_pred_att_safe) * 100
+            metrics['att_cov'] = (np.std(va_pred_att) / mean_pred_att_safe) * 100 if mean_pred_att_safe != 0 else np.nan
             metrics['att_rmse'] = np.sqrt(np.mean((va_pred_att - va_true_att)**2))
             metrics['att_nrmse_perc'] = (metrics['att_rmse'] / mean_true_att_safe) * 100
         return metrics
@@ -183,7 +220,7 @@ class ComprehensiveComparison:
         df_path = self.output_dir / 'comparison_results_detailed.csv'
         df.to_csv(df_path, index=False)
         logger.info(f"Comparison results saved to {df_path}")
-        if wandb.run: wandb.save(str(df_path)) # Log to W&B artifacts
+        if wandb.run: wandb.save(str(df_path)) 
         return df
 
     def _evaluate_least_squares(self, data_signals: Dict[str, np.ndarray], true_params: np.ndarray, plds: np.ndarray, range_name: str) -> List[ComparisonResult]:
@@ -257,22 +294,28 @@ class ComprehensiveComparison:
             logger.error(f"NN expects M0, but input has {nn_input_arr.shape[1]} features. Expected {current_n_plds*2+1}.")
             return []
 
-        # Apply normalization if norm_stats are available
+        normalized_nn_input_arr_eval = nn_input_arr
         if self.norm_stats:
-            normalized_nn_input_arr = np.array([
+            normalized_nn_input_arr_eval = np.array([
                 apply_normalization_to_input_flat(sig, self.norm_stats, current_n_plds, current_m0_feature_flag)
                 for sig in nn_input_arr])
-            nn_input_arr = normalized_nn_input_arr
 
-        input_tensor = torch.FloatTensor(nn_input_arr)
+        input_tensor = torch.FloatTensor(normalized_nn_input_arr_eval)
         start_time = time.time()
-        with torch.no_grad(): cbf_pred, att_pred, cbf_log_var, att_log_var = self.nn_model(input_tensor)
+        with torch.no_grad(): cbf_pred_norm, att_pred_norm, cbf_log_var_norm, att_log_var_norm = self.nn_model(input_tensor)
         inference_time_total = time.time() - start_time
-        cbf_est, att_est = cbf_pred.numpy().squeeze(), att_pred.numpy().squeeze()
-        cbf_unc_std, att_unc_std = np.exp(cbf_log_var.numpy().squeeze()/2.0), np.exp(att_log_var.numpy().squeeze()/2.0)
+        
+        # De-normalize predictions
+        cbf_est, att_est, cbf_unc_std, att_unc_std = denormalize_predictions(
+            cbf_pred_norm.numpy().squeeze(), att_pred_norm.numpy().squeeze(),
+            cbf_log_var_norm.numpy().squeeze(), att_log_var_norm.numpy().squeeze(),
+            self.norm_stats
+        )
+        
         metrics = self._calculate_detailed_metrics(cbf_est, true_params_arr[:,0], att_est, true_params_arr[:,1])
         return [ComparisonResult(method="Neural Network", att_range_name=range_name_str, **metrics,
-                                 cbf_ci_width=np.nanmean(cbf_unc_std)*1.96*2, att_ci_width=np.nanmean(att_unc_std)*1.96*2,
+                                 cbf_ci_width=np.nanmean(cbf_unc_std)*1.96*2 if cbf_unc_std is not None else np.nan, 
+                                 att_ci_width=np.nanmean(att_unc_std)*1.96*2 if att_unc_std is not None else np.nan,
                                  computation_time=inference_time_total/len(nn_input_arr) if len(nn_input_arr)>0 else np.nan, success_rate=100.0)]
 
     def _evaluate_hybrid(self, multiverse_ls_signals: np.ndarray, nn_input_signals: np.ndarray, true_params_arr: np.ndarray, plds_arr: np.ndarray, range_name_str: str) -> List[ComparisonResult]:
@@ -282,35 +325,51 @@ class ComprehensiveComparison:
         current_m0_feature_flag = self.nn_model_arch_config.get('m0_input_feature', self.nn_m0_input_feature) if self.nn_model_arch_config else self.nn_m0_input_feature
         current_n_plds = self.nn_model_arch_config.get('n_plds', self.nn_n_plds) if self.nn_model_arch_config else self.nn_n_plds
 
-        # Apply normalization to NN input signals for hybrid initialization
+        normalized_nn_input_signals_hybrid = nn_input_signals
         if self.norm_stats:
-            normalized_nn_input_signals = np.array([
+            normalized_nn_input_signals_hybrid = np.array([
                 apply_normalization_to_input_flat(sig, self.norm_stats, current_n_plds, current_m0_feature_flag)
                 for sig in nn_input_signals])
-            nn_input_signals = normalized_nn_input_signals
 
-        input_tensor = torch.FloatTensor(nn_input_signals)
-        with torch.no_grad(): cbf_init_nn, att_init_nn, _, _ = self.nn_model(input_tensor)
-        cbf_init_ls, att_init_ls = cbf_init_nn.numpy().squeeze()/6000.0, att_init_nn.numpy().squeeze()
-        n_samples = multiverse_ls_signals.shape[0]; successes = 0 # Ensure n_samples is defined for this loop
+        input_tensor = torch.FloatTensor(normalized_nn_input_signals_hybrid)
+        with torch.no_grad(): cbf_init_nn_norm, att_init_nn_norm, _, _ = self.nn_model(input_tensor)
+        
+        # De-normalize NN initial estimates for LS fitting
+        cbf_init_ls_denorm, att_init_ls_denorm, _, _ = denormalize_predictions(
+            cbf_init_nn_norm.numpy().squeeze(), att_init_nn_norm.numpy().squeeze(),
+            None, None, # No log_var needed for initial guess
+            self.norm_stats
+        )
+        cbf_init_ls, att_init_ls = cbf_init_ls_denorm/6000.0, att_init_ls_denorm
+
+        n_samples = multiverse_ls_signals.shape[0]; successes = 0 
         cbf_estimates, att_estimates, fit_times = [], [], []
         pldti = np.column_stack([plds_arr, plds_arr])
         for i in range(n_samples):
             start_time = time.time()
             try:
-                beta, _, _, _ = fit_PCVSASL_misMatchPLD_vectInit_pep(pldti, multiverse_ls_signals[i], [cbf_init_ls[i], att_init_ls[i]], **self.asl_params)
+                current_cbf_init = cbf_init_ls[i] if cbf_init_ls.ndim > 0 else cbf_init_ls
+                current_att_init = att_init_ls[i] if att_init_ls.ndim > 0 else att_init_ls
+                beta, _, _, _ = fit_PCVSASL_misMatchPLD_vectInit_pep(pldti, multiverse_ls_signals[i], [current_cbf_init, current_att_init], **self.asl_params)
                 fit_times.append(time.time()-start_time); cbf_estimates.append(beta[0]*6000); att_estimates.append(beta[1]); successes += 1
-            except Exception: fit_times.append(time.time()-start_time); cbf_estimates.append(cbf_init_nn.numpy().squeeze()[i]); att_estimates.append(att_init_ls[i]); successes +=1
+            except Exception: 
+                fit_times.append(time.time()-start_time)
+                # Fallback to NN prediction if LS fit fails with NN initialization
+                fallback_cbf = cbf_init_ls_denorm[i] if cbf_init_ls_denorm.ndim > 0 else cbf_init_ls_denorm
+                fallback_att = att_init_ls_denorm[i] if att_init_ls_denorm.ndim > 0 else att_init_ls_denorm
+                cbf_estimates.append(fallback_cbf)
+                att_estimates.append(fallback_att)
+                successes +=1 # Counting NN prediction as a "successful" estimate in this hybrid context
         metrics = self._calculate_detailed_metrics(cbf_estimates, true_params_arr[:,0], att_estimates, true_params_arr[:,1])
         return [ComparisonResult(method="Hybrid (NN+LS)", att_range_name=range_name_str, **metrics,
                                  cbf_ci_width=np.nan, att_ci_width=np.nan,
                                  computation_time=np.nanmean(fit_times) if fit_times else np.nan, success_rate=(successes/n_samples*100) if n_samples > 0 else 0)]
 
-    def visualize_results(self, results_df: pd.DataFrame, show_plots: bool = False): # Added show_plots
+    def visualize_results(self, results_df: pd.DataFrame, show_plots: bool = False): 
         if results_df.empty:
             logger.warning("Results DataFrame is empty. Skipping visualization.")
             return
-        if not show_plots: # If not showing, just log that visualization data is available
+        if not show_plots: 
             logger.info("Visualization data prepared. Set show_plots=True to display.")
             return
 
@@ -339,13 +398,12 @@ class ComprehensiveComparison:
                 if 'Bias' in metric_disp_name: ax.axhline(0, color='k', linestyle='--', alpha=0.7)
                 if row == 0: ax.legend(fontsize='small')
         plt.tight_layout(rect=[0, 0, 1, 0.96]); fig_metrics.suptitle("Performance Comparison Across Methods and ATT Ranges", fontsize=16, fontweight='bold')
-        # plt.savefig(self.output_dir / 'comparison_metrics_summary.png', dpi=300, bbox_inches='tight'); # Removed savefig
         if show_plots: plt.show()
         plt.close(fig_metrics)
 
         self._plot_computation_time(results_df, show_plots)
         self._plot_success_rates(results_df, show_plots)
-        self._plot_calibration_placeholder(show_plots) # Placeholder, does not save real data
+        self._plot_calibration_placeholder(show_plots) 
 
     def _plot_computation_time(self, results_df: pd.DataFrame, show_plots: bool = False):
         if results_df.empty or 'computation_time' not in results_df.columns: logger.warning("Cannot plot computation time."); return
@@ -358,7 +416,6 @@ class ComprehensiveComparison:
             height = bar.get_height()
             if np.isfinite(height) and height > 0: ax.text(bar.get_x() + bar.get_width()/2., height, f'{height:.2f}', ha='center', va='bottom')
         plt.xticks(rotation=45, ha='right'); plt.tight_layout()
-        # plt.savefig(self.output_dir / 'computation_time_comparison.png', dpi=300, bbox_inches='tight'); # Removed savefig
         if show_plots: plt.show()
         plt.close(fig)
 
@@ -372,7 +429,6 @@ class ComprehensiveComparison:
             plt.ylabel('Success Rate (%)'); plt.xlabel('ATT Range'); plt.title('Fitting Success Rates by Method and ATT Range')
             plt.legend(title='Method', bbox_to_anchor=(1.02, 1), loc='upper left'); plt.xticks(rotation=30, ha='right')
             plt.ylim(0, 105); plt.tight_layout()
-            # plt.savefig(self.output_dir / 'success_rates_comparison.png', dpi=300, bbox_inches='tight'); # Removed savefig
             if show_plots: plt.show()
             plt.close()
         except Exception as e: logger.error(f"Error plotting success rates: {e}")
@@ -385,6 +441,5 @@ class ComprehensiveComparison:
                 horizontalalignment='center', verticalalignment='center', fontsize=14,
                 bbox=dict(boxstyle="round,pad=0.5", fc="aliceblue", ec="lightsteelblue", lw=2))
         ax.set_xticks([]); ax.set_yticks([])
-        # plt.savefig(self.output_dir / 'calibration_plot_placeholder.png', dpi=150); # Removed savefig
         if show_plots: plt.show()
         plt.close(fig)

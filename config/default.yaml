@@ -1,6 +1,7 @@
 training:
   batch_size: 256
   learning_rate: 0.001
+  weight_decay: 1e-5 # Added weight_decay
   hidden_sizes: [256, 128, 64] 
   training_n_epochs: 200
   n_ensembles: 5
@@ -54,20 +55,11 @@ optuna:
   optuna_n_subjects: 500 # Renamed
   optuna_n_epochs: 20    # Renamed
   optuna_study_name: "asl_multiverse_hpo"
-
-# Legacy/General settings (review if still needed or covered by specific sections)
-# model:
-#   early_stopping_patience: 20 # This is used by EnhancedASLTrainer
+  # HPO can also optimize weight_decay if added to HyperparameterOptimizer.objective
 
 logging:
   level: "INFO"
-  # log_dir: "logs" # Handled by main.py's output structure
 
-# paths: # Handled by main.py's output structure
-#   model_dir: "trained_models"
-#   results_dir: "results_data"
-#   data_dir: "generated_datasets"
-
-wandb: # Added section for W&B specific config
+wandb: 
   wandb_project: "asl-multiverse-project"
-  wandb_entity: null # Set to your W&B username/team or leave null for default/env var
+  wandb_entity: null 

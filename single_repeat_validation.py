@@ -1,17 +1,12 @@
-# single_repeat_validation.py
-"""
-Validation framework for comparing single-repeat NN performance
-against multi-repeat conventional methods (key proposal objective)
-"""
-
 import numpy as np
 import torch
 from typing import Dict, Tuple, Optional, List 
 from pathlib import Path 
-import inspect # Added for the fix
+import inspect 
 
 from enhanced_asl_network import EnhancedASLNet
 from enhanced_simulation import RealisticASLSimulator, ASLParameters
+from comparison_framework import denormalize_predictions # Import de-normalization helper
 
 import logging
 logger = logging.getLogger(__name__)
@@ -44,9 +39,9 @@ def apply_normalization_to_input_flat(flat_signal: np.ndarray,
 class SingleRepeatValidator:
     def __init__(self,
                  trained_model_path: Optional[str] = None,
-                 base_nn_input_size: Optional[int] = 12, # Base input size (n_plds*2)
+                 base_nn_input_size: Optional[int] = 12, 
                  nn_model_arch_config: Optional[Dict] = None,
-                 norm_stats: Optional[Dict] = None
+                 norm_stats: Optional[Dict] = None # For input and output de/normalization
                 ):
         asl_sim_params = ASLParameters() 
         self.simulator = RealisticASLSimulator(params=asl_sim_params)
@@ -56,8 +51,7 @@ class SingleRepeatValidator:
         self.nn_model_arch_config = nn_model_arch_config if nn_model_arch_config is not None else {}
         self.norm_stats = norm_stats
 
-        # Extract n_plds and m0_input_feature from arch_config for use in normalization helper
-        self.nn_n_plds_for_norm = self.nn_model_arch_config.get('n_plds', 6) # Default to 6 if not in config
+        self.nn_n_plds_for_norm = self.nn_model_arch_config.get('n_plds', 6) 
         self.nn_m0_input_feature_for_norm = self.nn_model_arch_config.get('m0_input_feature', False)
 
         if trained_model_path and Path(trained_model_path).exists():
@@ -71,7 +65,6 @@ class SingleRepeatValidator:
             logger.info("No trained model path provided. NN predictions will be NaN.")
 
     def _load_trained_model(self, model_path: str) -> Optional[EnhancedASLNet]:
-        # FIX: Filter the config dictionary to only pass valid arguments to EnhancedASLNet
         model_param_keys = inspect.signature(EnhancedASLNet).parameters.keys()
         filtered_arch_config = {
             key: self.nn_model_arch_config[key]
@@ -79,7 +72,7 @@ class SingleRepeatValidator:
         }
 
         model = EnhancedASLNet(
-            input_size=self.base_nn_input_size,
+            input_size=self.base_nn_input_size, # This is n_plds * 2 typically
             **filtered_arch_config
         )
         try:
@@ -95,13 +88,14 @@ class SingleRepeatValidator:
         dataset_params = self.simulator.generate_diverse_dataset(
             plds=self.plds, n_subjects=n_subjects, conditions=['healthy'], noise_levels=[5.0]
         )
-        unique_params, _ = np.unique(dataset_params['parameters'], axis=0, return_index=True)
-        if unique_params.shape[0] < n_subjects:
-            logger.warning(f"Generated {unique_params.shape[0]} unique params, requested {n_subjects}.")
+        # Ensure we get unique parameters for the number of subjects requested
+        unique_param_indices = np.sort(np.unique(dataset_params['parameters'], axis=0, return_index=True)[1])
+        actual_n_subjects = min(n_subjects, len(unique_param_indices))
+        selected_indices = unique_param_indices[:actual_n_subjects]
         
-        cbf_values = unique_params[:n_subjects, 0]
-        att_values = unique_params[:n_subjects, 1]
-        actual_n_subjects = len(cbf_values)
+        cbf_values = dataset_params['parameters'][selected_indices, 0]
+        att_values = dataset_params['parameters'][selected_indices, 1]
+
 
         datasets = {
             'ground_truth_params': {'cbf': cbf_values, 'att': att_values},
@@ -109,14 +103,13 @@ class SingleRepeatValidator:
             'signals_single_repeat_high_noise': [],
             'signals_single_repeat_low_noise': []
         }
-        if self.nn_model_arch_config.get('m0_input_feature', False): # If model uses M0, store M0 values too
+        if self.nn_model_arch_config.get('m0_input_feature', False): 
             datasets['m0_values_high_noise'] = []
             datasets['m0_values_low_noise'] = []
 
 
         for i in range(actual_n_subjects):
             cbf, att = cbf_values[i], att_values[i]
-            # generate_synthetic_data takes cbf_val in ml/100g/min
             
             multi_repeat_raw = []
             for _ in range(4):
@@ -135,9 +128,7 @@ class SingleRepeatValidator:
                 ])
                 datasets[f'signals_single_repeat_{noise_key}'].append(flat_signal)
                 if self.nn_model_arch_config.get('m0_input_feature', False):
-                    # Placeholder for M0 generation. If M0 is needed, it must be generated here.
-                    # For now, a dummy M0 value.
-                    dummy_m0_val = 1.0 # Or some function of cbf/att/condition
+                    dummy_m0_val = 1.0 
                     datasets[f'm0_values_{noise_key}'].append(dummy_m0_val)
 
 
@@ -172,10 +163,10 @@ class SingleRepeatValidator:
                 nn_input_for_pred = signal_sr_flat
                 if self.nn_model_arch_config.get('m0_input_feature', False):
                     m0_val = datasets[f'm0_values_{noise_key}'][i]
-                    nn_input_for_pred = np.append(signal_sr_flat, m0_val) # Append M0
+                    nn_input_for_pred = np.append(signal_sr_flat, m0_val) 
                 
                 if self.model:
-                    cbf_nn, att_nn = self._predict_neural_network(nn_input_for_pred)
+                    cbf_nn, att_nn, _, _ = self._predict_neural_network(nn_input_for_pred) # Ignored uncertainty for this validation
                     results[f'nn_single_repeat_{noise_key}']['cbf'].append(cbf_nn)
                     results[f'nn_single_repeat_{noise_key}']['att'].append(att_nn)
                 else:
@@ -206,22 +197,30 @@ class SingleRepeatValidator:
             return beta[0] * 6000.0, beta[1] 
         except Exception: return np.nan, np.nan
 
-    def _predict_neural_network(self, signal_flat_with_m0_if_needed: np.ndarray) -> Tuple[float, float]:
-        if self.model is None: return np.nan, np.nan
+    def _predict_neural_network(self, signal_flat_with_m0_if_needed: np.ndarray) -> Tuple[float, float, float, float]:
+        if self.model is None: return np.nan, np.nan, np.nan, np.nan
 
         normalized_signal_input = signal_flat_with_m0_if_needed
         if self.norm_stats:
             normalized_signal_input = apply_normalization_to_input_flat(
                 signal_flat_with_m0_if_needed,
                 self.norm_stats,
-                self.nn_n_plds_for_norm, # Get from arch_config
-                self.nn_m0_input_feature_for_norm # Get from arch_config
+                self.nn_n_plds_for_norm, 
+                self.nn_m0_input_feature_for_norm 
             )
 
         input_tensor = torch.FloatTensor(normalized_signal_input).unsqueeze(0).to(next(self.model.parameters()).device)
         with torch.no_grad():
-            cbf_pred, att_pred, _, _ = self.model(input_tensor)
-            return cbf_pred.item(), att_pred.item()
+            cbf_pred_norm, att_pred_norm, cbf_log_var_norm, att_log_var_norm = self.model(input_tensor)
+        
+        # De-normalize predictions
+        cbf_pred_denorm, att_pred_denorm, cbf_std_denorm, att_std_denorm = denormalize_predictions(
+            cbf_pred_norm.cpu().numpy(), att_pred_norm.cpu().numpy(),
+            cbf_log_var_norm.cpu().numpy(), att_log_var_norm.cpu().numpy(),
+            self.norm_stats
+        )
+        return cbf_pred_denorm.item(), att_pred_denorm.item(), cbf_std_denorm.item(), att_std_denorm.item()
+
 
     def calculate_scan_time_benefits(self, results: Dict, ground_truth_params: Dict) -> Dict:
         logger.info("Calculating scan time benefits and performance.")
@@ -257,29 +256,27 @@ def run_single_repeat_validation_main(
     model_path: Optional[str] = None,
     base_nn_input_size_for_model_load: Optional[int] = None,
     nn_arch_config_for_model_load: Optional[Dict] = None,
-    norm_stats_for_nn: Optional[Dict] = None
+    norm_stats_for_nn: Optional[Dict] = None # Added norm_stats
 ):
     logger.info("=== Clinical Validation: Single-Repeat NN vs Multi-Repeat Conventional ===")
     if model_path is None: logger.warning("No model path provided. NN results will be NaN.")
     
-    # Default NN config if not provided
     if nn_arch_config_for_model_load is None:
         logger.warning("No NN arch config provided for SingleRepeatValidator. Using defaults.")
         nn_arch_config_for_model_load = {
             'hidden_sizes': [256,128,64], 
             'n_plds': 6, 
             'm0_input_feature': False
-            # Add other EnhancedASLNet defaults here if needed
         }
     if base_nn_input_size_for_model_load is None:
-        base_nn_input_size_for_model_load = 12 # Default for 6 PLDs * 2 modalities
+        base_nn_input_size_for_model_load = 12 
 
     validator = SingleRepeatValidator(trained_model_path=model_path,
                                       base_nn_input_size=base_nn_input_size_for_model_load,
                                       nn_model_arch_config=nn_arch_config_for_model_load,
-                                      norm_stats=norm_stats_for_nn)
+                                      norm_stats=norm_stats_for_nn) # Pass norm_stats
     logger.info("1. Simulating clinical acquisition scenarios...")
-    datasets = validator.simulate_clinical_scenario(n_subjects=50) # Reduced for faster example
+    datasets = validator.simulate_clinical_scenario(n_subjects=50) 
     logger.info("2. Comparing methods...")
     estimation_results = validator.compare_methods(datasets)
     logger.info("3. Calculating scan time benefits and performance metrics...")
@@ -294,17 +291,14 @@ def run_single_repeat_validation_main(
     return estimation_results, performance_metrics
 
 if __name__ == "__main__":
-    # Example: run with a placeholder model path and basic config
-    # You would get nn_config from your main ResearchConfig for consistency.
-    example_model_path_main = None # "path/to/your/trained_model.pt"
-    example_base_input_size = 12 # For 6 PLDs * 2 modalities
+    example_model_path_main = None 
+    example_base_input_size = 12 
     example_nn_arch_config = {
         'hidden_sizes': [256, 128, 64], 
         'n_plds': 6, 
-        'm0_input_feature': False, # Assuming M0 is not used by default for this test
-        # ... add other necessary EnhancedASLNet parameters from model_creation_config
+        'm0_input_feature': False, 
     }
-    example_norm_stats = None # Path to or dict of norm_stats if used
+    example_norm_stats = None 
 
     run_single_repeat_validation_main(model_path=example_model_path_main,
                                       base_nn_input_size_for_model_load=example_base_input_size,
