@@ -1,56 +1,69 @@
 training:
   batch_size: 256
   learning_rate: 0.001
-  hidden_sizes: [256, 128, 64] # For EnhancedASLNet MLP part
+  hidden_sizes: [256, 128, 64] 
   training_n_epochs: 200
   n_ensembles: 5
   dropout_rate: 0.1
   norm_type: "batch"
-  # New model-specific params for EnhancedASLNet (Transformer part)
+  
+  # Model-specific params for EnhancedASLNet
   use_transformer_temporal_model: true
+  m0_input_feature_model: false 
+
+  # Transformer settings
+  use_focused_transformer_model: false # New: true to use split PCASL/VSASL transformers
+  transformer_d_model: 64             # New: d_model for shared transformer
+  transformer_d_model_focused: 32     # New: d_model per branch if focused
   transformer_nhead_model: 4
   transformer_nlayers_model: 2
-  m0_input_feature_model: false # Set to true if M0 is an input feature to EnhancedASLNet
+  
+  # Uncertainty head settings for EnhancedASLNet
+  log_var_cbf_min: -6.0
+  log_var_cbf_max: 7.0
+  log_var_att_min: -2.0
+  log_var_att_max: 14.0
+
+  # CustomLoss settings
+  loss_weight_cbf: 1.0
+  loss_weight_att: 1.0
+  loss_log_var_reg_lambda: 0.0 # 0.0 means off, try 1e-4 or 1e-3 if needed
 
 data:
-  n_samples: 20000 # Number of base subjects for diverse dataset generation
+  n_training_subjects: 10000 # Renamed from n_samples for clarity in main.py
   val_split: 0.2
-  pld_values: [500, 1000, 1500, 2000, 2500, 3000] # Explicit list of PLDs in ms
-  att_ranges: # For curriculum learning and evaluation splitting
+  pld_values: [500, 1000, 1500, 2000, 2500, 3000]
+  att_ranges_config: # Renamed from att_ranges for clarity
     - [500, 1500, "Short ATT"]
     - [1500, 2500, "Medium ATT"]
     - [2500, 4000, "Long ATT"]
-  include_m0_in_training_data: false # If true, data pipeline must provide M0
+  include_m0_in_training_data: false
 
-# Model config (legacy, largely superseded by specific params in 'training' for EnhancedASLNet)
-# but might be used by ComprehensiveComparison if it instantiates a model
-model:
-  # input_size is now dynamic: len(pld_values) * 2 (+1 if m0_input_feature_model)
-  use_curriculum: true # This is a strategy, not a model param
-  early_stopping_patience: 20
+simulation: 
+  T1_artery: 1850.0; T2_factor: 1.0; alpha_BS1: 1.0
+  alpha_PCASL: 0.85; alpha_VSASL: 0.56; T_tau: 1800.0
+  reference_CBF: 60.0 # Renamed from CBF for clarity
 
-simulation: # Base parameters for ASLSimulator/RealisticASLSimulator
-  T1_artery: 1850.0
-  T2_factor: 1.0
-  alpha_BS1: 1.0
-  alpha_PCASL: 0.85
-  alpha_VSASL: 0.56
-  T_tau: 1800.0
-  CBF: 60.0 # Reference CBF, actual CBF varies in diverse dataset
-
-# Optuna specific settings (can be overridden by main.py's ResearchConfig defaults)
 optuna:
-  n_trials: 20
-  timeout_hours: 0.5
-  n_subjects: 500 # Subjects per Optuna trial
-  n_epochs: 20    # Epochs per Optuna trial
+  optuna_n_trials: 20 # Renamed for clarity
+  optuna_timeout_hours: 0.5 # Renamed
+  optuna_n_subjects: 500 # Renamed
+  optuna_n_epochs: 20    # Renamed
+  optuna_study_name: "asl_multiverse_hpo"
+
+# Legacy/General settings (review if still needed or covered by specific sections)
+# model:
+#   early_stopping_patience: 20 # This is used by EnhancedASLTrainer
 
 logging:
   level: "INFO"
-  log_dir: "logs" # Relative to main output directory for the run
-  # save_frequency: 10 # epochs (This might be specific to a callback not used here)
+  # log_dir: "logs" # Handled by main.py's output structure
 
-paths: # These are more like subdirectories within the main run's output folder
-  model_dir: "trained_models"
-  results_dir: "results_data" # e.g. for CSVs, JSONs of detailed metrics
-  data_dir: "generated_datasets" # If datasets are saved to disk
+# paths: # Handled by main.py's output structure
+#   model_dir: "trained_models"
+#   results_dir: "results_data"
+#   data_dir: "generated_datasets"
+
+wandb: # Added section for W&B specific config
+  wandb_project: "asl-multiverse-project"
+  wandb_entity: null # Set to your W&B username/team or leave null for default/env var
