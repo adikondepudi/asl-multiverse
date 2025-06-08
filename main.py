@@ -144,30 +144,22 @@ def engineer_signal_features(raw_signal: np.ndarray, num_plds: int) -> np.ndarra
 
     return engineered_features
 
-# Helper function for normalization (can be moved to a utils.py later)
 def apply_normalization_to_input_flat(flat_signal: np.ndarray, 
                                       norm_stats: Dict, 
                                       num_plds_per_modality: int, 
                                       has_m0: bool) -> np.ndarray:
-    if not norm_stats or not isinstance(norm_stats, dict): return flat_signal 
+    if not norm_stats or not isinstance(norm_stats, dict): return flat_signal
 
-    pcasl_signal_part = flat_signal[:num_plds_per_modality]
-    vsasl_signal_part = flat_signal[num_plds_per_modality : num_plds_per_modality*2]
-    
-    pcasl_norm = (pcasl_signal_part - norm_stats.get('pcasl_mean', 0)) / norm_stats.get('pcasl_std', 1)
-    vsasl_norm = (vsasl_signal_part - norm_stats.get('vsasl_mean', 0)) / norm_stats.get('vsasl_std', 1)
-    
-    normalized_parts = [pcasl_norm, vsasl_norm]
-    
-    if has_m0:
-        m0_signal_part = flat_signal[num_plds_per_modality*2:] # Assumes M0 is at the end
-        if m0_signal_part.size > 0 : # Ensure M0 part exists
-            m0_norm = (m0_signal_part - norm_stats.get('m0_mean', 0)) / norm_stats.get('m0_std', 1)
-            normalized_parts.append(m0_norm)
-        else: # Should not happen if has_m0 is true and data is consistent
-            script_logger.warning("has_m0 is true, but M0 part is missing in flat_signal for normalization.")
-            
-    return np.concatenate(normalized_parts)
+    # Corrected logic to preserve other features (e.g., engineered ones)
+    raw_signal_len = num_plds_per_modality * 2
+    signal_part = flat_signal[:raw_signal_len]
+    other_features_part = flat_signal[raw_signal_len:]
+
+    pcasl_norm = (signal_part[:num_plds_per_modality] - norm_stats.get('pcasl_mean', 0)) / np.clip(norm_stats.get('pcasl_std', 1), a_min=1e-6, a_max=None)
+    vsasl_norm = (signal_part[num_plds_per_modality:] - norm_stats.get('vsasl_mean', 0)) / np.clip(norm_stats.get('vsasl_std', 1), a_min=1e-6, a_max=None)
+
+    # Reconcatenate normalized signal with untouched other features
+    return np.concatenate([pcasl_norm, vsasl_norm, other_features_part])
 
 
 class PerformanceMonitor:
@@ -476,18 +468,10 @@ class ClinicalValidator:
     def _ensemble_predict(self, models: List[torch.nn.Module], input_signal_flat: np.ndarray) -> Tuple[float, float, float, float]:
         if not models: return np.nan, np.nan, np.nan, np.nan
         
-        # Note: Normalization is NOT applied here because the input_signal_flat already
-        # includes engineered features which are not part of the normalization stats.
-        # The normalization will be applied inside the main prediction function.
-        # Correction: Normalization must be applied to the *signal part* of the input vector.
-
-        num_raw_signal_features = len(self.plds_np) * 2
-        normalized_input_signal = input_signal_flat.copy()
-        if self.norm_stats:
-            signal_part = input_signal_flat[:num_raw_signal_features]
-            pcasl_part = (signal_part[:len(self.plds_np)] - self.norm_stats['pcasl_mean']) / self.norm_stats['pcasl_std']
-            vsasl_part = (signal_part[len(self.plds_np):] - self.norm_stats['vsasl_mean']) / self.norm_stats['vsasl_std']
-            normalized_input_signal[:num_raw_signal_features] = np.concatenate([pcasl_part, vsasl_part])
+        # Use the corrected helper function to apply normalization while preserving all features
+        normalized_input_signal = apply_normalization_to_input_flat(
+            input_signal_flat, self.norm_stats, len(self.plds_np), False  # M0 is handled within other_features
+        )
         
         input_tensor = torch.FloatTensor(normalized_input_signal).unsqueeze(0).to(next(models[0].parameters()).device)
         

@@ -22,28 +22,23 @@ logger = logging.getLogger(__name__)
 if not logger.hasHandlers():
     logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(name)s - %(levelname)s - %(message)s')
 
-# Helper function for normalization (can be moved to a utils.py later)
 def apply_normalization_to_input_flat(flat_signal: np.ndarray,
                                       norm_stats: Dict,
                                       num_plds_per_modality: int,
                                       has_m0: bool) -> np.ndarray:
-    if not norm_stats or not isinstance(norm_stats, dict): return flat_signal
+    if not norm_stats or not isinstance(norm_stats, dict):
+        return flat_signal
 
-    pcasl_signal_part = flat_signal[:num_plds_per_modality]
-    vsasl_signal_part = flat_signal[num_plds_per_modality : num_plds_per_modality*2]
+    # Corrected logic to preserve other features (e.g., engineered ones)
+    raw_signal_len = num_plds_per_modality * 2
+    signal_part = flat_signal[:raw_signal_len]
+    other_features_part = flat_signal[raw_signal_len:]
 
-    pcasl_norm = (pcasl_signal_part - norm_stats.get('pcasl_mean', 0)) / norm_stats.get('pcasl_std', 1)
-    vsasl_norm = (vsasl_signal_part - norm_stats.get('vsasl_mean', 0)) / norm_stats.get('vsasl_std', 1)
+    pcasl_norm = (signal_part[:num_plds_per_modality] - norm_stats.get('pcasl_mean', 0)) / np.clip(norm_stats.get('pcasl_std', 1), a_min=1e-6, a_max=None)
+    vsasl_norm = (signal_part[num_plds_per_modality:] - norm_stats.get('vsasl_mean', 0)) / np.clip(norm_stats.get('vsasl_std', 1), a_min=1e-6, a_max=None)
 
-    normalized_parts = [pcasl_norm, vsasl_norm]
-
-    if has_m0:
-        m0_signal_part = flat_signal[num_plds_per_modality*2:] # Assumes M0 is at the end
-        if m0_signal_part.size > 0 : # Ensure M0 part exists
-            m0_norm = (m0_signal_part - norm_stats.get('m0_mean', 0)) / norm_stats.get('m0_std', 1)
-            normalized_parts.append(m0_norm)
-
-    return np.concatenate(normalized_parts)
+    # Reconcatenate normalized signal with untouched other features
+    return np.concatenate([pcasl_norm, vsasl_norm, other_features_part])
 
 def denormalize_predictions(cbf_pred_norm: np.ndarray, att_pred_norm: np.ndarray,
                             cbf_log_var_norm: Optional[np.ndarray], att_log_var_norm: Optional[np.ndarray],
