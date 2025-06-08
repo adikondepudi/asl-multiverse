@@ -13,6 +13,47 @@ logger = logging.getLogger(__name__)
 if not logger.hasHandlers():
     logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(name)s - %(levelname)s - %(message)s')
 
+# Helper function for feature engineering, copied from main.py to ensure consistency
+def engineer_signal_features(raw_signal: np.ndarray, num_plds: int) -> np.ndarray:
+    """
+    Engineers explicit shape-based features from raw ASL signal curves to
+    make timing information more salient for the neural network.
+
+    Args:
+        raw_signal: A numpy array of shape (N, num_plds * 2) containing
+                    concatenated PCASL and VSASL signals.
+        num_plds: The number of Post-Labeling Delays per modality.
+
+    Returns:
+        A numpy array of shape (N, 4) with the engineered features:
+        - PCASL time-to-peak index
+        - VSASL time-to-peak index
+        - PCASL center-of-mass
+        - VSASL center-of-mass
+    """
+    if raw_signal.ndim == 1:
+        raw_signal = raw_signal.reshape(1, -1) # Ensure 2D for processing
+
+    num_samples = raw_signal.shape[0]
+    engineered_features = np.zeros((num_samples, 4))
+    plds_indices = np.arange(num_plds)
+
+    for i in range(num_samples):
+        pcasl_curve = raw_signal[i, :num_plds]
+        vsasl_curve = raw_signal[i, num_plds:]
+
+        # Feature 1: Time to peak (index of max signal)
+        engineered_features[i, 0] = np.argmax(pcasl_curve)
+        engineered_features[i, 1] = np.argmax(vsasl_curve)
+
+        # Feature 2: Center of mass (temporal)
+        pcasl_sum = np.sum(pcasl_curve) + 1e-6
+        vsasl_sum = np.sum(vsasl_curve) + 1e-6
+        engineered_features[i, 2] = np.sum(pcasl_curve * plds_indices) / pcasl_sum
+        engineered_features[i, 3] = np.sum(vsasl_curve * plds_indices) / vsasl_sum
+
+    return engineered_features
+
 # Helper function for normalization (can be moved to a utils.py later)
 def apply_normalization_to_input_flat(flat_signal: np.ndarray,
                                       norm_stats: Dict,
@@ -72,7 +113,7 @@ class SingleRepeatValidator:
         }
 
         model = EnhancedASLNet(
-            input_size=self.base_nn_input_size, # This is n_plds * 2 typically
+            input_size=self.base_nn_input_size,
             **filtered_arch_config
         )
         try:
@@ -158,12 +199,18 @@ class SingleRepeatValidator:
 
             for noise_key, signal_key_prefix in [('high_noise', 'signals_single_repeat_high_noise'), 
                                                  ('low_noise', 'signals_single_repeat_low_noise')]:
-                signal_sr_flat = datasets[signal_key_prefix][i]
+                signal_sr_flat_raw = datasets[signal_key_prefix][i]
                 
-                nn_input_for_pred = signal_sr_flat
+                # Apply the same feature engineering as used during training
+                engineered_features = engineer_signal_features(
+                    signal_sr_flat_raw,
+                    num_plds=self.nn_n_plds_for_norm
+                )
+                nn_input_for_pred = np.concatenate([signal_sr_flat_raw, engineered_features.flatten()])
+
                 if self.nn_model_arch_config.get('m0_input_feature', False):
                     m0_val = datasets[f'm0_values_{noise_key}'][i]
-                    nn_input_for_pred = np.append(signal_sr_flat, m0_val) 
+                    nn_input_for_pred = np.append(nn_input_for_pred, m0_val) 
                 
                 if self.model:
                     cbf_nn, att_nn, _, _ = self._predict_neural_network(nn_input_for_pred) # Ignored uncertainty for this validation
@@ -269,7 +316,9 @@ def run_single_repeat_validation_main(
             'm0_input_feature': False
         }
     if base_nn_input_size_for_model_load is None:
-        base_nn_input_size_for_model_load = 12 
+        # Calculate from config if possible, otherwise default
+        n_plds = len(nn_arch_config_for_model_load.get('pld_values', range(500,3001,500)))
+        base_nn_input_size_for_model_load = n_plds * 2 + 4 # 2 for modalities, 4 for engineered features
 
     validator = SingleRepeatValidator(trained_model_path=model_path,
                                       base_nn_input_size=base_nn_input_size_for_model_load,
@@ -292,7 +341,7 @@ def run_single_repeat_validation_main(
 
 if __name__ == "__main__":
     example_model_path_main = None 
-    example_base_input_size = 12 
+    example_base_input_size = 16 # 12 raw + 4 engineered
     example_nn_arch_config = {
         'hidden_sizes': [256, 128, 64], 
         'n_plds': 6, 
