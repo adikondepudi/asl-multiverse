@@ -201,7 +201,7 @@ class ComprehensiveComparison:
                 logger.warning(f"No test data for ATT range {range_name_str}. Skipping.")
                 continue
             range_true_params = true_params_arr[mask]
-            range_data_signals = {'PCASL_LS': test_data_dict['PCASL'][mask], 'VSASL_LS': test_data_dict['VSASL'][mask],
+            range_data_signals = {'PCASL_LS': test_data_dict['PCASL_LS'][mask], 'VSASL_LS': test_data_dict['VSASL_LS'][mask],
                                   'MULTIVERSE_LS_FORMAT': test_data_dict['MULTIVERSE_LS_FORMAT'][mask],
                                   'NN_INPUT_FORMAT': test_data_dict['NN_INPUT_FORMAT'][mask]}
             logger.info(f"\nEvaluating {range_name_str} (n={mask.sum()})...")
