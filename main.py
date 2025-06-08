@@ -18,6 +18,7 @@ import warnings
 import wandb 
 import joblib 
 import math # For log_var defaults if not in config for some reason
+import inspect # <<< FIX: Added import for inspecting function signatures
 
 warnings.filterwarnings('ignore', category=UserWarning) # Filter UserWarning from PyTorch/Optuna etc.
 
@@ -43,6 +44,7 @@ class ResearchConfig:
     learning_rate: float = 0.001
     weight_decay: float = 1e-5 # Added weight_decay
     batch_size: int = 256
+    val_split: float = 0.2
     n_training_subjects: int = 10000 
     training_n_epochs: int = 200
     n_ensembles: int = 5
@@ -315,13 +317,19 @@ class HyperparameterOptimizer:
             'n_plds': num_plds
         }
 
-        def create_hpo_model(**kwargs): return EnhancedASLNet(input_size=base_nn_input_size, **kwargs)
+        # <<< FIX: The model factory closure now filters the kwargs to avoid TypeError.
+        def create_hpo_model(**kwargs):
+            model_param_keys = inspect.signature(EnhancedASLNet).parameters.keys()
+            filtered_kwargs = {k: v for k, v in kwargs.items() if k in model_param_keys}
+            return EnhancedASLNet(input_size=base_nn_input_size, **filtered_kwargs)
 
-        trainer_obj = EnhancedASLTrainer(model_config=trial_model_config, model_class=create_hpo_model, 
-                                     input_size=base_nn_input_size,
-                                     learning_rate=config_obj.learning_rate, weight_decay=config_obj.weight_decay,
-                                     batch_size=config_obj.batch_size, n_ensembles=config_obj.n_ensembles, device=device,
-                                     n_plds_for_model=num_plds, m0_input_feature_model=config_obj.m0_input_feature_model)
+        trainer_obj = EnhancedASLTrainer(
+            model_config=trial_model_config,  # Pass the full config for the trainer to use (e.g., for loss)
+            model_class=create_hpo_model,     # Pass the factory that correctly instantiates the model
+            input_size=base_nn_input_size,
+            learning_rate=config_obj.learning_rate, weight_decay=config_obj.weight_decay,
+            batch_size=config_obj.batch_size, n_ensembles=config_obj.n_ensembles, device=device,
+            n_plds_for_model=num_plds, m0_input_feature_model=config_obj.m0_input_feature_model)
         
         train_loaders_list, val_loaders_list, _ = trainer_obj.prepare_curriculum_data( 
             simulator_obj, plds=plds_numpy_arr, precomputed_dataset=precomputed_hpo_data,
@@ -696,10 +704,15 @@ def run_comprehensive_asl_research(config: ResearchConfig, output_parent_dir: st
         'n_plds': num_plds
     }
 
-    def create_main_model_closure(**kwargs): return EnhancedASLNet(input_size=base_input_size_nn, **kwargs)
+    # <<< FIX: The model factory closure now filters the kwargs to avoid TypeError.
+    def create_main_model_closure(**kwargs):
+        model_param_keys = inspect.signature(EnhancedASLNet).parameters.keys()
+        filtered_kwargs = {k: v for k, v in kwargs.items() if k in model_param_keys}
+        return EnhancedASLNet(input_size=base_input_size_nn, **filtered_kwargs)
 
     trainer = EnhancedASLTrainer(
-        model_config=model_creation_config, model_class=create_main_model_closure, 
+        model_config=model_creation_config, # Pass the full config for the trainer to use
+        model_class=create_main_model_closure, # Pass the factory that correctly instantiates the model
         input_size=base_input_size_nn, learning_rate=config.learning_rate,
         weight_decay=config.weight_decay, batch_size=config.batch_size, 
         n_ensembles=config.n_ensembles, device=device,
@@ -710,7 +723,8 @@ def run_comprehensive_asl_research(config: ResearchConfig, output_parent_dir: st
     monitor.log_progress("PHASE2", "Preparing curriculum data loaders from balanced, feature-rich dataset...")
     train_loaders, val_loaders, norm_stats_final = trainer.prepare_curriculum_data(
         simulator=simulator, plds=plds_np,
-        precomputed_dataset=precomputed_training_data, # Pass the new data
+        precomputed_dataset=precomputed_training_data,
+        val_split=config.val_split,
         curriculum_att_ranges_config=config.att_ranges_config,
         n_epochs_for_scheduler=config.training_n_epochs
     )
@@ -841,21 +855,29 @@ if __name__ == "__main__":
     config_file_path_arg = sys.argv[1] if len(sys.argv) > 1 else "config/default.yaml"
     loaded_config_obj = ResearchConfig() 
 
+    # --- Corrected code block for main.py ---
     if Path(config_file_path_arg).exists():
         script_logger.info(f"Loading configuration from {config_file_path_arg}")
         with open(config_file_path_arg, 'r') as f_yaml:
-            config_dict_from_yaml = yaml.safe_load(f_yaml) or {}
+            config_from_yaml = yaml.safe_load(f_yaml) or {}
         
-        # Smartly merge dicts from yaml into the dataclass
-        for key, value in config_dict_from_yaml.items():
+        # Create a flat dictionary of all key-value pairs from the potentially nested YAML
+        all_yaml_params = {}
+        for key, value in config_from_yaml.items():
+            if isinstance(value, dict):
+                all_yaml_params.update(value)
+            else:
+                all_yaml_params[key] = value
+        
+        # Update the ResearchConfig object with the flattened parameters
+        for key, value in all_yaml_params.items():
             if hasattr(loaded_config_obj, key):
-                if isinstance(getattr(loaded_config_obj, key), dict) and isinstance(value, dict):
-                    getattr(loaded_config_obj, key).update(value)
-                else:
-                    setattr(loaded_config_obj, key, value)
+                setattr(loaded_config_obj, key, value)
+            else:
+                script_logger.warning(f"YAML key '{key}' not found in ResearchConfig, ignoring.")
     else: 
         script_logger.info(f"Config file {config_file_path_arg} not found. Using default ResearchConfig.")
-    
+
     script_logger.info("\nStarting comprehensive ASL research pipeline with configuration:")
     
     pipeline_results_dict = run_comprehensive_asl_research(config=loaded_config_obj)
