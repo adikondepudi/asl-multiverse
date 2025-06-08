@@ -59,23 +59,23 @@ def apply_normalization_to_input_flat(flat_signal: np.ndarray,
                                       norm_stats: Dict,
                                       num_plds_per_modality: int,
                                       has_m0: bool) -> np.ndarray:
-    if not norm_stats or not isinstance(norm_stats, dict): return flat_signal
+    if not norm_stats or not isinstance(norm_stats, dict):
+        return flat_signal
 
-    pcasl_signal_part = flat_signal[:num_plds_per_modality]
-    vsasl_signal_part = flat_signal[num_plds_per_modality : num_plds_per_modality*2]
+    # Isolate signal part from other features (like engineered features)
+    raw_signal_len = num_plds_per_modality * 2
+    signal_part = flat_signal[:raw_signal_len]
+    other_features_part = flat_signal[raw_signal_len:]
 
+    pcasl_signal_part = signal_part[:num_plds_per_modality]
+    vsasl_signal_part = signal_part[num_plds_per_modality:]
+    
     pcasl_norm = (pcasl_signal_part - norm_stats.get('pcasl_mean', 0)) / norm_stats.get('pcasl_std', 1)
     vsasl_norm = (vsasl_signal_part - norm_stats.get('vsasl_mean', 0)) / norm_stats.get('vsasl_std', 1)
 
-    normalized_parts = [pcasl_norm, vsasl_norm]
-
-    if has_m0:
-        m0_signal_part = flat_signal[num_plds_per_modality*2:] # Assumes M0 is at the end
-        if m0_signal_part.size > 0 : # Ensure M0 part exists
-            m0_norm = (m0_signal_part - norm_stats.get('m0_mean', 0)) / norm_stats.get('m0_std', 1)
-            normalized_parts.append(m0_norm)
-
-    return np.concatenate(normalized_parts)
+    # Reconcatenate normalized signal with the untouched other features.
+    # The has_m0 flag becomes irrelevant as M0 would be part of other_features_part if present.
+    return np.concatenate([pcasl_norm, vsasl_norm, other_features_part])
 
 class SingleRepeatValidator:
     def __init__(self,
