@@ -105,6 +105,43 @@ class ResearchConfig:
     wandb_project: str = "asl-multiverse-project"
     wandb_entity: Optional[str] = None 
 
+def engineer_signal_features(raw_signal: np.ndarray, num_plds: int) -> np.ndarray:
+    """
+    Engineers explicit shape-based features from raw ASL signal curves to
+    make timing information more salient for the neural network.
+
+    Args:
+        raw_signal: A numpy array of shape (N, num_plds * 2) containing
+                    concatenated PCASL and VSASL signals.
+        num_plds: The number of Post-Labeling Delays per modality.
+
+    Returns:
+        A numpy array of shape (N, 4) with the engineered features:
+        - PCASL time-to-peak index
+        - VSASL time-to-peak index
+        - PCASL center-of-mass
+        - VSASL center-of-mass
+    """
+    num_samples = raw_signal.shape[0]
+    engineered_features = np.zeros((num_samples, 4))
+    plds_indices = np.arange(num_plds)
+
+    for i in range(num_samples):
+        pcasl_curve = raw_signal[i, :num_plds]
+        vsasl_curve = raw_signal[i, num_plds:]
+
+        # Feature 1: Time to peak (index of max signal)
+        engineered_features[i, 0] = np.argmax(pcasl_curve)
+        engineered_features[i, 1] = np.argmax(vsasl_curve)
+
+        # Feature 2: Center of mass (temporal)
+        pcasl_sum = np.sum(pcasl_curve) + 1e-6
+        vsasl_sum = np.sum(vsasl_curve) + 1e-6
+        engineered_features[i, 2] = np.sum(pcasl_curve * plds_indices) / pcasl_sum
+        engineered_features[i, 3] = np.sum(vsasl_curve * plds_indices) / vsasl_sum
+
+    return engineered_features
+
 # Helper function for normalization (can be moved to a utils.py later)
 def apply_normalization_to_input_flat(flat_signal: np.ndarray, 
                                       norm_stats: Dict, 
@@ -250,97 +287,60 @@ class HyperparameterOptimizer:
                                    alpha_PCASL=config_obj.alpha_PCASL, alpha_VSASL=config_obj.alpha_VSASL)
         simulator_obj = RealisticASLSimulator(params=asl_params_for_sim)
         plds_numpy_arr = np.array(config_obj.pld_values)
-        base_nn_input_size = len(plds_numpy_arr) * 2
+        num_plds = len(plds_numpy_arr)
         
+        # HPO uses a balanced dataset for stability
+        precomputed_hpo_data = simulator_obj.generate_balanced_dataset(
+            plds=plds_numpy_arr, total_subjects=config_obj.n_training_subjects,
+            noise_levels=config_obj.training_noise_levels[:1] # Use fewer noise levels for speed
+        )
+        # Apply feature engineering for HPO run
+        engineered_features_hpo = engineer_signal_features(precomputed_hpo_data['signals'], num_plds)
+        precomputed_hpo_data['signals'] = np.concatenate([precomputed_hpo_data['signals'], engineered_features_hpo], axis=1)
+
+        base_nn_input_size = precomputed_hpo_data['signals'].shape[1]
+
         trial_model_config = {
-            'hidden_sizes': config_obj.hidden_sizes, 'dropout_rate': config_obj.dropout_rate, 
-            'norm_type': config_obj.norm_type,
+            'hidden_sizes': config_obj.hidden_sizes, 'dropout_rate': config_obj.dropout_rate, 'norm_type': config_obj.norm_type,
             'use_transformer_temporal': config_obj.use_transformer_temporal_model,
             'use_focused_transformer': config_obj.use_focused_transformer_model,
             'transformer_d_model': config_obj.transformer_d_model,
             'transformer_d_model_focused': config_obj.transformer_d_model_focused,
-            'transformer_nhead': config_obj.transformer_nhead_model,
-            'transformer_nlayers': config_obj.transformer_nlayers_model,
+            'transformer_nhead': config_obj.transformer_nhead_model, 'transformer_nlayers': config_obj.transformer_nlayers_model,
             'm0_input_feature': config_obj.m0_input_feature_model,
             'log_var_cbf_min': config_obj.log_var_cbf_min, 'log_var_cbf_max': config_obj.log_var_cbf_max,
             'log_var_att_min': config_obj.log_var_att_min, 'log_var_att_max': config_obj.log_var_att_max,
-            'loss_weight_cbf': config_obj.loss_weight_cbf, 
-            'loss_weight_att': config_obj.loss_weight_att,
+            'loss_weight_cbf': config_obj.loss_weight_cbf, 'loss_weight_att': config_obj.loss_weight_att,
             'loss_log_var_reg_lambda': config_obj.loss_log_var_reg_lambda,
-            'n_plds': len(plds_numpy_arr) 
+            'n_plds': num_plds
         }
 
-        def create_hpo_model(**kwargs_from_trainer): 
-            net_params_map = {
-                'use_transformer_temporal_model': 'use_transformer_temporal',
-                'use_focused_transformer_model': 'use_focused_transformer',
-                'transformer_nhead_model': 'transformer_nhead',
-                'transformer_nlayers_model': 'transformer_nlayers',
-                'm0_input_feature_model': 'm0_input_feature',
-            }
-            ENHANCED_ASL_NET_DIRECT_PARAMS = [
-                'hidden_sizes', 'n_plds', 'dropout_rate', 'norm_type',
-                'transformer_d_model', 'transformer_d_model_focused',
-                'log_var_cbf_min', 'log_var_cbf_max',
-                'log_var_att_min', 'log_var_att_max'
-            ]
-            
-            model_specific_kwargs = {}
-            for config_key, net_key in net_params_map.items():
-                if config_key in kwargs_from_trainer:
-                    model_specific_kwargs[net_key] = kwargs_from_trainer[config_key]
-            for param_key in ENHANCED_ASL_NET_DIRECT_PARAMS:
-                if param_key in kwargs_from_trainer:
-                    model_specific_kwargs[param_key] = kwargs_from_trainer[param_key]
-            
-            return EnhancedASLNet(input_size=base_nn_input_size, **model_specific_kwargs).to(device)
+        def create_hpo_model(**kwargs): return EnhancedASLNet(input_size=base_nn_input_size, **kwargs)
 
-        trainer_obj = EnhancedASLTrainer(model_config=trial_model_config, 
-                                     model_class=create_hpo_model, 
-                                     input_size=base_nn_input_size + (1 if config_obj.m0_input_feature_model else 0),
-                                     learning_rate=config_obj.learning_rate, 
-                                     weight_decay=config_obj.weight_decay, # Pass weight_decay
-                                     batch_size=config_obj.batch_size, 
-                                     n_ensembles=config_obj.n_ensembles, device=device,
-                                     n_plds_for_model=len(plds_numpy_arr), 
-                                     m0_input_feature_model=config_obj.m0_input_feature_model)
+        trainer_obj = EnhancedASLTrainer(model_config=trial_model_config, model_class=create_hpo_model, 
+                                     input_size=base_nn_input_size,
+                                     learning_rate=config_obj.learning_rate, weight_decay=config_obj.weight_decay,
+                                     batch_size=config_obj.batch_size, n_ensembles=config_obj.n_ensembles, device=device,
+                                     n_plds_for_model=num_plds, m0_input_feature_model=config_obj.m0_input_feature_model)
         
         train_loaders_list, val_loaders_list, _ = trainer_obj.prepare_curriculum_data( 
-            simulator_obj, n_training_subjects=config_obj.n_training_subjects, plds=plds_numpy_arr,
+            simulator_obj, plds=plds_numpy_arr, precomputed_dataset=precomputed_hpo_data,
             curriculum_att_ranges_config=config_obj.att_ranges_config,
-            training_conditions_config=config_obj.training_conditions[:1], 
-            training_noise_levels_config=config_obj.training_noise_levels[:1], 
-            n_epochs_for_scheduler=config_obj.training_n_epochs,
-            include_m0_in_data=config_obj.include_m0_in_training_data
+            n_epochs_for_scheduler=config_obj.training_n_epochs
         )
         if not train_loaders_list:
             self.monitor.log_progress("OPTUNA_RUN", "No training data for HPO trial.", logging.ERROR)
             return None, None, {'val_loss': float('inf')}
         
-        # For HPO, use only the first stage of val_loaders_list if multiple exist, or first non-empty
-        first_val_loader_for_hpo = None
-        if val_loaders_list:
-            for vl in val_loaders_list:
-                if vl and len(vl) > 0:
-                    first_val_loader_for_hpo = vl
-                    break
-            if first_val_loader_for_hpo is None and val_loaders_list: # If all are empty, take the first one
-                 first_val_loader_for_hpo = val_loaders_list[0]
+        first_val_loader_for_hpo = next((vl for vl in val_loaders_list if vl and len(vl) > 0), val_loaders_list[0] if val_loaders_list else None)
         
-        # HPO quick run: use only first train_loader and corresponding val_loader (if any)
-        history = trainer_obj.train_ensemble([train_loaders_list[0]] if train_loaders_list else [], 
-                                             [first_val_loader_for_hpo] if first_val_loader_for_hpo else [], 
+        history = trainer_obj.train_ensemble([train_loaders_list[0]] if train_loaders_list else [], [first_val_loader_for_hpo] if first_val_loader_for_hpo else [], 
                                              n_epochs=config_obj.training_n_epochs, early_stopping_patience=5)
         
-        final_val_metrics_dict = {'val_loss': float('inf')} 
-        if first_val_loader_for_hpo and history['all_histories'] and 0 in history['all_histories']:
-            stage0_val_metrics = history['all_histories'][0].get('val_metrics_stage_0')
-            if stage0_val_metrics and stage0_val_metrics[-1]:
-                 final_val_metrics_dict = stage0_val_metrics[-1]
-        elif history.get('final_mean_val_loss') is not None and not np.isnan(history['final_mean_val_loss']):
-             final_val_metrics_dict['val_loss'] = history['final_mean_val_loss']
+        final_val_loss = history.get('final_mean_val_loss', float('inf'))
+        if np.isnan(final_val_loss): final_val_loss = float('inf')
 
-        return trainer_obj, simulator_obj, final_val_metrics_dict
+        return trainer_obj, simulator_obj, {'val_loss': final_val_loss}
 
 
     def optimize(self) -> Dict:
@@ -401,13 +401,9 @@ class ClinicalValidator:
                 single_repeat_data_dict = self.simulator.generate_synthetic_data(
                     self.plds_np, np.array([true_att]), n_noise=1, tsnr=current_snr, cbf_val=true_cbf
                 )
-                nn_input_signal_flat = np.concatenate([
-                    single_repeat_data_dict['PCASL'][0,0,:], 
-                    single_repeat_data_dict['VSASL'][0,0,:]
-                ])
-                if self.config.m0_input_feature_model: 
-                    dummy_m0_val = np.array([1.0]) 
-                    nn_input_signal_flat = np.concatenate((nn_input_signal_flat, dummy_m0_val))
+                raw_nn_signal = np.concatenate([single_repeat_data_dict['PCASL'][0,0,:], single_repeat_data_dict['VSASL'][0,0,:]])
+                engineered_features = engineer_signal_features(raw_nn_signal.reshape(1,-1), num_plds_per_mod)
+                nn_input_signal_flat = np.concatenate([raw_nn_signal, engineered_features.flatten()])
                 
                 ls_single_repeat_signal_arr = single_repeat_data_dict['MULTIVERSE'][0,0,:,:]
 
@@ -472,16 +468,20 @@ class ClinicalValidator:
     def _ensemble_predict(self, models: List[torch.nn.Module], input_signal_flat: np.ndarray) -> Tuple[float, float, float, float]:
         if not models: return np.nan, np.nan, np.nan, np.nan
         
-        num_plds_per_mod = len(self.plds_np)
-        normalized_input_signal_flat = input_signal_flat
-        if self.norm_stats:
-            normalized_input_signal_flat = apply_normalization_to_input_flat(
-                input_signal_flat, self.norm_stats, 
-                num_plds_per_mod, 
-                self.config.m0_input_feature_model 
-            )
+        # Note: Normalization is NOT applied here because the input_signal_flat already
+        # includes engineered features which are not part of the normalization stats.
+        # The normalization will be applied inside the main prediction function.
+        # Correction: Normalization must be applied to the *signal part* of the input vector.
 
-        input_tensor = torch.FloatTensor(normalized_input_signal_flat).unsqueeze(0).to(next(models[0].parameters()).device)
+        num_raw_signal_features = len(self.plds_np) * 2
+        normalized_input_signal = input_signal_flat.copy()
+        if self.norm_stats:
+            signal_part = input_signal_flat[:num_raw_signal_features]
+            pcasl_part = (signal_part[:len(self.plds_np)] - self.norm_stats['pcasl_mean']) / self.norm_stats['pcasl_std']
+            vsasl_part = (signal_part[len(self.plds_np):] - self.norm_stats['vsasl_mean']) / self.norm_stats['vsasl_std']
+            normalized_input_signal[:num_raw_signal_features] = np.concatenate([pcasl_part, vsasl_part])
+        
+        input_tensor = torch.FloatTensor(normalized_input_signal).unsqueeze(0).to(next(models[0].parameters()).device)
         
         cbf_means_norm_list, att_means_norm_list = [], []
         cbf_aleatoric_vars_norm_list, att_aleatoric_vars_norm_list = [], []
@@ -629,6 +629,7 @@ def run_comprehensive_asl_research(config: ResearchConfig, output_parent_dir: st
     if wandb_run: wandb.save(str(config_save_path))
 
     plds_np = np.array(config.pld_values)
+    num_plds = len(plds_np)
     asl_params_sim = ASLParameters(
         T1_artery=config.T1_artery, T_tau=config.T_tau, 
         alpha_PCASL=config.alpha_PCASL, alpha_VSASL=config.alpha_VSASL,
@@ -658,94 +659,69 @@ def run_comprehensive_asl_research(config: ResearchConfig, output_parent_dir: st
     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
     monitor.log_progress("PHASE2", f"Using device: {device}")
     
-    base_input_size_nn = len(plds_np) * 2 
-    model_actual_input_size = base_input_size_nn + (1 if config.m0_input_feature_model else 0)
-
+    # --- FIX: Generate a balanced dataset with a uniform ATT distribution ---
+    monitor.log_progress("PHASE2", "Generating balanced (uniform ATT) training dataset...")
+    precomputed_training_data = simulator.generate_balanced_dataset(
+        plds=plds_np, total_subjects=config.n_training_subjects,
+        noise_levels=config.training_noise_levels
+    )
+    
+    # --- FIX: Apply explicit feature engineering ---
+    monitor.log_progress("PHASE2", "Applying signal feature engineering...")
+    engineered_features = engineer_signal_features(precomputed_training_data['signals'], num_plds)
+    # Concatenate raw signals with new features
+    precomputed_training_data['signals'] = np.concatenate(
+        [precomputed_training_data['signals'], engineered_features], axis=1
+    )
+    
+    if 'parameters' in precomputed_training_data and precomputed_training_data['parameters'].size > 0:
+        mean_att_balanced = np.mean(precomputed_training_data['parameters'][:, 1])
+        monitor.log_progress("PHASE2", f"Mean ATT of new balanced dataset: {mean_att_balanced:.2f} ms")
+        if wandb_run: wandb.summary['balanced_dataset_mean_att'] = mean_att_balanced
+            
+    # Define model input size AFTER feature engineering
+    base_input_size_nn = precomputed_training_data['signals'].shape[1]
+    
     model_creation_config = {
         'hidden_sizes': config.hidden_sizes, 'dropout_rate': config.dropout_rate, 'norm_type': config.norm_type,
         'use_transformer_temporal': config.use_transformer_temporal_model,
         'use_focused_transformer': config.use_focused_transformer_model,
-        'transformer_d_model': config.transformer_d_model,
-        'transformer_d_model_focused': config.transformer_d_model_focused,
-        'transformer_nhead': config.transformer_nhead_model,
-        'transformer_nlayers': config.transformer_nlayers_model,
-        'm0_input_feature': config.m0_input_feature_model,
+        'transformer_d_model': config.transformer_d_model, 'transformer_d_model_focused': config.transformer_d_model_focused,
+        'transformer_nhead': config.transformer_nhead_model, 'transformer_nlayers': config.transformer_nlayers_model,
+        'm0_input_feature': False, # Feature engineering is more powerful than simple M0 feature for now
         'log_var_cbf_min': config.log_var_cbf_min, 'log_var_cbf_max': config.log_var_cbf_max,
         'log_var_att_min': config.log_var_att_min, 'log_var_att_max': config.log_var_att_max,
-        'loss_weight_cbf': config.loss_weight_cbf, 
-        'loss_weight_att': config.loss_weight_att,
+        'loss_weight_cbf': config.loss_weight_cbf, 'loss_weight_att': config.loss_weight_att,
         'loss_log_var_reg_lambda': config.loss_log_var_reg_lambda,
-        'n_plds': len(plds_np) 
+        'n_plds': num_plds
     }
 
-    def create_main_model_closure(**kwargs_from_trainer):
-        net_params_map = {
-            'use_transformer_temporal_model': 'use_transformer_temporal',
-            'use_focused_transformer_model': 'use_focused_transformer',
-            'transformer_nhead_model': 'transformer_nhead',
-            'transformer_nlayers_model': 'transformer_nlayers',
-            'm0_input_feature_model': 'm0_input_feature',
-        }
-        ENHANCED_ASL_NET_DIRECT_PARAMS = [
-            'hidden_sizes', 'n_plds', 'dropout_rate', 'norm_type',
-            'transformer_d_model', 'transformer_d_model_focused',
-            'log_var_cbf_min', 'log_var_cbf_max',
-            'log_var_att_min', 'log_var_att_max'
-        ]
-        model_specific_kwargs = {}
-        for config_key, net_key in net_params_map.items():
-            if config_key in kwargs_from_trainer:
-                model_specific_kwargs[net_key] = kwargs_from_trainer[config_key]
-        for param_key in ENHANCED_ASL_NET_DIRECT_PARAMS:
-            if param_key in kwargs_from_trainer:
-                model_specific_kwargs[param_key] = kwargs_from_trainer[param_key]
-        return EnhancedASLNet(input_size=base_input_size_nn, **model_specific_kwargs).to(device)
+    def create_main_model_closure(**kwargs): return EnhancedASLNet(input_size=base_input_size_nn, **kwargs)
 
-    trainer = EnhancedASLTrainer(model_config=model_creation_config, 
-                                 model_class=create_main_model_closure, 
-                                 input_size=model_actual_input_size,
-                                 learning_rate=config.learning_rate,
-                                 weight_decay=config.weight_decay, # Pass weight_decay
-                                 batch_size=config.batch_size, n_ensembles=config.n_ensembles, device=device,
-                                 n_plds_for_model=len(plds_np), 
-                                 m0_input_feature_model=config.m0_input_feature_model)
-    
-    # --- FIX: Generate a balanced dataset with a uniform ATT distribution ---
-    monitor.log_progress("PHASE2", "Generating balanced (uniform ATT) training dataset...")
-    precomputed_training_data = simulator.generate_balanced_dataset(
-        plds=plds_np,
-        total_subjects=config.n_training_subjects,
-        noise_levels=config.training_noise_levels
+    trainer = EnhancedASLTrainer(
+        model_config=model_creation_config, model_class=create_main_model_closure, 
+        input_size=base_input_size_nn, learning_rate=config.learning_rate,
+        weight_decay=config.weight_decay, batch_size=config.batch_size, 
+        n_ensembles=config.n_ensembles, device=device,
+        n_plds_for_model=num_plds, m0_input_feature_model=False
     )
     
-    # Log the mean ATT of the new dataset to verify the fix
-    if 'parameters' in precomputed_training_data and precomputed_training_data['parameters'].size > 0:
-        mean_att_balanced = np.mean(precomputed_training_data['parameters'][:, 1])
-        monitor.log_progress("PHASE2", f"Mean ATT of new balanced dataset: {mean_att_balanced:.2f} ms (Target is ~2250 ms)")
-        if wandb.run:
-            wandb.summary['balanced_dataset_mean_att'] = mean_att_balanced
-            
-    # --- FIX: Pass the pre-generated balanced data to the trainer ---
-    monitor.log_progress("PHASE2", "Preparing curriculum data loaders from balanced dataset...")
+    # --- FIX: Pass the pre-generated, feature-engineered data to the trainer ---
+    monitor.log_progress("PHASE2", "Preparing curriculum data loaders from balanced, feature-rich dataset...")
     train_loaders, val_loaders, norm_stats_final = trainer.prepare_curriculum_data(
-        simulator=simulator,  # Still passed for some internal config values
-        plds=plds_np,
-        precomputed_dataset=precomputed_training_data, # <-- PASSING THE NEW DATA
-        # The following arguments are now used by the data processing part of the function
+        simulator=simulator, plds=plds_np,
+        precomputed_dataset=precomputed_training_data, # Pass the new data
         curriculum_att_ranges_config=config.att_ranges_config,
-        n_epochs_for_scheduler=config.training_n_epochs,
-        include_m0_in_data=config.include_m0_in_training_data
+        n_epochs_for_scheduler=config.training_n_epochs
     )
 
     if norm_stats_final: 
         norm_stats_path = output_path / 'norm_stats.json'
         serializable_norm_stats = {k: (v.tolist() if isinstance(v, np.ndarray) else v) for k, v in norm_stats_final.items()}
         with open(norm_stats_path, 'w') as f: json.dump(serializable_norm_stats, f, indent=2)
-        monitor.log_progress("PHASE2", f"Normalization stats saved to {norm_stats_path}")
         if wandb_run: wandb.save(str(norm_stats_path))
     else:
-        monitor.log_progress("PHASE2", "No normalization stats (e.g. empty training set for stats calc).", logging.WARNING)
-
+        monitor.log_progress("PHASE2", "No normalization stats generated.", logging.WARNING)
 
     if not train_loaders:
         monitor.log_progress("PHASE2", "Failed to create training loaders. Aborting.", logging.CRITICAL)
@@ -754,18 +730,16 @@ def run_comprehensive_asl_research(config: ResearchConfig, output_parent_dir: st
     
     monitor.log_progress("PHASE2", f"Training {config.n_ensembles}-model ensemble for {config.training_n_epochs} epochs per stage...")
     training_start_time = time.time()
-    training_histories_dict = trainer.train_ensemble(train_loaders, val_loaders, n_epochs=config.training_n_epochs) # Pass val_loaders
+    training_histories_dict = trainer.train_ensemble(train_loaders, val_loaders, n_epochs=config.training_n_epochs)
     training_duration_hours = (time.time() - training_start_time) / 3600
     monitor.log_progress("PHASE2", f"Training completed in {training_duration_hours:.2f} hours.")
     if wandb_run: wandb.summary['training_duration_hours'] = training_duration_hours
 
     monitor.log_progress("PHASE3", "Starting clinical validation")
-    clinical_validator = ClinicalValidator(config, monitor, norm_stats=norm_stats_final) # Pass norm_stats_final
+    clinical_validator = ClinicalValidator(config, monitor, norm_stats=norm_stats_final)
     clinical_validation_results = clinical_validator.validate_clinical_scenarios(trainer.models if trainer.models else [])
 
     monitor.log_progress("PHASE3.5", "Starting single-repeat vs multi-repeat validation") 
-    nn_config_srs = model_creation_config.copy() 
-    
     srs_model_path = None
     if trainer.models:
         temp_srs_model_path = output_path / 'temp_srs_model_0.pt'
@@ -773,34 +747,30 @@ def run_comprehensive_asl_research(config: ResearchConfig, output_parent_dir: st
         if model_state_srs: torch.save(model_state_srs, temp_srs_model_path); srs_model_path = str(temp_srs_model_path)
 
     _, single_repeat_val_metrics = run_single_repeat_validation_main(
-        model_path=srs_model_path,
-        base_nn_input_size_for_model_load=base_input_size_nn, 
-        nn_arch_config_for_model_load=nn_config_srs, 
-        norm_stats_for_nn=norm_stats_final 
+        model_path=srs_model_path, base_nn_input_size_for_model_load=base_input_size_nn, 
+        nn_arch_config_for_model_load=model_creation_config, norm_stats_for_nn=norm_stats_final 
     )
     if srs_model_path and temp_srs_model_path.exists(): temp_srs_model_path.unlink()
 
-
     monitor.log_progress("PHASE4", "Benchmarking NN against conventional LS methods")
     total_test_subjects = config.n_test_subjects_per_att_range * len(config.att_ranges_config)
-    total_test_subjects = min(total_test_subjects, 2000) 
-    n_base_subjects_for_benchmark = max(1, total_test_subjects // (len(config.test_conditions) * len(config.test_snr_levels) * 3 if config.test_conditions and config.test_snr_levels else 1))
+    n_base_subjects_for_benchmark = max(1, min(total_test_subjects, 2000) // (len(config.test_conditions) * len(config.test_snr_levels) * 3 if config.test_conditions and config.test_snr_levels else 1))
 
     benchmark_test_dataset_raw = simulator.generate_diverse_dataset(
         plds=plds_np, n_subjects=n_base_subjects_for_benchmark,
         conditions=config.test_conditions, noise_levels=config.test_snr_levels
     )
-    benchmark_X_all_asl, benchmark_y_all = benchmark_test_dataset_raw['signals'], benchmark_test_dataset_raw['parameters']
+    benchmark_y_all = benchmark_test_dataset_raw['parameters']
     
-    benchmark_X_all_nn_input = benchmark_X_all_asl 
-    if config.m0_input_feature_model: 
-        m0_for_benchmark = np.random.normal(1.0, 0.1, size=(benchmark_X_all_asl.shape[0], 1)) 
-        benchmark_X_all_nn_input = np.concatenate((benchmark_X_all_asl, m0_for_benchmark), axis=1)
-    
+    # Apply the same feature engineering to the benchmark data
+    raw_benchmark_signals = benchmark_test_dataset_raw['signals']
+    engineered_benchmark_features = engineer_signal_features(raw_benchmark_signals, num_plds)
+    benchmark_X_all_nn_input = np.concatenate([raw_benchmark_signals, engineered_benchmark_features], axis=1)
+
     benchmark_test_data_for_comp = {
-        'PCASL': benchmark_X_all_asl[:, :len(plds_np)], 
-        'VSASL': benchmark_X_all_asl[:, len(plds_np):len(plds_np)*2], 
-        'MULTIVERSE_LS_FORMAT': benchmark_X_all_asl.reshape(-1, len(plds_np), 2),
+        'PCASL_LS': raw_benchmark_signals[:, :num_plds], 
+        'VSASL_LS': raw_benchmark_signals[:, num_plds:], 
+        'MULTIVERSE_LS_FORMAT': raw_benchmark_signals.reshape(-1, num_plds, 2),
         'NN_INPUT_FORMAT': benchmark_X_all_nn_input
     }
 
@@ -813,32 +783,26 @@ def run_comprehensive_asl_research(config: ResearchConfig, output_parent_dir: st
 
     comp_framework_output_dir = output_path / "comparison_framework_outputs"
     comp_framework = ComprehensiveComparison(
-        nn_model_path=nn_model_for_comp_path,
-        output_dir=str(comp_framework_output_dir), 
-        base_nn_input_size=base_input_size_nn, 
-        nn_n_plds=len(plds_np),
-        nn_m0_input_feature=config.m0_input_feature_model,
-        nn_model_arch_config=model_creation_config, 
-        norm_stats=norm_stats_final # Pass norm_stats_final
+        nn_model_path=nn_model_for_comp_path, output_dir=str(comp_framework_output_dir), 
+        base_nn_input_size=base_input_size_nn, nn_n_plds=num_plds,
+        nn_model_arch_config=model_creation_config, norm_stats=norm_stats_final
     )
     comparison_results_df = comp_framework.compare_methods(benchmark_test_data_for_comp, benchmark_y_all, plds_np, config.att_ranges_config)
     if nn_model_for_comp_path and temp_comp_model_save_path.exists(): temp_comp_model_save_path.unlink() 
     
     if not comparison_results_df.empty and wandb_run:
-        benchmark_table_path_wandb = comp_framework_output_dir / 'comparison_results_detailed.csv'
-        if benchmark_table_path_wandb.exists(): wandb.save(str(benchmark_table_path_wandb))
+        if (comp_framework_output_dir / 'comparison_results_detailed.csv').exists():
+             wandb.save(str(comp_framework_output_dir / 'comparison_results_detailed.csv'))
 
-    nn_benchmark_metrics_for_monitor, baseline_ls_metrics_for_monitor = {}, {}
+    nn_benchmark_metrics, baseline_ls_metrics = {}, {}
     if not comparison_results_df.empty:
         for att_cfg_item in config.att_ranges_config: 
-            range_name_str_cfg = att_cfg_item[2]
-            nn_row_df = comparison_results_df[(comparison_results_df['method'] == 'Neural Network') & (comparison_results_df['att_range_name'] == range_name_str_cfg)]
-            if not nn_row_df.empty: nn_benchmark_metrics_for_monitor[range_name_str_cfg] = nn_row_df.iloc[0].to_dict()
-            
-            ls_row_df = comparison_results_df[(comparison_results_df['method'] == 'MULTIVERSE-LS') & (comparison_results_df['att_range_name'] == range_name_str_cfg)]
-            if not ls_row_df.empty: baseline_ls_metrics_for_monitor[range_name_str_cfg] = ls_row_df.iloc[0].to_dict()
-        
-        monitor.check_target_achievement(nn_benchmark_metrics_for_monitor, baseline_ls_metrics_for_monitor)
+            range_name = att_cfg_item[2]
+            nn_row_df = comparison_results_df[(comparison_results_df['method'] == 'Neural Network') & (comparison_results_df['att_range_name'] == range_name)]
+            if not nn_row_df.empty: nn_benchmark_metrics[range_name] = nn_row_df.iloc[0].to_dict()
+            ls_row_df = comparison_results_df[(comparison_results_df['method'] == 'MULTIVERSE-LS') & (comparison_results_df['att_range_name'] == range_name)]
+            if not ls_row_df.empty: baseline_ls_metrics[range_name] = ls_row_df.iloc[0].to_dict()
+        monitor.check_target_achievement(nn_benchmark_metrics, baseline_ls_metrics)
 
     monitor.log_progress("PHASE5", "Generating publication-ready materials (tables only)")
     pub_gen = PublicationGenerator(config, output_path, monitor)
@@ -846,29 +810,19 @@ def run_comprehensive_asl_research(config: ResearchConfig, output_parent_dir: st
         clinical_validation_results, comparison_results_df, single_repeat_val_metrics
     )
 
-    monitor.log_progress("PHASE6", "Generating comprehensive research summary")
+    monitor.log_progress("PHASE6", "Saving final models and summarizing results")
     models_dir = output_path / 'trained_models'; models_dir.mkdir(exist_ok=True)
     if trainer.models:
-        for i, model_state_val in enumerate(trainer.best_states if hasattr(trainer, 'best_states') and trainer.best_states and any(trainer.best_states) else [m.state_dict() for m in trainer.models]):
-            model_file_path_val = models_dir / f'ensemble_model_{i}_best.pt' 
-            if model_state_val: 
-                torch.save(model_state_val, model_file_path_val)
-            elif trainer.models and trainer.models[i]: 
-                model_file_path_val = models_dir / f'ensemble_model_{i}_final.pt'
-                torch.save(trainer.models[i].state_dict(), model_file_path_val)
-            
+        for i, model_state_val in enumerate(trainer.best_states if hasattr(trainer, 'best_states') and any(trainer.best_states) else [m.state_dict() for m in trainer.models]):
+            model_file_path_val = models_dir / f'ensemble_model_{i}.pt' 
+            if model_state_val: torch.save(model_state_val, model_file_path_val)
             if wandb_run and model_file_path_val.exists(): wandb.save(str(model_file_path_val))
 
     final_results_summary = {
         'config': asdict(config), 'optuna_best_params': best_optuna_params,
-        'optuna_study_path': str(output_path / 'optuna_study.pkl') if config.optuna_n_trials > 0 and (output_path / 'optuna_study.pkl').exists() else None,
-        'norm_stats_path': str(output_path / 'norm_stats.json') if norm_stats_final and (output_path / 'norm_stats.json').exists() else None, # Use correct path
         'training_duration_hours': training_duration_hours, 
-        'training_histories_metrics': training_histories_dict.get('all_histories', None),
         'clinical_validation_results': clinical_validation_results,
         'single_repeat_validation_metrics': single_repeat_val_metrics,
-        'benchmark_comparison_results_csv_path': str(comp_framework_output_dir / 'comparison_results_detailed.csv') if not comparison_results_df.empty and (comp_framework_output_dir / 'comparison_results_detailed.csv').exists() else None,
-        'publication_package_summary_path': str(output_path / 'publication_package_summary.json') if (output_path / 'publication_package_summary.json').exists() else None,
         'trained_models_dir': str(models_dir),
         'wandb_run_url': wandb_run.url if wandb_run else None
     }
@@ -876,16 +830,6 @@ def run_comprehensive_asl_research(config: ResearchConfig, output_parent_dir: st
         json.dump(final_results_summary, f, indent=2, default=lambda o: f"<not_serializable_{type(o).__name__}>")
     if wandb_run: wandb.save(str(output_path / 'final_research_results.json'))
     
-    summary_report_path_txt = output_path / 'RESEARCH_SUMMARY.txt'
-    with open(summary_report_path_txt, 'w') as f:
-        f.write(f"Research pipeline completed. Full summary in final_research_results.json and log file at {output_path / 'research.log'}\n")
-        f.write(f"Output directory: {output_path}\n")
-        if best_optuna_params: f.write(f"Optuna Best Params: {best_optuna_params}\n")
-        if norm_stats_final: f.write(f"Normalization stats saved to: {output_path / 'norm_stats.json'}\n") # Use correct path
-        f.write(f"Training Duration: {training_duration_hours:.2f} hours\n")
-        if wandb_run: f.write(f"W&B Run: {wandb_run.url}\n")
-    if wandb_run: wandb.save(str(summary_report_path_txt))
-
     monitor.log_progress("COMPLETE", f"Research pipeline finished. Results in {output_path}")
     if wandb_run: wandb_run.finish()
     return final_results_summary
@@ -894,41 +838,31 @@ if __name__ == "__main__":
     logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(name)s - %(levelname)s - %(message)s', 
                         handlers=[logging.StreamHandler(sys.stdout)], force=True) 
     
-    script_logger.info("=" * 80 + "\nASL NEURAL NETWORK COMPREHENSIVE RESEARCH PIPELINE - Enhanced\n" + "=" * 80)
-    
     config_file_path_arg = sys.argv[1] if len(sys.argv) > 1 else "config/default.yaml"
     loaded_config_obj = ResearchConfig() 
 
     if Path(config_file_path_arg).exists():
         script_logger.info(f"Loading configuration from {config_file_path_arg}")
-        try:
-            with open(config_file_path_arg, 'r') as f_yaml:
-                config_dict_from_yaml = yaml.safe_load(f_yaml)
-            
-            for key_yaml, val_yaml in config_dict_from_yaml.items():
-                if hasattr(loaded_config_obj, key_yaml): 
-                    setattr(loaded_config_obj, key_yaml, val_yaml)
-                else: 
-                    if isinstance(val_yaml, dict): 
-                        for sub_key_yaml, sub_val_yaml in val_yaml.items():
-                            if hasattr(loaded_config_obj, sub_key_yaml): 
-                                setattr(loaded_config_obj, sub_key_yaml, sub_val_yaml)
-            script_logger.info(f"Successfully loaded and merged config from {config_file_path_arg}")
-
-        except Exception as e_cfg: 
-            script_logger.error(f"Error loading config {config_file_path_arg}: {e_cfg}. Using defaults or partially loaded config.")
+        with open(config_file_path_arg, 'r') as f_yaml:
+            config_dict_from_yaml = yaml.safe_load(f_yaml) or {}
+        
+        # Smartly merge dicts from yaml into the dataclass
+        for key, value in config_dict_from_yaml.items():
+            if hasattr(loaded_config_obj, key):
+                if isinstance(getattr(loaded_config_obj, key), dict) and isinstance(value, dict):
+                    getattr(loaded_config_obj, key).update(value)
+                else:
+                    setattr(loaded_config_obj, key, value)
     else: 
         script_logger.info(f"Config file {config_file_path_arg} not found. Using default ResearchConfig.")
     
-    script_logger.info("\nResearch Configuration:\n" + "-" * 30 + "\n" + "\n".join([f"{k_cfg_disp}: {v_cfg_disp}" for k_cfg_disp,v_cfg_disp in asdict(loaded_config_obj).items()]) + "\n" + "-" * 30)
-    script_logger.info("\nStarting comprehensive ASL research pipeline...")
+    script_logger.info("\nStarting comprehensive ASL research pipeline with configuration:")
     
     pipeline_results_dict = run_comprehensive_asl_research(config=loaded_config_obj)
     
     script_logger.info("\n" + "=" * 80 + "\nRESEARCH PIPELINE COMPLETED!\n" + "=" * 80)
     if "error" not in pipeline_results_dict:
         script_logger.info(f"Results saved in: {pipeline_results_dict.get('trained_models_dir', 'Specified output directory')}")
-        script_logger.info("Check RESEARCH_SUMMARY.txt and final_research_results.json for detailed findings.")
         if pipeline_results_dict.get('wandb_run_url'):
             script_logger.info(f"W&B Run: {pipeline_results_dict['wandb_run_url']}")
     else: 

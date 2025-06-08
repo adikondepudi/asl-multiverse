@@ -24,7 +24,8 @@ training:
   use_transformer_temporal_model: true
   m0_input_feature_model: false 
 
-  use_focused_transformer_model: false 
+  # FIX: Enable focused transformer for separate PCASL/VSASL processing
+  use_focused_transformer_model: true 
   transformer_d_model: 64             
   transformer_d_model_focused: 32     
   transformer_nhead_model: 4

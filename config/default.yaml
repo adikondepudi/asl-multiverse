@@ -13,9 +13,9 @@ training:
   m0_input_feature_model: false 
 
   # Transformer settings
-  use_focused_transformer_model: false # New: true to use split PCASL/VSASL transformers
-  transformer_d_model: 64             # New: d_model for shared transformer
-  transformer_d_model_focused: 32     # New: d_model per branch if focused
+  use_focused_transformer_model: true # FIX: Enable focused transformer for separate PCASL/VSASL processing
+  transformer_d_model: 64             # d_model for shared transformer (not used if focused is true)
+  transformer_d_model_focused: 32     # d_model per branch if focused
   transformer_nhead_model: 4
   transformer_nlayers_model: 2
   

@@ -68,10 +68,9 @@ class EnhancedASLNet(nn.Module):
         self.use_focused_transformer = use_focused_transformer
         self.m0_input_feature = m0_input_feature
         
+        # The input_size passed to __init__ should now account for any engineered features
         actual_input_size = input_size 
-        if self.m0_input_feature:
-            actual_input_size += 1
-
+        
         self.input_layer = nn.Linear(actual_input_size, hidden_sizes[0])
         self.input_norm = self._get_norm_layer(hidden_sizes[0], norm_type)
         
@@ -110,21 +109,6 @@ class EnhancedASLNet(nn.Module):
                 self.temporal_feature_size = self.d_model_transformer_eff * 2
             else: # Original shared transformer path
                 self.d_model_transformer_eff = transformer_d_model
-                # The input to the transformer should be (Batch, SeqLen=n_plds_total_effective, FeaturesPerStep=d_model)
-                # If we have 2 modalities (PCASL, VSASL) each with n_plds, and we want to process them as one sequence:
-                # SeqLen could be n_plds*2. Or, if we process each PLD point independently, SeqLen = n_plds (for one modality or averaged).
-                # Given the original structure, it seems n_plds is the intended sequence length after projection.
-                # This means the input `x` (shape: batch, hidden_sizes[-1]) is projected to (batch, n_plds * d_model),
-                # then reshaped to (batch, n_plds, d_model).
-                # This implies the `n_plds` used here should reflect the desired sequence length for the transformer.
-                # For a MULTIVERSE signal (PCASL_plds_data, VSASL_plds_data), a common approach is to either:
-                # 1. Concatenate features for each PLD: input (Batch, n_plds, features_pcasl + features_vsasl)
-                # 2. Treat as a longer sequence: input (Batch, n_plds*2, features_single_modality_at_pld)
-                # The current `temporal_projection` maps from a global feature vector to `n_plds * d_model`.
-                # This implies the transformer processes a sequence of length `n_plds`, where each element is `d_model`.
-                # This interpretation makes sense if `n_plds` is, for example, the number of PLDs for one modality,
-                # and the input features to the transformer represent some combined aspect of PCASL/VSASL at that PLD index.
-                # For simplicity, assuming `n_plds` passed is appropriate for the transformer's sequence length.
                 self.temporal_projection = nn.Linear(hidden_sizes[-1], self.n_plds * self.d_model_transformer_eff) # Use self.n_plds
                 encoder_layer = nn.TransformerEncoderLayer(
                     d_model=self.d_model_transformer_eff, nhead=transformer_nhead,
@@ -199,23 +183,26 @@ class EnhancedASLNet(nn.Module):
             return nn.BatchNorm1d(size)
             
 class CustomLoss(nn.Module):
-    """Custom loss: NLL with optional task weighting and log_var regularization."""
+    """
+    Custom loss: NLL with regression-focal loss on ATT and optional log_var regularization.
+    The focal loss dynamically weights samples based on prediction error, forcing the
+    model to focus on harder examples.
+    """
     
     def __init__(self, 
-                 att_weight_schedule: Optional[callable] = None, 
-                 log_var_clamp_min: float = -10.0, 
-                 log_var_clamp_max: float = 10.0,
                  w_cbf: float = 1.0, 
                  w_att: float = 1.0, 
-                 log_var_reg_lambda: float = 0.0 
+                 log_var_reg_lambda: float = 0.0,
+                 focal_gamma: float = 1.5, # Focal loss focusing parameter
+                 att_epoch_weight_schedule: Optional[callable] = None
                 ):
         super().__init__()
-        self.att_weight_schedule = att_weight_schedule or (lambda _: 1.0)
-        self.log_var_clamp_min = log_var_clamp_min 
-        self.log_var_clamp_max = log_var_clamp_max
         self.w_cbf = w_cbf
         self.w_att = w_att
         self.log_var_reg_lambda = log_var_reg_lambda
+        self.focal_gamma = focal_gamma
+        # Fallback for epoch weighting if provided, though focal loss is more powerful
+        self.att_epoch_weight_schedule = att_epoch_weight_schedule or (lambda _: 1.0)
         
     def forward(self, 
                 cbf_pred_norm: torch.Tensor, att_pred_norm: torch.Tensor, 
@@ -223,27 +210,42 @@ class CustomLoss(nn.Module):
                 cbf_log_var: torch.Tensor, att_log_var: torch.Tensor, 
                 epoch: int) -> torch.Tensor:
         
-        # cbf_pred_norm, att_pred_norm are normalized predictions from the model
-        # cbf_true_norm, att_true_norm are normalized targets from the DataLoader
-        # cbf_log_var, att_log_var are variances of the *normalized* predictions
-        
-        cbf_log_var_clamped = torch.clamp(cbf_log_var, self.log_var_clamp_min, self.log_var_clamp_max)
-        att_log_var_clamped = torch.clamp(att_log_var, self.log_var_clamp_min, self.log_var_clamp_max)
-        
-        cbf_nll_loss = 0.5 * (torch.exp(-cbf_log_var_clamped) * (cbf_pred_norm - cbf_true_norm)**2 + cbf_log_var_clamped)
-        att_nll_loss = 0.5 * (torch.exp(-att_log_var_clamped) * (att_pred_norm - att_true_norm)**2 + att_log_var_clamped)
-        
-        att_epoch_weight_factor = self.att_weight_schedule(epoch) 
-        
+        # --- Standard NLL calculation (Aleatoric Uncertainty Loss) ---
+        cbf_nll_loss = 0.5 * (torch.exp(-cbf_log_var) * (cbf_pred_norm - cbf_true_norm)**2 + cbf_log_var)
+        att_nll_loss = 0.5 * (torch.exp(-att_log_var) * (att_pred_norm - att_true_norm)**2 + att_log_var)
+
+        # --- Focal Weighting for ATT based on prediction error ---
+        focal_weight = torch.ones_like(att_nll_loss) # Default weight is 1
+        if self.focal_gamma > 0:
+            with torch.no_grad(): # Don't backprop through the weight calculation
+                # Get the absolute error (residual) for the normalized ATT
+                att_residual = torch.abs(att_pred_norm - att_true_norm)
+                
+                # Normalize the residual to a [0, 1] range to act like a probability of error
+                # A normalized target has std=1, so an error of 4 is ~4 std devs, which is very high.
+                # Clamping ensures the weight doesn't become excessively large.
+                att_error_norm = torch.clamp(att_residual / 4.0, 0.0, 1.0)
+
+            # The focal modulating factor. We want to *increase* weight for large errors.
+            # Weight is proportional to the normalized error. Add epsilon for stability.
+            focal_weight = (att_error_norm + 0.1).pow(self.focal_gamma)
+
+        # --- Apply weights and combine losses ---
         weighted_cbf_loss = self.w_cbf * cbf_nll_loss
-        weighted_att_loss = self.w_att * att_nll_loss * att_epoch_weight_factor 
+        
+        # Get epoch-based global weight for ATT
+        att_epoch_weight_factor = self.att_epoch_weight_schedule(epoch) 
+
+        # Apply both the dynamic focal weight and the global epoch weight to the ATT loss
+        weighted_att_loss = self.w_att * att_nll_loss * focal_weight * att_epoch_weight_factor
         
         total_param_loss = torch.mean(weighted_cbf_loss + weighted_att_loss)
         
+        # --- Optional regularization on the magnitude of predicted uncertainty ---
         log_var_regularization = 0.0
         if self.log_var_reg_lambda > 0:
             log_var_regularization = self.log_var_reg_lambda * \
-                                     (torch.mean(cbf_log_var_clamped**2) + torch.mean(att_log_var_clamped**2))
+                                     (torch.mean(cbf_log_var**2) + torch.mean(att_log_var**2))
             
         total_loss = total_param_loss + log_var_regularization
         
