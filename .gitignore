@@ -7,3 +7,4 @@ __pycache__/
 /comprehensive_results/
 /comparison_results/
 /wandb/
+.DS_Store
