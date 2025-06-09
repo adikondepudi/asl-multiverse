@@ -1,0 +1,64 @@
+training:
+  batch_size: 256
+  learning_rate: 0.001
+  weight_decay: 0.00001
+  hidden_sizes: [256, 128, 64] 
+  training_n_epochs: 200
+  n_ensembles: 5
+  dropout_rate: 0.1
+  norm_type: "batch"
+  
+  # Model-specific params for EnhancedASLNet
+  use_transformer_temporal_model: true
+  m0_input_feature_model: false 
+
+  # Transformer settings
+  use_focused_transformer_model: true 
+  transformer_d_model_focused: 32     
+  transformer_nhead_model: 4
+  transformer_nlayers_model: 2
+  
+  # Uncertainty head settings for EnhancedASLNet
+  log_var_cbf_min: -6.0
+  log_var_cbf_max: 7.0
+  log_var_att_min: -2.0
+  log_var_att_max: 14.0
+
+  # CustomLoss settings
+  loss_weight_cbf: 1.0
+  loss_weight_att: 1.0
+  loss_log_var_reg_lambda: 0.0
+  loss_pinn_weight: 10.0 # NEW: Enable physics-informed loss with a small weight
+
+data:
+  n_training_subjects: 10000
+  val_split: 0.2
+  pld_values: [500, 1000, 1500, 2000, 2500, 3000]
+  att_ranges_config:
+    - [500, 1500, "Short ATT"]
+    - [1500, 2500, "Medium ATT"]
+    - [2500, 4000, "Long ATT"]
+  include_m0_in_training_data: false
+
+simulation:
+  T1_artery: 1850.0
+  T2_factor: 1.0
+  alpha_BS1: 1.0
+  alpha_PCASL: 0.85
+  alpha_VSASL: 0.56
+  T_tau: 1800.0
+  reference_CBF: 60.0
+
+optuna:
+  optuna_n_trials: 20
+  optuna_timeout_hours: 0.5
+  optuna_n_subjects: 500
+  optuna_n_epochs: 20
+  optuna_study_name: "asl_multiverse_hpo"
+
+logging:
+  level: "INFO"
+
+wandb: 
+  wandb_project: "asl-multiverse-project"
+  wandb_entity: null 

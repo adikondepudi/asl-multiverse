@@ -274,6 +274,16 @@ class EnhancedASLDataset(Dataset):
                 shift_std = self.baseline_shift_std_factor * signal_mean_abs
                 shift = torch.randn(1) * shift_std 
                 signal += shift.item() # Add scalar shift to all elements
+        
+        # 5. Randomly scale the PCASL and VSASL components of the signal independently
+        if np.random.rand() < 0.5:
+            # Number of PLDs is half the raw signal length
+            num_plds = signal.shape[0] // 2
+            # Apply independent random scaling to PCASL and VSASL parts
+            pcasl_scale = np.random.uniform(0.8, 1.2)
+            vsasl_scale = np.random.uniform(0.8, 1.2)
+            signal[:num_plds] *= pcasl_scale
+            signal[num_plds:] *= vsasl_scale
 
         return signal, param
 
