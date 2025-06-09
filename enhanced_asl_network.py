@@ -1,7 +1,7 @@
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-from typing import List, Tuple, Optional
+from typing import List, Tuple, Optional, Dict, Any
 import math
 
 class ResidualBlock(nn.Module):
@@ -38,6 +38,11 @@ class UncertaintyHead(nn.Module):
         return mean, log_var
 
 class EnhancedASLNet(nn.Module):
+    """
+    Disentangled two-stream architecture for ASL parameter estimation.
+    - ATT Stream: Processes signal *shape* using transformers to capture timing.
+    - CBF Stream: Processes signal *amplitude* and engineered features using a simple MLP.
+    """
     def __init__(self, 
                  input_size: int,
                  hidden_sizes: List[int] = [256, 128, 64],
@@ -45,14 +50,13 @@ class EnhancedASLNet(nn.Module):
                  dropout_rate: float = 0.1,
                  norm_type: str = 'batch',
                  
-                 use_transformer_temporal: bool = True,
-                 use_focused_transformer: bool = False,
-                 transformer_d_model: int = 64,
+                 use_transformer_temporal: bool = True, # Kept for signature compatibility, logic now fixed to transformer for ATT
+                 use_focused_transformer: bool = True,  # Kept for signature compatibility
                  transformer_d_model_focused: int = 32,
                  transformer_nhead: int = 4,
                  transformer_nlayers: int = 2,
                  
-                 m0_input_feature: bool = False,
+                 m0_input_feature: bool = False, # Handled by engineered features
                  
                  log_var_cbf_min: float = -6.0,
                  log_var_cbf_max: float = 7.0,
@@ -62,128 +66,83 @@ class EnhancedASLNet(nn.Module):
         super().__init__()
         
         self.n_plds = n_plds
-        self.use_transformer_temporal = use_transformer_temporal
-        self.use_focused_transformer = use_focused_transformer
-        self.m0_input_feature = m0_input_feature
-        
-        # --- FIX: Define feature processors based on the nature of the input ---
         self.num_raw_signal_features = n_plds * 2
-        # All other features (engineered, M0, etc.) are processed by a simple linear layer.
-        self.num_other_features = input_size - self.num_raw_signal_features
-        
-        fused_feature_size = 0
+        # All other features (engineered, M0, etc.) are processed by the CBF stream
+        self.num_engineered_features = input_size - self.num_raw_signal_features
 
-        if self.num_other_features > 0:
-            # Allocate a portion of the first hidden layer's capacity to other features
-            other_features_out_dim = hidden_sizes[0] // 4
-            self.other_features_processor = nn.Linear(self.num_other_features, other_features_out_dim)
-            fused_feature_size += other_features_out_dim
-        else:
-            self.other_features_processor = None
-            
-        # --- Temporal processing modules (applied FIRST to raw signals) ---
-        if self.use_transformer_temporal:
-            if self.use_focused_transformer:
-                self.d_model_eff = transformer_d_model_focused
-                # PCASL branch: projects from 1 feature per PLD to d_model
-                self.pcasl_input_proj = nn.Linear(1, self.d_model_eff)
-                encoder_pcasl = nn.TransformerEncoderLayer(self.d_model_eff, transformer_nhead, self.d_model_eff * 2, dropout_rate, batch_first=True)
-                self.pcasl_transformer = nn.TransformerEncoder(encoder_pcasl, transformer_nlayers)
-                
-                # VSASL branch
-                self.vsasl_input_proj = nn.Linear(1, self.d_model_eff)
-                encoder_vsasl = nn.TransformerEncoderLayer(self.d_model_eff, transformer_nhead, self.d_model_eff * 2, dropout_rate, batch_first=True)
-                self.vsasl_transformer = nn.TransformerEncoder(encoder_vsasl, transformer_nlayers)
-                
-                # The fused feature size will be the combination of both transformer outputs
-                fused_feature_size += self.d_model_eff * 2
-            else: # Shared Transformer
-                self.d_model_eff = transformer_d_model
-                # Project from 2 features per PLD (PCASL, VSASL) to d_model
-                self.shared_input_proj = nn.Linear(2, self.d_model_eff)
-                encoder_shared = nn.TransformerEncoderLayer(self.d_model_eff, transformer_nhead, self.d_model_eff * 2, dropout_rate, batch_first=True)
-                self.shared_transformer = nn.TransformerEncoder(encoder_shared, transformer_nlayers)
-                fused_feature_size += self.d_model_eff
-        else:
-            # If not using transformers, the raw signal features will be passed directly to the main MLP
-            fused_feature_size += self.num_raw_signal_features
-
-        # --- Main MLP backbone (operates on FUSED features) ---
-        self.input_layer = nn.Linear(fused_feature_size, hidden_sizes[0])
-        self.input_norm = self._get_norm_layer(hidden_sizes[0], norm_type)
+        # --- ATT Stream (Shape-based) ---
+        # This stream uses focused transformers on the shape-normalized signal.
+        self.att_d_model = transformer_d_model_focused
         
-        self.shared_layers = nn.ModuleList([
-            nn.Sequential(nn.Linear(hidden_sizes[i], hidden_sizes[i+1]), self._get_norm_layer(hidden_sizes[i+1], norm_type), nn.ReLU(), nn.Dropout(dropout_rate))
-            for i in range(len(hidden_sizes)-1)
-        ])
+        # PCASL branch for ATT stream
+        self.pcasl_input_proj_att = nn.Linear(1, self.att_d_model)
+        encoder_pcasl_att = nn.TransformerEncoderLayer(self.att_d_model, transformer_nhead, self.att_d_model * 2, dropout_rate, batch_first=True)
+        self.pcasl_transformer_att = nn.TransformerEncoder(encoder_pcasl_att, transformer_nlayers)
         
-        self.residual_blocks = nn.ModuleList([ResidualBlock(hidden_sizes[-1], dropout_rate) for _ in range(3)])
+        # VSASL branch for ATT stream
+        self.vsasl_input_proj_att = nn.Linear(1, self.att_d_model)
+        encoder_vsasl_att = nn.TransformerEncoderLayer(self.att_d_model, transformer_nhead, self.att_d_model * 2, dropout_rate, batch_first=True)
+        self.vsasl_transformer_att = nn.TransformerEncoder(encoder_vsasl_att, transformer_nlayers)
 
-        # --- Output Branches ---
-        branch_input_dim = hidden_sizes[-1]
-        self.cbf_branch = nn.Sequential(nn.Linear(branch_input_dim, branch_input_dim // 2), nn.ReLU(), nn.Dropout(dropout_rate), nn.Linear(branch_input_dim // 2, branch_input_dim // 4))
-        self.att_branch = nn.Sequential(nn.Linear(branch_input_dim, branch_input_dim // 2), nn.ReLU(), nn.Dropout(dropout_rate), nn.Linear(branch_input_dim // 2, branch_input_dim // 4))
-        self.cbf_uncertainty = UncertaintyHead(branch_input_dim // 4, 1, log_var_min=log_var_cbf_min, log_var_max=log_var_cbf_max)
-        self.att_uncertainty = UncertaintyHead(branch_input_dim // 4, 1, log_var_min=log_var_att_min, log_var_max=log_var_att_max)
+        # MLP for ATT stream after transformer feature fusion
+        att_mlp_input_size = self.att_d_model * 2
+        self.att_mlp = nn.Sequential(
+            nn.Linear(att_mlp_input_size, hidden_sizes[0]),
+            self._get_norm_layer(hidden_sizes[0], norm_type),
+            nn.ReLU(),
+            nn.Dropout(dropout_rate),
+            nn.Linear(hidden_sizes[0], hidden_sizes[1]),
+            self._get_norm_layer(hidden_sizes[1], norm_type),
+            nn.ReLU()
+        )
+        self.att_uncertainty = UncertaintyHead(hidden_sizes[1], 1, log_var_min=log_var_att_min, log_var_max=log_var_att_max)
+        
+        # --- CBF Stream (Amplitude-based) ---
+        # This stream uses a simple MLP on the signal amplitude and engineered features.
+        cbf_mlp_input_size = 1 + self.num_engineered_features # 1 for amplitude
+        self.cbf_mlp = nn.Sequential(
+            nn.Linear(cbf_mlp_input_size, 64),
+            nn.ReLU(),
+            self._get_norm_layer(64, norm_type),
+            nn.Dropout(dropout_rate),
+            nn.Linear(64, 32)
+        )
+        self.cbf_uncertainty = UncertaintyHead(32, 1, log_var_min=log_var_cbf_min, log_var_max=log_var_cbf_max)
 
     def forward(self, x: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
-        # FIX: Split input into signal sequences and other features at the very beginning
-        pcasl_seq = x[:, :self.n_plds]
-        vsasl_seq = x[:, self.n_plds:self.num_raw_signal_features]
+        # --- 1. Disentangle Input ---
+        raw_signal = x[:, :self.num_raw_signal_features]
+        engineered_features = x[:, self.num_raw_signal_features:]
         
-        # FIX: Process signal sequences with transformers FIRST
-        if self.use_transformer_temporal:
-            if self.use_focused_transformer:
-                # Process PCASL: (B, N_plds) -> (B, N_plds, 1) -> (B, N_plds, D_model)
-                pcasl_in = self.pcasl_input_proj(pcasl_seq.unsqueeze(-1))
-                pcasl_out = self.pcasl_transformer(pcasl_in)
-                pcasl_features = torch.mean(pcasl_out, dim=1) # Global average pooling over time
-
-                # Process VSASL
-                vsasl_in = self.vsasl_input_proj(vsasl_seq.unsqueeze(-1))
-                vsasl_out = self.vsasl_transformer(vsasl_in)
-                vsasl_features = torch.mean(vsasl_out, dim=1)
-                
-                temporal_features = torch.cat([pcasl_features, vsasl_features], dim=1)
-            else: # Shared Transformer
-                # Stack signals: (B, N_plds, 2)
-                shared_seq = torch.stack([pcasl_seq, vsasl_seq], dim=-1)
-                shared_in = self.shared_input_proj(shared_seq)
-                shared_out = self.shared_transformer(shared_in)
-                temporal_features = torch.mean(shared_out, dim=1)
-            
-            # Fuse temporal features with other features
-            if self.num_other_features > 0:
-                other_features = x[:, self.num_raw_signal_features:]
-                processed_other_features = self.other_features_processor(other_features)
-                fused_features = torch.cat([temporal_features, processed_other_features], dim=1)
-            else:
-                fused_features = temporal_features
-
-        else: # No transformer, just fuse raw signals with other features
-            if self.num_other_features > 0:
-                other_features = x[:, self.num_raw_signal_features:]
-                processed_other_features = self.other_features_processor(other_features)
-                fused_features = torch.cat([pcasl_seq, vsasl_seq, processed_other_features], dim=1)
-            else:
-                fused_features = torch.cat([pcasl_seq, vsasl_seq], dim=1)
-
-        # FIX: The main MLP backbone now operates on the properly fused feature vector
-        h = self.input_layer(fused_features)
-        h = self.input_norm(h)
-        h = F.relu(h)
+        # Calculate amplitude (L2 norm) and shape-normalized signal
+        amplitude = torch.linalg.norm(raw_signal, dim=1, keepdim=True) + 1e-6
+        shape_input = raw_signal / amplitude
         
-        for layer in self.shared_layers:
-            h = layer(h)
+        pcasl_shape_seq = shape_input[:, :self.n_plds]
+        vsasl_shape_seq = shape_input[:, self.n_plds:self.num_raw_signal_features]
         
-        for block in self.residual_blocks:
-            h = block(h)
+        # Prepare input for the CBF stream
+        cbf_stream_input = torch.cat([amplitude - 1e-6, engineered_features], dim=1)
 
-        # Output branches remain the same
-        cbf_features = self.cbf_branch(h)
-        att_features = self.att_branch(h)
-        cbf_mean, cbf_log_var = self.cbf_uncertainty(cbf_features)
-        att_mean, att_log_var = self.att_uncertainty(att_features)
+        # --- 2. ATT Stream Processing ---
+        # PCASL branch
+        pcasl_in_att = self.pcasl_input_proj_att(pcasl_shape_seq.unsqueeze(-1))
+        pcasl_out_att = self.pcasl_transformer_att(pcasl_in_att)
+        pcasl_features_att = torch.mean(pcasl_out_att, dim=1) # Global average pooling
+
+        # VSASL branch
+        vsasl_in_att = self.vsasl_input_proj_att(vsasl_shape_seq.unsqueeze(-1))
+        vsasl_out_att = self.vsasl_transformer_att(vsasl_in_att)
+        vsasl_features_att = torch.mean(vsasl_out_att, dim=1)
+
+        # Fuse ATT transformer features and process with MLP
+        att_stream_features = torch.cat([pcasl_features_att, vsasl_features_att], dim=1)
+        att_final_features = self.att_mlp(att_stream_features)
+        att_mean, att_log_var = self.att_uncertainty(att_final_features)
+
+        # --- 3. CBF Stream Processing ---
+        cbf_final_features = self.cbf_mlp(cbf_stream_input)
+        cbf_mean, cbf_log_var = self.cbf_uncertainty(cbf_final_features)
         
         return cbf_mean, att_mean, cbf_log_var, att_log_var
 
@@ -194,18 +153,99 @@ class EnhancedASLNet(nn.Module):
             print(f"Warning: Unknown normalization type '{norm_type}'. Using BatchNorm1d.")
             return nn.BatchNorm1d(size)
 
+def torch_kinetic_model(pred_cbf_norm: torch.Tensor, pred_att_norm: torch.Tensor,
+                        norm_stats: Dict, model_params: Dict) -> torch.Tensor:
+    """
+    Differentiable PyTorch implementation of the ASL kinetic models.
+    This function acts as a "physics decoder" for the PINN loss.
+    """
+    # 1. Denormalize predictions back to physical units
+    pred_cbf = pred_cbf_norm * norm_stats['y_std_cbf'] + norm_stats['y_mean_cbf']
+    pred_att = pred_att_norm * norm_stats['y_std_att'] + norm_stats['y_mean_att']
+    
+    # Convert CBF to ml/g/s
+    pred_cbf_cgs = pred_cbf / 6000.0
+
+    # 2. Get constants and PLDs as torch tensors on the correct device
+    device = pred_cbf.device
+    plds = torch.tensor(model_params['pld_values'], device=device, dtype=torch.float32)
+    T1_artery = torch.tensor(model_params['T1_artery'], device=device, dtype=torch.float32)
+    T_tau = torch.tensor(model_params['T_tau'], device=device, dtype=torch.float32)
+    alpha_PCASL = torch.tensor(model_params['alpha_PCASL'], device=device, dtype=torch.float32)
+    alpha_VSASL = torch.tensor(model_params['alpha_VSASL'], device=device, dtype=torch.float32)
+    alpha_BS1 = torch.tensor(1.0, device=device, dtype=torch.float32) # Assuming 1.0 from config
+    T2_factor = torch.tensor(1.0, device=device, dtype=torch.float32) # Assuming 1.0 from config
+    lambda_blood = 0.90; M0_b = 1.0
+
+    # Ensure inputs are correctly broadcastable for batched operations
+    # pred_cbf_cgs and pred_att are (B, 1), plds is (N_plds)
+    # We want results of shape (B, N_plds)
+    B = pred_cbf_cgs.shape[0]
+    N = plds.shape[0]
+    plds_b = plds.unsqueeze(0).expand(B, -1) # (B, N_plds)
+    
+    # --- 3. PCASL Kinetic Model (PyTorch) ---
+    alpha1 = alpha_PCASL * (alpha_BS1**4)
+    pcasl_prefactor = (2 * M0_b * pred_cbf_cgs * alpha1 / lambda_blood * T1_artery / 1000) * T2_factor
+    
+    cond_full_bolus = plds_b >= pred_att
+    cond_trailing_edge = (plds_b < pred_att) & (plds_b >= (pred_att - T_tau))
+    
+    pcasl_sig = torch.zeros_like(plds_b)
+    
+    # Full bolus decay part
+    pcasl_sig = torch.where(
+        cond_full_bolus,
+        pcasl_prefactor * torch.exp(-plds_b / T1_artery) * (1 - torch.exp(-T_tau / T1_artery)),
+        pcasl_sig
+    )
+    # Trailing edge part
+    pcasl_sig = torch.where(
+        cond_trailing_edge,
+        pcasl_prefactor * (torch.exp(-pred_att / T1_artery) - torch.exp(-(T_tau + plds_b) / T1_artery)),
+        pcasl_sig
+    )
+
+    # --- 4. VSASL Kinetic Model (PyTorch) ---
+    alpha2 = alpha_VSASL * (alpha_BS1**3)
+    vsasl_prefactor = (2 * M0_b * pred_cbf_cgs * alpha2 / lambda_blood) * T2_factor
+
+    cond_ti_le_att = plds_b <= pred_att # TI is assumed equal to PLD here
+    
+    vsasl_sig = torch.where(
+        cond_ti_le_att,
+        vsasl_prefactor * (plds_b / 1000) * torch.exp(-plds_b / T1_artery),
+        vsasl_prefactor * (pred_att / 1000) * torch.exp(-plds_b / T1_artery)
+    )
+
+    # --- 5. Concatenate and re-normalize the signal ---
+    reconstructed_signal = torch.cat([pcasl_sig, vsasl_sig], dim=1) # (B, N_plds * 2)
+
+    pcasl_mean = torch.tensor(norm_stats['pcasl_mean'], device=device, dtype=torch.float32)
+    pcasl_std = torch.tensor(norm_stats['pcasl_std'], device=device, dtype=torch.float32)
+    vsasl_mean = torch.tensor(norm_stats['vsasl_mean'], device=device, dtype=torch.float32)
+    vsasl_std = torch.tensor(norm_stats['vsasl_std'], device=device, dtype=torch.float32)
+    
+    pcasl_recon_norm = (reconstructed_signal[:, :N] - pcasl_mean) / (pcasl_std + 1e-6)
+    vsasl_recon_norm = (reconstructed_signal[:, N:] - vsasl_mean) / (vsasl_std + 1e-6)
+    
+    reconstructed_signal_norm = torch.cat([pcasl_recon_norm, vsasl_recon_norm], dim=1)
+    
+    return reconstructed_signal_norm
+
 class CustomLoss(nn.Module):
     """
-    Custom loss: NLL with regression-focal loss on ATT and optional log_var regularization.
-    The focal loss dynamically weights samples based on prediction error, forcing the
-    model to focus on harder examples.
+    Custom loss: NLL with regression-focal loss on ATT and optional log_var regularization
+    and a physics-informed (PINN) reconstruction loss.
     """
     
     def __init__(self, 
                  w_cbf: float = 1.0, 
                  w_att: float = 1.0, 
                  log_var_reg_lambda: float = 0.0,
-                 focal_gamma: float = 1.5, # Focal loss focusing parameter
+                 focal_gamma: float = 1.5,
+                 pinn_weight: float = 0.0, # NEW: Weight for the physics-informed loss
+                 model_params: Optional[Dict[str, Any]] = None, # NEW: For physics constants
                  att_epoch_weight_schedule: Optional[callable] = None
                 ):
         super().__init__()
@@ -213,10 +253,13 @@ class CustomLoss(nn.Module):
         self.w_att = w_att
         self.log_var_reg_lambda = log_var_reg_lambda
         self.focal_gamma = focal_gamma
-        # Fallback for epoch weighting if provided, though focal loss is more powerful
+        self.pinn_weight = pinn_weight
+        self.model_params = model_params if model_params is not None else {}
+        self.norm_stats = None # To be populated by the trainer
         self.att_epoch_weight_schedule = att_epoch_weight_schedule or (lambda _: 1.0)
         
-    def forward(self, 
+    def forward(self,
+                normalized_input_signal: torch.Tensor, # NEW: The original input to the model
                 cbf_pred_norm: torch.Tensor, att_pred_norm: torch.Tensor, 
                 cbf_true_norm: torch.Tensor, att_true_norm: torch.Tensor, 
                 cbf_log_var: torch.Tensor, att_log_var: torch.Tensor, 
@@ -227,38 +270,38 @@ class CustomLoss(nn.Module):
         att_nll_loss = 0.5 * (torch.exp(-att_log_var) * (att_pred_norm - att_true_norm)**2 + att_log_var)
 
         # --- Focal Weighting for ATT based on prediction error ---
-        focal_weight = torch.ones_like(att_nll_loss) # Default weight is 1
+        focal_weight = torch.ones_like(att_nll_loss)
         if self.focal_gamma > 0:
-            with torch.no_grad(): # Don't backprop through the weight calculation
-                # Get the absolute error (residual) for the normalized ATT
+            with torch.no_grad():
                 att_residual = torch.abs(att_pred_norm - att_true_norm)
-                
-                # Normalize the residual to a [0, 1] range to act like a probability of error
-                # A normalized target has std=1, so an error of 4 is ~4 std devs, which is very high.
-                # Clamping ensures the weight doesn't become excessively large.
                 att_error_norm = torch.clamp(att_residual / 4.0, 0.0, 1.0)
-
-            # The focal modulating factor. We want to *increase* weight for large errors.
-            # Weight is proportional to the normalized error. Add epsilon for stability.
             focal_weight = (att_error_norm + 0.1).pow(self.focal_gamma)
 
         # --- Apply weights and combine losses ---
         weighted_cbf_loss = self.w_cbf * cbf_nll_loss
-        
-        # Get epoch-based global weight for ATT
         att_epoch_weight_factor = self.att_epoch_weight_schedule(epoch) 
-
-        # Apply both the dynamic focal weight and the global epoch weight to the ATT loss
         weighted_att_loss = self.w_att * att_nll_loss * focal_weight * att_epoch_weight_factor
-        
         total_param_loss = torch.mean(weighted_cbf_loss + weighted_att_loss)
         
         # --- Optional regularization on the magnitude of predicted uncertainty ---
         log_var_regularization = 0.0
         if self.log_var_reg_lambda > 0:
-            log_var_regularization = self.log_var_reg_lambda * \
-                                     (torch.mean(cbf_log_var**2) + torch.mean(att_log_var**2))
+            log_var_regularization = self.log_var_reg_lambda * (torch.mean(cbf_log_var**2) + torch.mean(att_log_var**2))
             
-        total_loss = total_param_loss + log_var_regularization
+        # --- NEW: Physics-Informed (PINN) Regularization ---
+        pinn_loss = 0.0
+        if self.pinn_weight > 0 and self.norm_stats and self.model_params and epoch > 10: # Activate after some epochs
+            # Reconstruct signal from model predictions
+            reconstructed_signal_norm = torch_kinetic_model(
+                cbf_pred_norm, att_pred_norm, self.norm_stats, self.model_params
+            )
+            # Compare reconstructed signal with the actual input signal (raw signal part only)
+            num_raw_signal_feats = len(self.model_params.get('pld_values', [])) * 2
+            pinn_loss = F.mse_loss(
+                reconstructed_signal_norm,
+                normalized_input_signal[:, :num_raw_signal_feats]
+            )
+
+        total_loss = total_param_loss + log_var_regularization + self.pinn_weight * pinn_loss
         
         return total_loss

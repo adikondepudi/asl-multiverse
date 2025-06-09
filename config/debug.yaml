@@ -1,49 +1,35 @@
+
 # config/debug.yaml
 
 training:
-  # Reduce model size for speed
-  hidden_sizes: [64, 32] # TINY model
-  n_ensembles: 1         # We only need one model to check dynamics
-  
-  # Drastically reduce data generation
-  n_training_subjects: 500  # Down from 10,000. This is the biggest time saver.
-  
-  # Shorten training run
-  training_n_epochs: 20    # Down from 200. We just need to see the trend.
-  
-  # Ensure these are on for the test
+  hidden_sizes: [64, 32]
+  n_ensembles: 1
+  n_training_subjects: 500
+  training_n_epochs: 20
   loss_weight_cbf: 1.0
   loss_weight_att: 1.0
-  weight_decay: 0.0001       # Make sure your new regularization is active
-
-  # Keep other training params from default or specify if needed for debug
+  weight_decay: 0.0001
   learning_rate: 0.001 
   dropout_rate: 0.1
   norm_type: "batch"
-  
   use_transformer_temporal_model: true
   m0_input_feature_model: false 
-
-  # FIX: Enable focused transformer for separate PCASL/VSASL processing
   use_focused_transformer_model: true 
-  transformer_d_model: 64             
   transformer_d_model_focused: 32     
   transformer_nhead_model: 4
   transformer_nlayers_model: 2
-  
   log_var_cbf_min: -6.0
   log_var_cbf_max: 7.0
   log_var_att_min: -2.0
   log_var_att_max: 14.0
-
   loss_log_var_reg_lambda: 0.0
+  loss_pinn_weight: 0.1 # NEW: Enable physics-informed loss for debugging
 
 optuna:
-  # Disable HPO for this test run
   optuna_n_trials: 0
-  optuna_timeout_hours: 0.1 # Can be small if n_trials is 0
-  optuna_n_subjects: 100    # Small, won't be used if n_trials is 0
-  optuna_n_epochs: 5      # Small, won't be used if n_trials is 0
+  optuna_timeout_hours: 0.1
+  optuna_n_subjects: 100
+  optuna_n_epochs: 5
   optuna_study_name: "asl_multiverse_hpo_debug"
 
 data:
@@ -64,13 +50,11 @@ simulation:
   T_tau: 1800.0
   reference_CBF: 60.0
 
-# Clinical validation and benchmarking can also be sped up if needed
-n_test_subjects_per_att_range: 50 # Down from 200 for faster benchmarking
-test_snr_levels: [5.0]           # Test on fewer SNR levels
-test_conditions: ['healthy']     # Test on fewer conditions
+n_test_subjects_per_att_range: 50
+test_snr_levels: [5.0]
+test_conditions: ['healthy']
 
-n_clinical_scenario_subjects: 20 # Down from 100 for faster clinical validation
-# clinical_scenario_definitions can remain, or be reduced to one scenario for extreme speed
+n_clinical_scenario_subjects: 20
 
 target_cbf_cv_improvement_perc: 50.0
 target_att_cv_improvement_perc: 50.0
@@ -79,5 +63,5 @@ logging:
   level: "INFO"
 
 wandb: 
-  wandb_project: "asl-multiverse-debug" # Separate project for debug runs
-  wandb_entity: null 
+  wandb_project: "asl-multiverse-debug"
+  wandb_entity: null

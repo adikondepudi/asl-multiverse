@@ -3,7 +3,7 @@ import torch.nn as nn
 import torch.optim as optim
 from torch.utils.data import Dataset, DataLoader, WeightedRandomSampler
 import numpy as np
-from typing import Dict, List, Tuple, Optional, Union
+from typing import Dict, List, Tuple, Optional, Union, Any
 from dataclasses import dataclass
 from collections import defaultdict
 from torch.optim.lr_scheduler import OneCycleLR
@@ -16,7 +16,7 @@ from sklearn.metrics import mean_absolute_error, mean_squared_error
 
 num_workers = mp.cpu_count()
 
-from enhanced_asl_network import EnhancedASLNet, CustomLoss # Assuming CustomLoss needs config now
+from enhanced_asl_network import EnhancedASLNet, CustomLoss
 # from enhanced_simulation import RealisticASLSimulator # For type hinting
 
 import logging
@@ -280,9 +280,8 @@ class EnhancedASLDataset(Dataset):
 class EnhancedASLTrainer:
     def __init__(self,
                  model_config: Dict, # Pass necessary params for model instantiation and loss
-                 model_class, # e.g., EnhancedASLNet
+                 model_class: callable, # e.g., EnhancedASLNet
                  input_size: int, # Actual input size for the model
-                 # hidden_sizes: List[int], # Now part of model_config
                  learning_rate: float = 0.001,
                  weight_decay: float = 1e-5, # Added weight decay
                  batch_size: int = 256,
@@ -296,7 +295,6 @@ class EnhancedASLTrainer:
         self.n_ensembles = n_ensembles
         self.n_plds_for_model = n_plds_for_model # Number of PLDs per modality
         self.m0_input_feature_model = m0_input_feature_model
-        # self.hidden_sizes = hidden_sizes
         self.input_size_model = input_size
         self.learning_rate = learning_rate
         self.weight_decay = weight_decay # Store weight decay
@@ -312,7 +310,9 @@ class EnhancedASLTrainer:
             'w_cbf': model_config.get('loss_weight_cbf', 1.0),
             'w_att': model_config.get('loss_weight_att', 1.0),
             'log_var_reg_lambda': model_config.get('loss_log_var_reg_lambda', 0.0),
-            'focal_gamma': model_config.get('focal_gamma', 1.5) # Default gamma for focal loss
+            'focal_gamma': model_config.get('focal_gamma', 1.5),
+            'pinn_weight': model_config.get('loss_pinn_weight', 0.0), # NEW
+            'model_params': model_config # NEW: Pass all model params for physics constants
         }
         self.custom_loss_fn = CustomLoss(**loss_params)
 
@@ -335,12 +335,10 @@ class EnhancedASLTrainer:
                                 precomputed_dataset: Optional[Dict] = None
                                 ) -> Tuple[List[DataLoader], List[Optional[DataLoader]], Optional[Dict]]:
         
-        # --- BUG FIX: Prioritize precomputed_dataset if provided ---
         if precomputed_dataset:
             logger.info("Using pre-computed dataset for training data preparation.")
             raw_dataset = precomputed_dataset
         else:
-            # This logic now ONLY runs if precomputed_dataset is None.
             logger.info("No pre-computed dataset provided. Generating diverse dataset now...")
             if plds is None: plds = np.arange(500, 3001, 500)
             conditions = training_conditions_config if training_conditions_config is not None else ['healthy', 'stroke', 'tumor', 'elderly']
@@ -351,17 +349,13 @@ class EnhancedASLTrainer:
             )
         
         if plds is None: plds = np.arange(500, 3001, 500)
-        # Assuming the number of raw signal features (before engineering) comes from plds
         num_raw_signal_features = len(plds) * 2
 
-        # Note: raw_dataset['signals'] might now include engineered features if done upstream in main.py
         X_all_raw, y_all_raw = raw_dataset['signals'], raw_dataset['parameters']
 
-        # --- Per-Modality Input Normalization & Target Normalization ---
         n_total_samples_raw = X_all_raw.shape[0]
         if n_total_samples_raw == 0: raise ValueError("No data generated.")
         
-        # Split for normalization stat calculation (on training part only)
         indices_raw = np.random.permutation(n_total_samples_raw)
         n_val_raw = int(n_total_samples_raw * val_split)
         if n_val_raw == 0 and n_total_samples_raw > 1: n_val_raw = 1
@@ -371,29 +365,25 @@ class EnhancedASLTrainer:
         X_train_raw, X_val_raw = X_all_raw[train_idx_raw], X_all_raw[val_idx_raw]
         y_train_raw, y_val_raw = y_all_raw[train_idx_raw], y_all_raw[val_idx_raw]
         
-        # We only normalize the raw signal part, not the engineered features
         X_train_raw_signal_part = X_train_raw[:, :num_raw_signal_features]
 
-        norm_stats = { # For feature-wise normalization
+        norm_stats = { 
             'pcasl_mean': np.zeros(len(plds)), 'pcasl_std': np.ones(len(plds)),
             'vsasl_mean': np.zeros(len(plds)), 'vsasl_std': np.ones(len(plds)),
             'y_mean_cbf': 0.0, 'y_std_cbf': 1.0, 'y_mean_att': 0.0, 'y_std_att': 1.0
         }
 
         if X_train_raw_signal_part.shape[0] > 0 :
-            # PCASL part
             pcasl_train_signals = X_train_raw_signal_part[:, :len(plds)]
             norm_stats['pcasl_mean'] = np.mean(pcasl_train_signals, axis=0)
             norm_stats['pcasl_std'] = np.std(pcasl_train_signals, axis=0)
             norm_stats['pcasl_std'][norm_stats['pcasl_std'] < 1e-6] = 1.0
 
-            # VSASL part
             vsasl_train_signals = X_train_raw_signal_part[:, len(plds):]
             norm_stats['vsasl_mean'] = np.mean(vsasl_train_signals, axis=0)
             norm_stats['vsasl_std'] = np.std(vsasl_train_signals, axis=0)
             norm_stats['vsasl_std'][norm_stats['vsasl_std'] < 1e-6] = 1.0
             
-            # Target (y) normalization stats
             norm_stats['y_mean_cbf'] = np.mean(y_train_raw[:, 0])
             norm_stats['y_std_cbf'] = np.std(y_train_raw[:, 0])
             if norm_stats['y_std_cbf'] < 1e-6: norm_stats['y_std_cbf'] = 1.0
@@ -404,18 +394,16 @@ class EnhancedASLTrainer:
         else:
             logger.warning("Raw training set for normalization stats is empty.")
 
-        # Apply normalization to the signal part of the entire dataset
         X_all_processed = X_all_raw.copy()
-        X_all_processed[:, :len(plds)] = (X_all_raw[:, :len(plds)] - norm_stats['pcasl_mean']) / norm_stats['pcasl_std']
-        X_all_processed[:, len(plds):num_raw_signal_features] = (X_all_raw[:, len(plds):num_raw_signal_features] - norm_stats['vsasl_mean']) / norm_stats['vsasl_std']
-        # Engineered features at the end are left un-normalized for now
+        X_all_processed[:, :len(plds)] = (X_all_raw[:, :len(plds)] - norm_stats['pcasl_mean']) / (norm_stats['pcasl_std'] + 1e-6)
+        X_all_processed[:, len(plds):num_raw_signal_features] = (X_all_raw[:, len(plds):num_raw_signal_features] - norm_stats['vsasl_mean']) / (norm_stats['vsasl_std'] + 1e-6)
 
-        # Apply normalization to y_all_raw
         y_all_normalized = np.zeros_like(y_all_raw)
         y_all_normalized[:, 0] = (y_all_raw[:, 0] - norm_stats['y_mean_cbf']) / norm_stats['y_std_cbf']
         y_all_normalized[:, 1] = (y_all_raw[:, 1] - norm_stats['y_mean_att']) / norm_stats['y_std_att']
 
-        self.norm_stats = norm_stats # Store norm_stats in trainer
+        self.norm_stats = norm_stats
+        self.custom_loss_fn.norm_stats = norm_stats # NEW: Give loss function access to norm_stats
 
         logger.info(f"Total processed samples for training/validation: {X_all_processed.shape[0]}")
         
@@ -425,7 +413,6 @@ class EnhancedASLTrainer:
         logger.info(f"Training samples: {X_train.shape[0]}, Validation samples: {X_val.shape[0]}")
         if X_train.shape[0] == 0: raise ValueError("Training set is empty after split and normalization.")
 
-        # Curriculum stages definition
         if curriculum_att_ranges_config is None:
             min_att, max_att = simulator.physio_var.att_range
             curriculum_stages_def = [(min_att, 1500.0), (1500.0, 2500.0), (2500.0, max_att)]
@@ -438,7 +425,7 @@ class EnhancedASLTrainer:
             'dropout_range': (0.05, 0.15),
             'global_scale_range': (0.95, 1.05),
             'baseline_shift_std_factor': 0.01,
-            'reference_signal_max_for_noise': 3.0 # For normalized signals
+            'reference_signal_max_for_noise': 3.0
         }
         if dataset_aug_config: default_aug_config.update(dataset_aug_config)
 
@@ -466,7 +453,6 @@ class EnhancedASLTrainer:
             else:
                 val_loaders.append(DataLoader(EnhancedASLDataset(np.array([]), np.array([])), batch_size=self.batch_size))
         
-        # Initialize schedulers
         self.schedulers = []
         if train_loaders:
             total_steps_overall = sum(len(loader) for loader in train_loaders) * n_epochs_for_scheduler
@@ -478,9 +464,9 @@ class EnhancedASLTrainer:
 
     def train_ensemble(self,
                    train_loaders: List[DataLoader],
-                   val_loaders: List[Optional[DataLoader]], # Updated signature
+                   val_loaders: List[Optional[DataLoader]],
                    n_epochs: int = 200,
-                   early_stopping_patience: int = 20) -> Dict[str, any]:
+                   early_stopping_patience: int = 20) -> Dict[str, Any]:
         
         histories = defaultdict(lambda: defaultdict(list))
         self.global_step = 0
@@ -492,7 +478,6 @@ class EnhancedASLTrainer:
         for stage_idx, train_loader in enumerate(train_loaders):
             current_val_loader = val_loaders[stage_idx] if stage_idx < len(val_loaders) else None
             
-            # Add stage start logging
             logger.info(f"--- STAGE {stage_idx+1} START ---")
             logger.info(f"  Resetting early stopping. Best val losses set to infinity.")
             if current_val_loader:
@@ -505,13 +490,14 @@ class EnhancedASLTrainer:
                 logger.warning(f"Skipping empty curriculum training stage {stage_idx + 1}.")
                 continue
             
-            # Reset early stopping state at the beginning of each stage
             logger.info(f"Resetting early stopping state for Stage {stage_idx+1}.")
-            best_val_losses_stage = [float('inf')] * self.n_ensembles # Store best val loss *for this stage*
-            patience_counters_stage = [0] * self.n_ensembles      # Patience for *this stage*
-            # self.best_states (overall best parameters) are NOT reset. They are updated if current model is better.
+            best_val_losses_stage = [float('inf')] * self.n_ensembles
+            patience_counters_stage = [0] * self.n_ensembles
 
-            for epoch in range(n_epochs): # n_epochs is per stage
+            if not hasattr(self, 'overall_best_val_losses'):
+                self.overall_best_val_losses = [float('inf')] * self.n_ensembles
+
+            for epoch in range(n_epochs):
                 epoch_train_losses_all_models, epoch_val_metrics_all_models = [], []
                 
                 for model_idx in range(self.n_ensembles):
@@ -527,50 +513,36 @@ class EnhancedASLTrainer:
                         epoch_val_metrics_all_models.append(val_metrics_dict)
                         histories[model_idx][f'val_metrics_stage_{stage_idx}'].append(val_metrics_dict)
                         
-                        # Add validation loss logging for current stage
                         val_loss_for_es = val_metrics_dict.get('val_loss', float('inf'))
                         logger.info(f"  Epoch {epoch+1}, Model {model_idx}, Stage {stage_idx+1} Val Loss: {val_loss_for_es:.4f}")
                         
-                        # Early stopping and best model tracking for this stage and overall
                         if val_loss_for_es < best_val_losses_stage[model_idx]:
                             best_val_losses_stage[model_idx] = val_loss_for_es
                             patience_counters_stage[model_idx] = 0
-                            # Update overall best model state if this stage's model is better
-                            # The self.best_states should store the state dict of the model that achieved the best validation loss *so far across all stages*.
-                            # This requires comparing val_loss_for_es with a global best for this model.
-                            # Let's maintain a global best_val_losses for self.best_states update.
-                            # Initialize self.overall_best_val_losses if not present
-                            if not hasattr(self, 'overall_best_val_losses'):
-                                self.overall_best_val_losses = [float('inf')] * self.n_ensembles
                             
                             if val_loss_for_es < self.overall_best_val_losses[model_idx]:
                                 self.overall_best_val_losses[model_idx] = val_loss_for_es
-                                self.best_states[model_idx] = self.models[model_idx].state_dict() # Save best overall state
+                                self.best_states[model_idx] = self.models[model_idx].state_dict()
                                 logger.debug(f"Model {model_idx} new overall best state saved (Val loss: {val_loss_for_es:.4f})")
 
                         else:
                             patience_counters_stage[model_idx] += 1
-                    else: # No validation loader for this stage or empty
+                    else:
                         histories[model_idx]['val_metrics_stage_'+str(stage_idx)].append({'val_loss': float('inf')}) 
 
-
-                # Log mean metrics for the epoch across active models for this stage
                 if wandb.run:
                     mean_epoch_train_loss = np.nanmean(epoch_train_losses_all_models) if epoch_train_losses_all_models else float('nan')
                     wandb.log({f'Epoch_Stage{stage_idx}/Mean_Train_Loss': mean_epoch_train_loss, 'epoch_global': self.global_step, 'epoch_stage': epoch})
                     if current_val_loader and len(current_val_loader) > 0 and epoch_val_metrics_all_models:
-                        # Aggregate validation metrics from the list of dicts
                         epoch_val_metrics_agg = defaultdict(list)
                         for model_metrics in epoch_val_metrics_all_models:
                             for metric_name, value in model_metrics.items():
                                 epoch_val_metrics_agg[metric_name].append(value)
                         
-                        # Now log the aggregated metrics
                         for metric_name, values_list in epoch_val_metrics_agg.items():
                             mean_val_metric = np.nanmean(values_list) if values_list else float('nan')
                             wandb.log({f'Epoch_Stage{stage_idx}/Mean_Val_{metric_name.capitalize()}': mean_val_metric, 'epoch_global': self.global_step, 'epoch_stage': epoch})
 
-                # Check if all active models have early stopped IN THIS STAGE
                 if sum(1 for p_count in patience_counters_stage if p_count < early_stopping_patience) == 0 and epoch > 0 : 
                     logger.info(f"All active models early stopped within stage {stage_idx+1}, epoch {epoch+1}. Moving to next stage.")
                     break 
@@ -583,8 +555,7 @@ class EnhancedASLTrainer:
                     mean_val_loss_console_stage = np.nanmean(active_val_losses_stage) if active_val_losses_stage else float('nan')
                     logger.info(f"Stage {stage_idx+1}, Epoch {epoch + 1}/{n_epochs}: Mean Active Train Loss = {mean_train_loss_console:.6f}, Mean Active Val Loss (Stage) = {mean_val_loss_console_stage:.6f}")
         
-        # After all stages, load best OVERALL states for all models
-        if not hasattr(self, 'overall_best_val_losses'): # ensure it exists if no validation was run
+        if not hasattr(self, 'overall_best_val_losses'):
             self.overall_best_val_losses = [float('inf')] * self.n_ensembles
 
         for model_idx, state in enumerate(self.best_states):
@@ -597,7 +568,7 @@ class EnhancedASLTrainer:
         final_train_losses_list_overall = []
         for i in range(self.n_ensembles):
             model_train_losses = []
-            for s_idx in range(len(train_loaders)): # Iterate through stages
+            for s_idx in range(len(train_loaders)):
                 key = f'train_losses_stage_{s_idx}'
                 if key in histories[i] and histories[i][key]:
                     model_train_losses.extend(histories[i][key])
@@ -617,18 +588,18 @@ class EnhancedASLTrainer:
 
     def _train_epoch(self, model, train_loader, optimizer, scheduler, current_global_epoch: int) -> float:
         model.train(); total_loss = 0.0
-        for signals, params_norm in train_loader: # params_norm are normalized targets
+        for signals, params_norm in train_loader:
             signals, params_norm = signals.to(self.device), params_norm.to(self.device)
             optimizer.zero_grad()
-            cbf_mean_norm, att_mean_norm, cbf_log_var, att_log_var = model(signals) # Model predicts normalized
-            # Loss function expects normalized predictions and normalized targets
-            loss = self.custom_loss_fn(cbf_mean_norm, att_mean_norm, params_norm[:, 0:1], params_norm[:, 1:2], 
+            cbf_mean_norm, att_mean_norm, cbf_log_var, att_log_var = model(signals)
+            loss = self.custom_loss_fn(signals, cbf_mean_norm, att_mean_norm, params_norm[:, 0:1], params_norm[:, 1:2], 
                                        cbf_log_var, att_log_var, current_global_epoch)
             loss.backward()
             torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
             optimizer.step()
             if scheduler: scheduler.step() 
             total_loss += loss.item()
+            self.global_step += 1
         return total_loss / len(train_loader) if len(train_loader) > 0 else 0.0
 
     def _validate(self, model, val_loader, current_global_epoch: int) -> Dict[str, float]:
@@ -638,11 +609,10 @@ class EnhancedASLTrainer:
         all_cbf_log_vars, all_att_log_vars = [], []
 
         with torch.no_grad():
-            for signals, params_norm in val_loader: # params_norm are normalized targets
+            for signals, params_norm in val_loader:
                 signals, params_norm = signals.to(self.device), params_norm.to(self.device)
-                cbf_mean_norm, att_mean_norm, cbf_log_var, att_log_var = model(signals) # Model predicts normalized
-                # Loss function expects normalized predictions and normalized targets
-                loss = self.custom_loss_fn(cbf_mean_norm, att_mean_norm, params_norm[:, 0:1], params_norm[:, 1:2], 
+                cbf_mean_norm, att_mean_norm, cbf_log_var, att_log_var = model(signals)
+                loss = self.custom_loss_fn(signals, cbf_mean_norm, att_mean_norm, params_norm[:, 0:1], params_norm[:, 1:2], 
                                            cbf_log_var, att_log_var, current_global_epoch)
                 total_loss_val += loss.item()
                 all_cbf_preds_norm.append(cbf_mean_norm.cpu()); all_att_preds_norm.append(att_mean_norm.cpu())
@@ -652,7 +622,7 @@ class EnhancedASLTrainer:
         avg_loss_val = total_loss_val / len(val_loader) if len(val_loader) > 0 else float('inf')
         metrics_dict = {'val_loss': avg_loss_val}
 
-        if all_cbf_preds_norm and self.norm_stats: # If there were batches and norm_stats exist
+        if all_cbf_preds_norm and self.norm_stats:
             y_mean_cbf = self.norm_stats.get('y_mean_cbf', 0.0)
             y_std_cbf = self.norm_stats.get('y_std_cbf', 1.0)
             y_mean_att = self.norm_stats.get('y_mean_att', 0.0)
@@ -663,7 +633,6 @@ class EnhancedASLTrainer:
             cbf_trues_norm_cat = torch.cat(all_cbf_trues_norm).numpy().squeeze()
             att_trues_norm_cat = torch.cat(all_att_trues_norm).numpy().squeeze()
 
-            # De-normalize for metrics
             cbf_preds_denorm = cbf_preds_norm_cat * y_std_cbf + y_mean_cbf
             att_preds_denorm = att_preds_norm_cat * y_std_att + y_mean_att
             cbf_trues_denorm = cbf_trues_norm_cat * y_std_cbf + y_mean_cbf
@@ -677,29 +646,27 @@ class EnhancedASLTrainer:
 
                 cbf_log_vars_cat = torch.cat(all_cbf_log_vars).numpy().squeeze()
                 att_log_vars_cat = torch.cat(all_att_log_vars).numpy().squeeze()
-                metrics_dict['mean_cbf_log_var'] = np.mean(cbf_log_vars_cat) # Log_var is scale-invariant to linear transforms of target
-                metrics_dict['mean_att_log_var'] = np.mean(att_log_vars_cat) # So, no de-norm needed for log_var itself
+                metrics_dict['mean_cbf_log_var'] = np.mean(cbf_log_vars_cat)
+                metrics_dict['mean_att_log_var'] = np.mean(att_log_vars_cat)
         return metrics_dict
 
     def predict(self, signals: np.ndarray) -> Tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
-        # Note: signals here are assumed to be ALREADY NORMALIZED if normalization is used.
-        # This is handled by the caller (e.g. ComprehensiveComparison, ClinicalValidator)
         signals_tensor = torch.FloatTensor(signals).to(self.device)
         if signals_tensor.ndim == 1: signals_tensor = signals_tensor.unsqueeze(0)
         
         all_cbf_means_norm_list, all_att_means_norm_list = [], []
-        all_cbf_aleatoric_vars_list, all_att_aleatoric_vars_list = [], [] # Variance is not directly normalized
+        all_cbf_aleatoric_vars_list, all_att_aleatoric_vars_list = [], []
 
         for model in self.models:
             model.eval()
             with torch.no_grad():
-                cbf_mean_norm, att_mean_norm, cbf_log_var, att_log_var = model(signals_tensor) # Model predicts normalized
+                cbf_mean_norm, att_mean_norm, cbf_log_var, att_log_var = model(signals_tensor)
                 all_cbf_means_norm_list.append(cbf_mean_norm.cpu().numpy())
                 all_att_means_norm_list.append(att_mean_norm.cpu().numpy())
-                all_cbf_aleatoric_vars_list.append(torch.exp(cbf_log_var).cpu().numpy()) # Aleatoric var of normalized pred
-                all_att_aleatoric_vars_list.append(torch.exp(att_log_var).cpu().numpy()) # Aleatoric var of normalized pred
+                all_cbf_aleatoric_vars_list.append(torch.exp(cbf_log_var).cpu().numpy())
+                all_att_aleatoric_vars_list.append(torch.exp(att_log_var).cpu().numpy())
         
-        if signals_tensor.shape[0] == 1: # Single sample prediction
+        if signals_tensor.shape[0] == 1:
             all_cbf_means_norm_np = np.array(all_cbf_means_norm_list).squeeze() 
             all_att_means_norm_np = np.array(all_att_means_norm_list).squeeze() 
             all_cbf_aleatoric_vars_np = np.array(all_cbf_aleatoric_vars_list).squeeze() 
@@ -707,12 +674,12 @@ class EnhancedASLTrainer:
             
             ensemble_cbf_mean_norm = np.mean(all_cbf_means_norm_np)
             ensemble_att_mean_norm = np.mean(all_att_means_norm_np)
-            mean_aleatoric_cbf_var_norm = np.mean(all_cbf_aleatoric_vars_np) # Avg of variances of normalized preds
+            mean_aleatoric_cbf_var_norm = np.mean(all_cbf_aleatoric_vars_np)
             mean_aleatoric_att_var_norm = np.mean(all_att_aleatoric_vars_np)
-            epistemic_cbf_var_norm = np.var(all_cbf_means_norm_np) if self.n_ensembles > 1 else 0.0 # Variance of normalized means
+            epistemic_cbf_var_norm = np.var(all_cbf_means_norm_np) if self.n_ensembles > 1 else 0.0
             epistemic_att_var_norm = np.var(all_att_means_norm_np) if self.n_ensembles > 1 else 0.0
 
-        else: # Batch prediction
+        else:
             all_cbf_means_norm_np = np.concatenate(all_cbf_means_norm_list, axis=1) 
             all_att_means_norm_np = np.concatenate(all_att_means_norm_list, axis=1) 
             all_cbf_aleatoric_vars_np = np.concatenate(all_cbf_aleatoric_vars_list, axis=1) 
@@ -725,8 +692,7 @@ class EnhancedASLTrainer:
             epistemic_cbf_var_norm = np.var(all_cbf_means_norm_np, axis=1) if self.n_ensembles > 1 else np.zeros_like(ensemble_cbf_mean_norm)
             epistemic_att_var_norm = np.var(all_att_means_norm_np, axis=1) if self.n_ensembles > 1 else np.zeros_like(ensemble_att_mean_norm)
 
-        # De-normalize means and stds
-        y_mean_cbf, y_std_cbf, y_mean_att, y_std_att = 0.0, 1.0, 0.0, 1.0 # Defaults
+        y_mean_cbf, y_std_cbf, y_mean_att, y_std_att = 0.0, 1.0, 0.0, 1.0
         if self.norm_stats:
             y_mean_cbf = self.norm_stats.get('y_mean_cbf', 0.0)
             y_std_cbf = self.norm_stats.get('y_std_cbf', 1.0)
@@ -736,12 +702,9 @@ class EnhancedASLTrainer:
         ensemble_cbf_mean_denorm = ensemble_cbf_mean_norm * y_std_cbf + y_mean_cbf
         ensemble_att_mean_denorm = ensemble_att_mean_norm * y_std_att + y_mean_att
         
-        # De-normalize variances: Var(aX+b) = a^2 Var(X)
-        # Total variance of the *normalized* prediction
         total_cbf_var_norm = mean_aleatoric_cbf_var_norm + epistemic_cbf_var_norm
         total_att_var_norm = mean_aleatoric_att_var_norm + epistemic_att_var_norm
         
-        # Total variance of the *de-normalized* prediction
         total_cbf_var_denorm = total_cbf_var_norm * (y_std_cbf**2)
         total_att_var_denorm = total_att_var_norm * (y_std_att**2)
         

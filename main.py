@@ -8,8 +8,6 @@ import yaml
 import logging
 from typing import Dict, List, Tuple, Optional, Any
 import pandas as pd
-# import matplotlib.pyplot as plt # No longer needed for saving plots
-# import seaborn as sns # No longer needed for saving plots
 from tqdm import tqdm
 import optuna
 from dataclasses import dataclass, asdict, field
@@ -17,24 +15,24 @@ import sys
 import warnings
 import wandb 
 import joblib 
-import math # For log_var defaults if not in config for some reason
-import inspect # <<< FIX: Added import for inspecting function signatures
+import math
+import inspect
 
-warnings.filterwarnings('ignore', category=UserWarning) # Filter UserWarning from PyTorch/Optuna etc.
+warnings.filterwarnings('ignore', category=UserWarning)
 
 from enhanced_asl_network import EnhancedASLNet, CustomLoss
 from asl_simulation import ASLParameters
 from enhanced_simulation import RealisticASLSimulator
-from asl_trainer import EnhancedASLTrainer # Contains EnhancedASLDataset
-from comparison_framework import ComprehensiveComparison, ComparisonResult # ComparisonResult not directly used here
-from performance_metrics import ProposalEvaluator # Not directly used in main flow, but available
+from asl_trainer import EnhancedASLTrainer
+from comparison_framework import ComprehensiveComparison, ComparisonResult
+from performance_metrics import ProposalEvaluator
 from single_repeat_validation import SingleRepeatValidator, run_single_repeat_validation_main
 
 from vsasl_functions import fit_VSASL_vectInit_pep
 from pcasl_functions import fit_PCASL_vectInit_pep
 from multiverse_functions import fit_PCVSASL_misMatchPLD_vectInit_pep
 
-script_logger = logging.getLogger(__name__) # Use __name__ for module-level logger
+script_logger = logging.getLogger(__name__)
 
 
 @dataclass
@@ -42,7 +40,7 @@ class ResearchConfig:
     # Training parameters
     hidden_sizes: List[int] = field(default_factory=lambda: [256, 128, 64])
     learning_rate: float = 0.001
-    weight_decay: float = 1e-5 # Added weight_decay
+    weight_decay: float = 1e-5
     batch_size: int = 256
     val_split: float = 0.2
     n_training_subjects: int = 10000 
@@ -54,8 +52,7 @@ class ResearchConfig:
     m0_input_feature_model: bool = False
 
     use_transformer_temporal_model: bool = True
-    use_focused_transformer_model: bool = False 
-    transformer_d_model: int = 64              
+    use_focused_transformer_model: bool = True # Changed default to True
     transformer_d_model_focused: int = 32      
     transformer_nhead_model: int = 4
     transformer_nlayers_model: int = 2
@@ -68,6 +65,7 @@ class ResearchConfig:
     loss_weight_cbf: float = 1.0
     loss_weight_att: float = 1.0
     loss_log_var_reg_lambda: float = 0.0
+    loss_pinn_weight: float = 0.0 # NEW: For physics-informed loss
 
     optuna_n_trials: int = 20
     optuna_timeout_hours: float = 0.5
@@ -109,20 +107,7 @@ class ResearchConfig:
 
 def engineer_signal_features(raw_signal: np.ndarray, num_plds: int) -> np.ndarray:
     """
-    Engineers explicit shape-based features from raw ASL signal curves to
-    make timing information more salient for the neural network.
-
-    Args:
-        raw_signal: A numpy array of shape (N, num_plds * 2) containing
-                    concatenated PCASL and VSASL signals.
-        num_plds: The number of Post-Labeling Delays per modality.
-
-    Returns:
-        A numpy array of shape (N, 4) with the engineered features:
-        - PCASL time-to-peak index
-        - VSASL time-to-peak index
-        - PCASL center-of-mass
-        - VSASL center-of-mass
+    Engineers explicit shape-based features from raw ASL signal curves.
     """
     num_samples = raw_signal.shape[0]
     engineered_features = np.zeros((num_samples, 4))
@@ -132,11 +117,9 @@ def engineer_signal_features(raw_signal: np.ndarray, num_plds: int) -> np.ndarra
         pcasl_curve = raw_signal[i, :num_plds]
         vsasl_curve = raw_signal[i, num_plds:]
 
-        # Feature 1: Time to peak (index of max signal)
         engineered_features[i, 0] = np.argmax(pcasl_curve)
         engineered_features[i, 1] = np.argmax(vsasl_curve)
 
-        # Feature 2: Center of mass (temporal)
         pcasl_sum = np.sum(pcasl_curve) + 1e-6
         vsasl_sum = np.sum(vsasl_curve) + 1e-6
         engineered_features[i, 2] = np.sum(pcasl_curve * plds_indices) / pcasl_sum
@@ -149,8 +132,6 @@ def apply_normalization_to_input_flat(flat_signal: np.ndarray,
                                       num_plds_per_modality: int, 
                                       has_m0: bool) -> np.ndarray:
     if not norm_stats or not isinstance(norm_stats, dict): return flat_signal
-
-    # Corrected logic to preserve other features (e.g., engineered ones)
     raw_signal_len = num_plds_per_modality * 2
     signal_part = flat_signal[:raw_signal_len]
     other_features_part = flat_signal[raw_signal_len:]
@@ -158,34 +139,26 @@ def apply_normalization_to_input_flat(flat_signal: np.ndarray,
     pcasl_norm = (signal_part[:num_plds_per_modality] - norm_stats.get('pcasl_mean', 0)) / np.clip(norm_stats.get('pcasl_std', 1), a_min=1e-6, a_max=None)
     vsasl_norm = (signal_part[num_plds_per_modality:] - norm_stats.get('vsasl_mean', 0)) / np.clip(norm_stats.get('vsasl_std', 1), a_min=1e-6, a_max=None)
 
-    # Reconcatenate normalized signal with untouched other features
     return np.concatenate([pcasl_norm, vsasl_norm, other_features_part])
 
 
 class PerformanceMonitor:
     def __init__(self, config: ResearchConfig, output_dir: Path):
-        self.config = config
-        self.output_dir = output_dir
-        self.logger = logging.getLogger("ASLResearchPipeline") # Consistent logger name
-        # Clear existing handlers to avoid duplicate logging if this is re-instantiated
+        self.config = config; self.output_dir = output_dir
+        self.logger = logging.getLogger("ASLResearchPipeline")
         for handler in self.logger.handlers[:]: self.logger.removeHandler(handler)
-        
-        self.logger.setLevel(logging.INFO) # Set level for this specific logger instance
-        
+        self.logger.setLevel(logging.INFO)
         fh = logging.FileHandler(output_dir / 'research.log', mode='w')
         fh.setFormatter(logging.Formatter('%(asctime)s - %(levelname)s - %(message)s'))
         self.logger.addHandler(fh)
-        
-        sh = logging.StreamHandler(sys.stdout) # Log to stdout
+        sh = logging.StreamHandler(sys.stdout)
         sh.setFormatter(logging.Formatter('%(asctime)s - %(levelname)s - %(message)s'))
         self.logger.addHandler(sh)
-        self.logger.propagate = False # Prevent propagation to root logger if root is also configured
+        self.logger.propagate = False
 
     def log_progress(self, phase: str, message: str, level: int = logging.INFO):
         self.logger.log(level, f"[{phase}] {message}")
-        if wandb.run: 
-             wandb.log({f"Progress/{phase.replace(' ', '_')}": message}, step=wandb.run.step if wandb.run.step is not None else 0)
-
+        if wandb.run: wandb.log({f"Progress/{phase.replace(' ', '_')}": message}, step=wandb.run.step if wandb.run.step is not None else 0)
 
     def check_target_achievement(self, nn_att_range_results: Dict, baseline_att_range_results: Dict) -> Dict:
         achievements = {}
@@ -194,15 +167,10 @@ class PerformanceMonitor:
                 self.log_progress("TARGET_CHECK", f"Baseline results missing for {att_range_name_key}", logging.WARNING)
                 continue
             nn_metrics_dict, baseline_metrics_dict = nn_att_range_results[att_range_name_key], baseline_att_range_results[att_range_name_key]
-            
-            current_cbf_cv_val = nn_metrics_dict.get('cbf_cov', float('inf'))
-            baseline_cbf_cv_val = baseline_metrics_dict.get('cbf_cov', float('inf'))
+            current_cbf_cv_val = nn_metrics_dict.get('cbf_cov', float('inf')); baseline_cbf_cv_val = baseline_metrics_dict.get('cbf_cov', float('inf'))
             cbf_improvement_val = ((baseline_cbf_cv_val - current_cbf_cv_val) / baseline_cbf_cv_val) * 100 if baseline_cbf_cv_val > 0 and not np.isinf(baseline_cbf_cv_val) and not np.isinf(current_cbf_cv_val) else 0.0
-            
-            current_att_cv_val = nn_metrics_dict.get('att_cov', float('inf'))
-            baseline_att_cv_val = baseline_metrics_dict.get('att_cov', float('inf'))
+            current_att_cv_val = nn_metrics_dict.get('att_cov', float('inf')); baseline_att_cv_val = baseline_metrics_dict.get('att_cov', float('inf'))
             att_improvement_val = ((baseline_att_cv_val - current_att_cv_val) / baseline_att_cv_val) * 100 if baseline_att_cv_val > 0 and not np.isinf(baseline_att_cv_val) and not np.isinf(current_att_cv_val) else 0.0
-            
             cbf_target_met_flag, att_target_met_flag = cbf_improvement_val >= self.config.target_cbf_cv_improvement_perc, att_improvement_val >= self.config.target_att_cv_improvement_perc
             achievements[att_range_name_key] = {'cbf_cv_improvement_perc': cbf_improvement_val, 'att_cv_improvement_perc': att_improvement_val, 'cbf_target_met': cbf_target_met_flag, 'att_target_met': att_target_met_flag}
             self.log_progress("TARGET_CHECK", f"{att_range_name_key} - CBF CV Improv: {cbf_improvement_val:.1f}% ({'MET' if cbf_target_met_flag else 'NOT MET'})")
@@ -214,47 +182,24 @@ class PerformanceMonitor:
 
 class HyperparameterOptimizer:
     def __init__(self, base_config: ResearchConfig, monitor: PerformanceMonitor, output_dir: Path):
-        self.base_config = base_config
-        self.monitor = monitor
-        self.output_dir = output_dir
-        self.study = None
+        self.base_config = base_config; self.monitor = monitor; self.output_dir = output_dir; self.study = None
         self.main_wandb_run_id = wandb.run.id if wandb.run else None
         self.main_wandb_project = wandb.run.project if wandb.run else self.base_config.wandb_project
         self.main_wandb_entity = wandb.run.entity if wandb.run else self.base_config.wandb_entity
 
-
     def objective(self, trial: optuna.Trial) -> float:
-        hidden_size_1 = trial.suggest_categorical('hidden_size_1', [128, 256, 512])
-        hidden_size_2 = trial.suggest_categorical('hidden_size_2', [64, 128, 256])
-        hidden_size_3 = trial.suggest_categorical('hidden_size_3', [32, 64, 128])
-        learning_rate = trial.suggest_float('learning_rate', 1e-4, 5e-3, log=True)
-        dropout_rate = trial.suggest_float('dropout_rate', 0.05, 0.3)
-        batch_size = trial.suggest_categorical('batch_size', [128, 256, 512])
-        weight_decay = trial.suggest_float('weight_decay', 1e-6, 1e-3, log=True) # Optimizing weight_decay
-        
+        hidden_size_1 = trial.suggest_categorical('hidden_size_1', [128, 256, 512]); hidden_size_2 = trial.suggest_categorical('hidden_size_2', [64, 128, 256])
+        hidden_size_3 = trial.suggest_categorical('hidden_size_3', [32, 64, 128]); learning_rate = trial.suggest_float('learning_rate', 1e-4, 5e-3, log=True)
+        dropout_rate = trial.suggest_float('dropout_rate', 0.05, 0.3); batch_size = trial.suggest_categorical('batch_size', [128, 256, 512])
+        weight_decay = trial.suggest_float('weight_decay', 1e-6, 1e-3, log=True)
         trial_config_dict = asdict(self.base_config) 
-        trial_optuna_params = { 
-            'hidden_sizes': [hidden_size_1, hidden_size_2, hidden_size_3],
-            'learning_rate': learning_rate, 'dropout_rate': dropout_rate, 'batch_size': batch_size,
-            'weight_decay': weight_decay, # Added to HPO
-        }
+        trial_optuna_params = {'hidden_sizes': [hidden_size_1, hidden_size_2, hidden_size_3], 'learning_rate': learning_rate, 'dropout_rate': dropout_rate, 'batch_size': batch_size, 'weight_decay': weight_decay}
         trial_config_dict.update(trial_optuna_params)
-        trial_config_dict.update({ 
-            'n_training_subjects': self.base_config.optuna_n_subjects,
-            'training_n_epochs': self.base_config.optuna_n_epochs, 'n_ensembles': 1,
-        })
+        trial_config_dict.update({'n_training_subjects': self.base_config.optuna_n_subjects, 'training_n_epochs': self.base_config.optuna_n_epochs, 'n_ensembles': 1})
         trial_run_config = ResearchConfig(**trial_config_dict)
         self.monitor.log_progress("OPTUNA_TRIAL", f"Trial {trial.number}: Params {trial.params}")
-
-        if self.main_wandb_run_id and wandb.run and wandb.run.id == self.main_wandb_run_id :
-            wandb.finish(quiet=True) 
-        
-        trial_wandb_run = wandb.init(
-            project=self.main_wandb_project, entity=self.main_wandb_entity,
-            group=self.base_config.optuna_study_name, name=f"trial_{trial.number}_{wandb.util.generate_id()[:4]}",
-            config=trial_optuna_params, reinit=True, job_type="hpo_trial"
-        )
-        
+        if self.main_wandb_run_id and wandb.run and wandb.run.id == self.main_wandb_run_id: wandb.finish(quiet=True) 
+        trial_wandb_run = wandb.init(project=self.main_wandb_project, entity=self.main_wandb_entity, group=self.base_config.optuna_study_name, name=f"trial_{trial.number}_{wandb.util.generate_id()[:4]}", config=trial_optuna_params, reinit=True, job_type="hpo_trial")
         try:
             _, _, validation_metrics_dict = self._quick_training_run(trial_run_config)
             validation_loss_val = validation_metrics_dict.get('val_loss', float('inf'))
@@ -271,90 +216,41 @@ class HyperparameterOptimizer:
             return float('inf') 
         finally: 
             if self.main_wandb_run_id and (wandb.run is None or wandb.run.id != self.main_wandb_run_id):
-                wandb.init(project=self.main_wandb_project, entity=self.main_wandb_entity,
-                           id=self.main_wandb_run_id, resume="must") 
-
+                wandb.init(project=self.main_wandb_project, entity=self.main_wandb_entity, id=self.main_wandb_run_id, resume="must") 
 
     def _quick_training_run(self, config_obj: ResearchConfig) -> Tuple[Any, Any, Dict[str, float]]:
         device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
-        asl_params_for_sim = ASLParameters(T1_artery=config_obj.T1_artery, T_tau=config_obj.T_tau, 
-                                   alpha_PCASL=config_obj.alpha_PCASL, alpha_VSASL=config_obj.alpha_VSASL)
+        asl_params_for_sim = ASLParameters(T1_artery=config_obj.T1_artery, T_tau=config_obj.T_tau, alpha_PCASL=config_obj.alpha_PCASL, alpha_VSASL=config_obj.alpha_VSASL)
         simulator_obj = RealisticASLSimulator(params=asl_params_for_sim)
-        plds_numpy_arr = np.array(config_obj.pld_values)
-        num_plds = len(plds_numpy_arr)
-        
-        # HPO uses a balanced dataset for stability
-        precomputed_hpo_data = simulator_obj.generate_balanced_dataset(
-            plds=plds_numpy_arr, total_subjects=config_obj.n_training_subjects,
-            noise_levels=config_obj.training_noise_levels[:1] # Use fewer noise levels for speed
-        )
-        # Apply feature engineering for HPO run
+        plds_numpy_arr = np.array(config_obj.pld_values); num_plds = len(plds_numpy_arr)
+        precomputed_hpo_data = simulator_obj.generate_balanced_dataset(plds=plds_numpy_arr, total_subjects=config_obj.n_training_subjects, noise_levels=config_obj.training_noise_levels[:1])
         engineered_features_hpo = engineer_signal_features(precomputed_hpo_data['signals'], num_plds)
         precomputed_hpo_data['signals'] = np.concatenate([precomputed_hpo_data['signals'], engineered_features_hpo], axis=1)
-
         base_nn_input_size = precomputed_hpo_data['signals'].shape[1]
 
-        trial_model_config = {
-            'hidden_sizes': config_obj.hidden_sizes, 'dropout_rate': config_obj.dropout_rate, 'norm_type': config_obj.norm_type,
-            'use_transformer_temporal': config_obj.use_transformer_temporal_model,
-            'use_focused_transformer': config_obj.use_focused_transformer_model,
-            'transformer_d_model': config_obj.transformer_d_model,
-            'transformer_d_model_focused': config_obj.transformer_d_model_focused,
-            'transformer_nhead': config_obj.transformer_nhead_model, 'transformer_nlayers': config_obj.transformer_nlayers_model,
-            'm0_input_feature': config_obj.m0_input_feature_model,
-            'log_var_cbf_min': config_obj.log_var_cbf_min, 'log_var_cbf_max': config_obj.log_var_cbf_max,
-            'log_var_att_min': config_obj.log_var_att_min, 'log_var_att_max': config_obj.log_var_att_max,
-            'loss_weight_cbf': config_obj.loss_weight_cbf, 'loss_weight_att': config_obj.loss_weight_att,
-            'loss_log_var_reg_lambda': config_obj.loss_log_var_reg_lambda,
-            'n_plds': num_plds
-        }
-
-        # <<< FIX: The model factory closure now filters the kwargs to avoid TypeError.
+        trial_model_config = {k: v for k, v in asdict(config_obj).items() if hasattr(EnhancedASLNet, k) or hasattr(CustomLoss, k) or k in ['pld_values', 'T1_artery', 'T_tau', 'alpha_PCASL', 'alpha_VSASL']}
+        
         def create_hpo_model(**kwargs):
             model_param_keys = inspect.signature(EnhancedASLNet).parameters.keys()
             filtered_kwargs = {k: v for k, v in kwargs.items() if k in model_param_keys}
             return EnhancedASLNet(input_size=base_nn_input_size, **filtered_kwargs)
 
-        trainer_obj = EnhancedASLTrainer(
-            model_config=trial_model_config,  # Pass the full config for the trainer to use (e.g., for loss)
-            model_class=create_hpo_model,     # Pass the factory that correctly instantiates the model
-            input_size=base_nn_input_size,
-            learning_rate=config_obj.learning_rate, weight_decay=config_obj.weight_decay,
-            batch_size=config_obj.batch_size, n_ensembles=config_obj.n_ensembles, device=device,
-            n_plds_for_model=num_plds, m0_input_feature_model=config_obj.m0_input_feature_model)
-        
-        train_loaders_list, val_loaders_list, _ = trainer_obj.prepare_curriculum_data( 
-            simulator_obj, plds=plds_numpy_arr, precomputed_dataset=precomputed_hpo_data,
-            curriculum_att_ranges_config=config_obj.att_ranges_config,
-            n_epochs_for_scheduler=config_obj.training_n_epochs
-        )
-        if not train_loaders_list:
-            self.monitor.log_progress("OPTUNA_RUN", "No training data for HPO trial.", logging.ERROR)
-            return None, None, {'val_loss': float('inf')}
-        
+        trainer_obj = EnhancedASLTrainer(model_config=trial_model_config, model_class=create_hpo_model, input_size=base_nn_input_size, learning_rate=config_obj.learning_rate, weight_decay=config_obj.weight_decay, batch_size=config_obj.batch_size, n_ensembles=config_obj.n_ensembles, device=device, n_plds_for_model=num_plds, m0_input_feature_model=config_obj.m0_input_feature_model)
+        train_loaders_list, val_loaders_list, _ = trainer_obj.prepare_curriculum_data(simulator_obj, plds=plds_numpy_arr, precomputed_dataset=precomputed_hpo_data, curriculum_att_ranges_config=config_obj.att_ranges_config, n_epochs_for_scheduler=config_obj.training_n_epochs)
+        if not train_loaders_list: self.monitor.log_progress("OPTUNA_RUN", "No training data for HPO trial.", logging.ERROR); return None, None, {'val_loss': float('inf')}
         first_val_loader_for_hpo = next((vl for vl in val_loaders_list if vl and len(vl) > 0), val_loaders_list[0] if val_loaders_list else None)
-        
-        history = trainer_obj.train_ensemble([train_loaders_list[0]] if train_loaders_list else [], [first_val_loader_for_hpo] if first_val_loader_for_hpo else [], 
-                                             n_epochs=config_obj.training_n_epochs, early_stopping_patience=5)
-        
+        history = trainer_obj.train_ensemble([train_loaders_list[0]] if train_loaders_list else [], [first_val_loader_for_hpo] if first_val_loader_for_hpo else [], n_epochs=config_obj.training_n_epochs, early_stopping_patience=5)
         final_val_loss = history.get('final_mean_val_loss', float('inf'))
         if np.isnan(final_val_loss): final_val_loss = float('inf')
-
         return trainer_obj, simulator_obj, {'val_loss': final_val_loss}
-
 
     def optimize(self) -> Dict:
         self.monitor.log_progress("OPTUNA", f"Starting HPO: {self.base_config.optuna_n_trials} trials, timeout {self.base_config.optuna_timeout_hours}h.")
         self.study = optuna.create_study(direction='minimize', study_name=self.base_config.optuna_study_name)
-        self.study.optimize(self.objective, n_trials=self.base_config.optuna_n_trials, 
-                            timeout=self.base_config.optuna_timeout_hours * 3600,
-                            gc_after_trial=True) 
-        
-        study_path = self.output_dir / 'optuna_study.pkl'
-        joblib.dump(self.study, study_path)
+        self.study.optimize(self.objective, n_trials=self.base_config.optuna_n_trials, timeout=self.base_config.optuna_timeout_hours * 3600, gc_after_trial=True) 
+        study_path = self.output_dir / 'optuna_study.pkl'; joblib.dump(self.study, study_path)
         self.monitor.log_progress("OPTUNA", f"Optuna study saved to {study_path}")
         if wandb.run: wandb.save(str(study_path))
-
         best_params_dict = self.study.best_params
         self.monitor.log_progress("OPTUNA", f"Best parameters found: {best_params_dict}")
         self.monitor.log_progress("OPTUNA", f"Best validation loss: {self.study.best_value:.6f}")
@@ -366,86 +262,46 @@ class HyperparameterOptimizer:
 
 class ClinicalValidator: 
     def __init__(self, config: ResearchConfig, monitor: PerformanceMonitor, norm_stats: Optional[Dict] = None):
-        self.config = config
-        self.monitor = monitor
-        asl_params_sim = ASLParameters(
-            T1_artery=config.T1_artery, T_tau=config.T_tau, 
-            alpha_PCASL=config.alpha_PCASL, alpha_VSASL=config.alpha_VSASL,
-            T2_factor=config.T2_factor, alpha_BS1=config.alpha_BS1
-        )
+        self.config = config; self.monitor = monitor
+        asl_params_sim = ASLParameters(T1_artery=config.T1_artery, T_tau=config.T_tau, alpha_PCASL=config.alpha_PCASL, alpha_VSASL=config.alpha_VSASL, T2_factor=config.T2_factor, alpha_BS1=config.alpha_BS1)
         self.simulator = RealisticASLSimulator(params=asl_params_sim)
         self.plds_np = np.array(config.pld_values)
         self.norm_stats = norm_stats 
 
     def validate_clinical_scenarios(self, trained_nn_models: List[torch.nn.Module]) -> Dict:
         self.monitor.log_progress("CLINICAL_VAL", "Running clinical validation scenarios...")
-        all_scenario_results = {}
-        pldti = np.column_stack((self.plds_np, self.plds_np))
-        num_plds_per_mod = len(self.plds_np)
-
+        all_scenario_results = {}; pldti = np.column_stack((self.plds_np, self.plds_np)); num_plds_per_mod = len(self.plds_np)
         for scenario_name, params in self.config.clinical_scenario_definitions.items():
             self.monitor.log_progress("CLINICAL_VAL", f"  Validating {scenario_name}...")
             n_subjects = self.config.n_clinical_scenario_subjects
-            true_cbf_vals = np.random.uniform(*params['cbf_range'], n_subjects)
-            true_att_vals = np.random.uniform(*params['att_range'], n_subjects)
-            current_snr = params['snr']
-            
-            scenario_metrics_collector = {
-                'neural_network': {'cbf_preds': [], 'att_preds': [], 'cbf_uncs': [], 'att_uncs': []},
-                'multiverse_ls_single_repeat': {'cbf_preds': [], 'att_preds': []},
-                'multiverse_ls_multi_repeat_avg': {'cbf_preds': [], 'att_preds': []}
-            }
+            true_cbf_vals = np.random.uniform(*params['cbf_range'], n_subjects); true_att_vals = np.random.uniform(*params['att_range'], n_subjects); current_snr = params['snr']
+            scenario_metrics_collector = {'neural_network': {'cbf_preds': [], 'att_preds': [], 'cbf_uncs': [], 'att_uncs': []}, 'multiverse_ls_single_repeat': {'cbf_preds': [], 'att_preds': []}, 'multiverse_ls_multi_repeat_avg': {'cbf_preds': [], 'att_preds': []}}
             for i in range(n_subjects):
                 true_cbf, true_att = true_cbf_vals[i], true_att_vals[i]
-                
-                single_repeat_data_dict = self.simulator.generate_synthetic_data(
-                    self.plds_np, np.array([true_att]), n_noise=1, tsnr=current_snr, cbf_val=true_cbf
-                )
+                single_repeat_data_dict = self.simulator.generate_synthetic_data(self.plds_np, np.array([true_att]), n_noise=1, tsnr=current_snr, cbf_val=true_cbf)
                 raw_nn_signal = np.concatenate([single_repeat_data_dict['PCASL'][0,0,:], single_repeat_data_dict['VSASL'][0,0,:]])
                 engineered_features = engineer_signal_features(raw_nn_signal.reshape(1,-1), num_plds_per_mod)
                 nn_input_signal_flat = np.concatenate([raw_nn_signal, engineered_features.flatten()])
-                
                 ls_single_repeat_signal_arr = single_repeat_data_dict['MULTIVERSE'][0,0,:,:]
-
                 if trained_nn_models: 
                     cbf_nn, att_nn, cbf_std, att_std = self._ensemble_predict(trained_nn_models, nn_input_signal_flat)
-                    scenario_metrics_collector['neural_network']['cbf_preds'].append(cbf_nn)
-                    scenario_metrics_collector['neural_network']['att_preds'].append(att_nn)
-                    scenario_metrics_collector['neural_network']['cbf_uncs'].append(cbf_std)
-                    scenario_metrics_collector['neural_network']['att_uncs'].append(att_std)
+                    scenario_metrics_collector['neural_network']['cbf_preds'].append(cbf_nn); scenario_metrics_collector['neural_network']['att_preds'].append(att_nn)
+                    scenario_metrics_collector['neural_network']['cbf_uncs'].append(cbf_std); scenario_metrics_collector['neural_network']['att_uncs'].append(att_std)
                 else: 
                     for k_fill in scenario_metrics_collector['neural_network']: scenario_metrics_collector['neural_network'][k_fill].append(np.nan)
-
                 try:
-                    beta_ls_sr, _, _, _ = fit_PCVSASL_misMatchPLD_vectInit_pep(
-                        pldti, ls_single_repeat_signal_arr, [50.0/6000.0, 1500.0],
-                        self.config.T1_artery, self.config.T_tau, self.config.T2_factor,
-                        self.config.alpha_BS1, self.config.alpha_PCASL, self.config.alpha_VSASL)
-                    scenario_metrics_collector['multiverse_ls_single_repeat']['cbf_preds'].append(beta_ls_sr[0] * 6000.0)
-                    scenario_metrics_collector['multiverse_ls_single_repeat']['att_preds'].append(beta_ls_sr[1])
-                except Exception: 
-                    scenario_metrics_collector['multiverse_ls_single_repeat']['cbf_preds'].append(np.nan)
-                    scenario_metrics_collector['multiverse_ls_single_repeat']['att_preds'].append(np.nan)
-                
+                    beta_ls_sr, _, _, _ = fit_PCVSASL_misMatchPLD_vectInit_pep(pldti, ls_single_repeat_signal_arr, [50.0/6000.0, 1500.0], self.config.T1_artery, self.config.T_tau, self.config.T2_factor, self.config.alpha_BS1, self.config.alpha_PCASL, self.config.alpha_VSASL)
+                    scenario_metrics_collector['multiverse_ls_single_repeat']['cbf_preds'].append(beta_ls_sr[0] * 6000.0); scenario_metrics_collector['multiverse_ls_single_repeat']['att_preds'].append(beta_ls_sr[1])
+                except Exception: scenario_metrics_collector['multiverse_ls_single_repeat']['cbf_preds'].append(np.nan); scenario_metrics_collector['multiverse_ls_single_repeat']['att_preds'].append(np.nan)
                 avg_multi_repeat_signals_collector = []
                 for _ in range(4): 
-                    repeat_data_dict = self.simulator.generate_synthetic_data(
-                        self.plds_np, np.array([true_att]), n_noise=1, tsnr=current_snr, cbf_val=true_cbf 
-                    )
+                    repeat_data_dict = self.simulator.generate_synthetic_data(self.plds_np, np.array([true_att]), n_noise=1, tsnr=current_snr, cbf_val=true_cbf)
                     avg_multi_repeat_signals_collector.append(repeat_data_dict['MULTIVERSE'][0,0,:,:])
-                
                 avg_multi_repeat_signal_arr = np.mean(avg_multi_repeat_signals_collector, axis=0)
                 try:
-                    beta_ls_mr, _, _, _ = fit_PCVSASL_misMatchPLD_vectInit_pep(
-                        pldti, avg_multi_repeat_signal_arr, [50.0/6000.0, 1500.0],
-                        self.config.T1_artery, self.config.T_tau, self.config.T2_factor,
-                        self.config.alpha_BS1, self.config.alpha_PCASL, self.config.alpha_VSASL)
-                    scenario_metrics_collector['multiverse_ls_multi_repeat_avg']['cbf_preds'].append(beta_ls_mr[0] * 6000.0)
-                    scenario_metrics_collector['multiverse_ls_multi_repeat_avg']['att_preds'].append(beta_ls_mr[1])
-                except Exception: 
-                    scenario_metrics_collector['multiverse_ls_multi_repeat_avg']['cbf_preds'].append(np.nan)
-                    scenario_metrics_collector['multiverse_ls_multi_repeat_avg']['att_preds'].append(np.nan)
-
+                    beta_ls_mr, _, _, _ = fit_PCVSASL_misMatchPLD_vectInit_pep(pldti, avg_multi_repeat_signal_arr, [50.0/6000.0, 1500.0], self.config.T1_artery, self.config.T_tau, self.config.T2_factor, self.config.alpha_BS1, self.config.alpha_PCASL, self.config.alpha_VSASL)
+                    scenario_metrics_collector['multiverse_ls_multi_repeat_avg']['cbf_preds'].append(beta_ls_mr[0] * 6000.0); scenario_metrics_collector['multiverse_ls_multi_repeat_avg']['att_preds'].append(beta_ls_mr[1])
+                except Exception: scenario_metrics_collector['multiverse_ls_multi_repeat_avg']['cbf_preds'].append(np.nan); scenario_metrics_collector['multiverse_ls_multi_repeat_avg']['att_preds'].append(np.nan)
             all_scenario_results[scenario_name] = {}
             temp_comparator = ComprehensiveComparison() 
             for method_key_str, data_dict_val in scenario_metrics_collector.items():
@@ -453,68 +309,36 @@ class ClinicalValidator:
                 metrics_summary_dict = temp_comparator._calculate_detailed_metrics(cbf_preds_arr, true_cbf_vals, att_preds_arr, true_att_vals)
                 num_valid_fits = np.sum(~np.isnan(cbf_preds_arr) & ~np.isnan(att_preds_arr))
                 metrics_summary_dict['success_rate'] = (num_valid_fits / n_subjects) * 100 if n_subjects > 0 else 0
-                
                 if 'cbf_uncs' in data_dict_val and data_dict_val['cbf_uncs']: 
-                    metrics_summary_dict['mean_cbf_uncertainty_std'] = np.nanmean(data_dict_val['cbf_uncs'])
-                    metrics_summary_dict['mean_att_uncertainty_std'] = np.nanmean(data_dict_val['att_uncs'])
-                
+                    metrics_summary_dict['mean_cbf_uncertainty_std'] = np.nanmean(data_dict_val['cbf_uncs']); metrics_summary_dict['mean_att_uncertainty_std'] = np.nanmean(data_dict_val['att_uncs'])
                 all_scenario_results[scenario_name][method_key_str] = metrics_summary_dict
                 self.monitor.log_progress("CLINICAL_VAL", f"  {scenario_name} - {method_key_str}: CBF RMSE {metrics_summary_dict.get('cbf_rmse',np.nan):.2f}, ATT RMSE {metrics_summary_dict.get('att_rmse',np.nan):.2f}, Success {metrics_summary_dict.get('success_rate',0):.1f}%")
                 if wandb.run: 
-                    for metric_name_val, metric_val in metrics_summary_dict.items():
-                        wandb.summary[f"ClinicalVal/{scenario_name}/{method_key_str}/{metric_name_val}"] = metric_val
+                    for metric_name_val, metric_val in metrics_summary_dict.items(): wandb.summary[f"ClinicalVal/{scenario_name}/{method_key_str}/{metric_name_val}"] = metric_val
         return all_scenario_results
 
     def _ensemble_predict(self, models: List[torch.nn.Module], input_signal_flat: np.ndarray) -> Tuple[float, float, float, float]:
         if not models: return np.nan, np.nan, np.nan, np.nan
-        
-        # Use the corrected helper function to apply normalization while preserving all features
-        normalized_input_signal = apply_normalization_to_input_flat(
-            input_signal_flat, self.norm_stats, len(self.plds_np), False  # M0 is handled within other_features
-        )
-        
+        normalized_input_signal = apply_normalization_to_input_flat(input_signal_flat, self.norm_stats, len(self.plds_np), False)
         input_tensor = torch.FloatTensor(normalized_input_signal).unsqueeze(0).to(next(models[0].parameters()).device)
-        
-        cbf_means_norm_list, att_means_norm_list = [], []
-        cbf_aleatoric_vars_norm_list, att_aleatoric_vars_norm_list = [], []
-
+        cbf_means_norm_list, att_means_norm_list, cbf_aleatoric_vars_norm_list, att_aleatoric_vars_norm_list = [], [], [], []
         for model_item in models:
             model_item.eval()
             with torch.no_grad():
-                cbf_m_norm, att_m_norm, cbf_lv_norm, att_lv_norm = model_item(input_tensor) # Model predicts normalized
+                cbf_m_norm, att_m_norm, cbf_lv_norm, att_lv_norm = model_item(input_tensor)
                 cbf_means_norm_list.append(cbf_m_norm.item()); att_means_norm_list.append(att_m_norm.item())
-                cbf_aleatoric_vars_norm_list.append(torch.exp(cbf_lv_norm).item()) # Variance of normalized
-                att_aleatoric_vars_norm_list.append(torch.exp(att_lv_norm).item())
-        
-        ensemble_cbf_m_norm = np.mean(cbf_means_norm_list) if cbf_means_norm_list else np.nan
-        ensemble_att_m_norm = np.mean(att_means_norm_list) if att_means_norm_list else np.nan
-        
-        mean_aleatoric_cbf_var_norm = np.mean(cbf_aleatoric_vars_norm_list) if cbf_aleatoric_vars_norm_list else np.nan
-        mean_aleatoric_att_var_norm = np.mean(att_aleatoric_vars_norm_list) if att_aleatoric_vars_norm_list else np.nan
-        
-        epistemic_cbf_var_norm = np.var(cbf_means_norm_list) if len(cbf_means_norm_list) > 1 else 0.0
-        epistemic_att_var_norm = np.var(att_means_norm_list) if len(att_means_norm_list) > 1 else 0.0
-        
-        # De-normalize means and stds
-        y_mean_cbf, y_std_cbf, y_mean_att, y_std_att = 0.0, 1.0, 0.0, 1.0 # Defaults
+                cbf_aleatoric_vars_norm_list.append(torch.exp(cbf_lv_norm).item()); att_aleatoric_vars_norm_list.append(torch.exp(att_lv_norm).item())
+        ensemble_cbf_m_norm = np.mean(cbf_means_norm_list) if cbf_means_norm_list else np.nan; ensemble_att_m_norm = np.mean(att_means_norm_list) if att_means_norm_list else np.nan
+        mean_aleatoric_cbf_var_norm = np.mean(cbf_aleatoric_vars_norm_list) if cbf_aleatoric_vars_norm_list else np.nan; mean_aleatoric_att_var_norm = np.mean(att_aleatoric_vars_norm_list) if att_aleatoric_vars_norm_list else np.nan
+        epistemic_cbf_var_norm = np.var(cbf_means_norm_list) if len(cbf_means_norm_list) > 1 else 0.0; epistemic_att_var_norm = np.var(att_means_norm_list) if len(att_means_norm_list) > 1 else 0.0
+        y_mean_cbf, y_std_cbf, y_mean_att, y_std_att = 0.0, 1.0, 0.0, 1.0
         if self.norm_stats:
-            y_mean_cbf = self.norm_stats.get('y_mean_cbf', 0.0)
-            y_std_cbf = self.norm_stats.get('y_std_cbf', 1.0) if self.norm_stats.get('y_std_cbf', 1.0) > 1e-6 else 1.0
-            y_mean_att = self.norm_stats.get('y_mean_att', 0.0)
-            y_std_att = self.norm_stats.get('y_std_att', 1.0) if self.norm_stats.get('y_std_att', 1.0) > 1e-6 else 1.0
-
-        ensemble_cbf_m_denorm = ensemble_cbf_m_norm * y_std_cbf + y_mean_cbf
-        ensemble_att_m_denorm = ensemble_att_m_norm * y_std_att + y_mean_att
-
-        total_cbf_var_norm = mean_aleatoric_cbf_var_norm + epistemic_cbf_var_norm
-        total_att_var_norm = mean_aleatoric_att_var_norm + epistemic_att_var_norm
-        
-        total_cbf_var_denorm = total_cbf_var_norm * (y_std_cbf**2)
-        total_att_var_denorm = total_att_var_norm * (y_std_att**2)
-        
-        total_cbf_std_denorm = np.sqrt(max(0, total_cbf_var_denorm)) if not np.isnan(total_cbf_var_denorm) else np.nan
-        total_att_std_denorm = np.sqrt(max(0, total_att_var_denorm)) if not np.isnan(total_att_var_denorm) else np.nan
-        
+            y_mean_cbf = self.norm_stats.get('y_mean_cbf', 0.0); y_std_cbf = self.norm_stats.get('y_std_cbf', 1.0) if self.norm_stats.get('y_std_cbf', 1.0) > 1e-6 else 1.0
+            y_mean_att = self.norm_stats.get('y_mean_att', 0.0); y_std_att = self.norm_stats.get('y_std_att', 1.0) if self.norm_stats.get('y_std_att', 1.0) > 1e-6 else 1.0
+        ensemble_cbf_m_denorm = ensemble_cbf_m_norm * y_std_cbf + y_mean_cbf; ensemble_att_m_denorm = ensemble_att_m_norm * y_std_att + y_mean_att
+        total_cbf_var_norm = mean_aleatoric_cbf_var_norm + epistemic_cbf_var_norm; total_att_var_norm = mean_aleatoric_att_var_norm + epistemic_att_var_norm
+        total_cbf_var_denorm = total_cbf_var_norm * (y_std_cbf**2); total_att_var_denorm = total_att_var_norm * (y_std_att**2)
+        total_cbf_std_denorm = np.sqrt(max(0, total_cbf_var_denorm)) if not np.isnan(total_cbf_var_denorm) else np.nan; total_att_std_denorm = np.sqrt(max(0, total_att_var_denorm)) if not np.isnan(total_att_var_denorm) else np.nan
         return ensemble_cbf_m_denorm, ensemble_att_m_denorm, total_cbf_std_denorm, total_att_std_denorm
 
 
@@ -525,69 +349,39 @@ class PublicationGenerator:
     def generate_publication_package(self, clinical_results: Dict, comparison_df: pd.DataFrame, single_repeat_val_metrics: Optional[Dict] = None) -> Dict:
         self.monitor.log_progress("PUB_GEN", "Generating publication tables...")
         package = {'tables': {}, 'statistical_analysis': {}} 
-
         package['tables']['performance_summary_csv'] = self._generate_performance_table_csv(comparison_df)
         package['tables']['clinical_validation_summary_csv'] = self._generate_clinical_table_csv(clinical_results)
-        if single_repeat_val_metrics:
-             package['tables']['single_repeat_validation_csv'] = self._generate_single_repeat_table_csv(single_repeat_val_metrics)
-
-        self._save_publication_materials(package) 
-        return package
+        if single_repeat_val_metrics: package['tables']['single_repeat_validation_csv'] = self._generate_single_repeat_table_csv(single_repeat_val_metrics)
+        self._save_publication_materials(package); return package
 
     def _generate_single_repeat_table_csv(self, single_repeat_metrics: Dict) -> str:
-        if not single_repeat_metrics:
-            self.monitor.log_progress("PUB_GEN", "No single-repeat validation results for table.", logging.WARNING)
-            return ""
-        
-        rows = []
-        for method_name, metrics in single_repeat_metrics.items():
-            row = {'method': method_name}
-            row.update(metrics) 
-            rows.append(row)
-        
-        df = pd.DataFrame(rows)
-        cols_ordered = ['method', 'cbf_rmse', 'att_rmse', 'cbf_bias', 'att_bias', 'cbf_cov', 'att_cov', 
-                        'scan_time_minutes', 'efficiency_score', 'num_valid_fits']
-        existing_cols = [c for c in cols_ordered if c in df.columns]
-        df = df[existing_cols]
-        
+        if not single_repeat_metrics: self.monitor.log_progress("PUB_GEN", "No single-repeat validation results for table.", logging.WARNING); return ""
+        rows = []; [row.update(metrics) for method_name, metrics in single_repeat_metrics.items() if (row := {'method': method_name}) and rows.append(row)]
+        df = pd.DataFrame(rows); cols_ordered = ['method', 'cbf_rmse', 'att_rmse', 'cbf_bias', 'att_bias', 'cbf_cov', 'att_cov', 'scan_time_minutes', 'efficiency_score', 'num_valid_fits']
+        existing_cols = [c for c in cols_ordered if c in df.columns]; df = df[existing_cols]
         table_path = self.output_dir / 'single_repeat_validation_summary.csv'
         df.to_csv(table_path, index=False, float_format='%.3f')
         self.monitor.log_progress("PUB_GEN", f"Saved single-repeat validation summary CSV to {table_path}")
-        if wandb.run: wandb.save(str(table_path))
-        return str(table_path)
+        if wandb.run: wandb.save(str(table_path)); return str(table_path)
 
     def _generate_clinical_table_csv(self, clinical_results: Dict) -> str: 
         if not clinical_results: return ""
-        rows = []
-        for scenario_name, scenario_data in clinical_results.items():
-            for method_name, metrics in scenario_data.items():
-                row = {'scenario': scenario_name, 'method': method_name}; row.update(metrics)
-                rows.append(row)
-        df = pd.DataFrame(rows)
-        cols_ordered = ['scenario', 'method', 'cbf_rmse', 'att_rmse', 'cbf_bias', 'att_bias', 
-                        'cbf_cov', 'att_cov', 'success_rate', 
-                        'mean_cbf_uncertainty_std', 'mean_att_uncertainty_std']
-        existing_cols = [c for c in cols_ordered if c in df.columns]
-        df = df[existing_cols]
+        rows = []; [row.update(metrics) for scenario_name, scenario_data in clinical_results.items() for method_name, metrics in scenario_data.items() if (row := {'scenario': scenario_name, 'method': method_name}) and rows.append(row)]
+        df = pd.DataFrame(rows); cols_ordered = ['scenario', 'method', 'cbf_rmse', 'att_rmse', 'cbf_bias', 'att_bias', 'cbf_cov', 'att_cov', 'success_rate', 'mean_cbf_uncertainty_std', 'mean_att_uncertainty_std']
+        existing_cols = [c for c in cols_ordered if c in df.columns]; df = df[existing_cols]
         table_path = self.output_dir / 'clinical_validation_summary.csv'
         df.to_csv(table_path, index=False, float_format='%.2f')
         self.monitor.log_progress("PUB_GEN", f"Saved clinical validation summary CSV to {table_path}")
-        if wandb.run: wandb.save(str(table_path))
-        return str(table_path)
+        if wandb.run: wandb.save(str(table_path)); return str(table_path)
 
     def _generate_performance_table_csv(self, comparison_df: pd.DataFrame) -> str: 
         if comparison_df.empty: return ""
-        cols_to_show = ['method', 'att_range_name', 'cbf_nbias_perc', 'cbf_cov', 'cbf_nrmse_perc', 
-                        'att_nbias_perc', 'att_cov', 'att_nrmse_perc', 'success_rate', 'computation_time'
-        ]
-        existing_cols = [col for col in cols_to_show if col in comparison_df.columns]
-        summary_df = comparison_df[existing_cols]
+        cols_to_show = ['method', 'att_range_name', 'cbf_nbias_perc', 'cbf_cov', 'cbf_nrmse_perc', 'att_nbias_perc', 'att_cov', 'att_nrmse_perc', 'success_rate', 'computation_time']
+        existing_cols = [col for col in cols_to_show if col in comparison_df.columns]; summary_df = comparison_df[existing_cols]
         table_path = self.output_dir / 'benchmark_performance_summary.csv'
         summary_df.to_csv(table_path, index=False, float_format='%.2f')
         self.monitor.log_progress("PUB_GEN", f"Saved benchmark performance summary CSV to {table_path}")
-        if wandb.run: wandb.save(str(table_path))
-        return str(table_path)
+        if wandb.run: wandb.save(str(table_path)); return str(table_path)
 
     def _save_publication_materials(self, package: Dict): 
         def make_serializable(obj): 
@@ -608,10 +402,7 @@ def run_comprehensive_asl_research(config: ResearchConfig, output_parent_dir: st
     output_path = Path(output_parent_dir) / f'asl_research_{timestamp}'
     output_path.mkdir(parents=True, exist_ok=True)
     
-    wandb_run = wandb.init(
-        project=config.wandb_project, entity=config.wandb_entity,
-        config=asdict(config), name=f"run_{timestamp}", job_type="research_pipeline"
-    )
+    wandb_run = wandb.init(project=config.wandb_project, entity=config.wandb_entity, config=asdict(config), name=f"run_{timestamp}", job_type="research_pipeline")
     if wandb_run: script_logger.info(f"W&B Run URL: {wandb_run.url}")
 
     monitor = PerformanceMonitor(config, output_path) 
@@ -620,15 +411,9 @@ def run_comprehensive_asl_research(config: ResearchConfig, output_parent_dir: st
     with open(config_save_path, 'w') as f: json.dump(asdict(config), f, indent=2)
     if wandb_run: wandb.save(str(config_save_path))
 
-    plds_np = np.array(config.pld_values)
-    num_plds = len(plds_np)
-    asl_params_sim = ASLParameters(
-        T1_artery=config.T1_artery, T_tau=config.T_tau, 
-        alpha_PCASL=config.alpha_PCASL, alpha_VSASL=config.alpha_VSASL,
-        T2_factor=config.T2_factor, alpha_BS1=config.alpha_BS1
-    )
-    simulator = RealisticASLSimulator(params=asl_params_sim)
-    norm_stats_final = None 
+    plds_np = np.array(config.pld_values); num_plds = len(plds_np)
+    asl_params_sim = ASLParameters(T1_artery=config.T1_artery, T_tau=config.T_tau, alpha_PCASL=config.alpha_PCASL, alpha_VSASL=config.alpha_VSASL, T2_factor=config.T2_factor, alpha_BS1=config.alpha_BS1)
+    simulator = RealisticASLSimulator(params=asl_params_sim); norm_stats_final = None 
 
     best_optuna_params = {}
     if config.optuna_n_trials > 0:
@@ -636,95 +421,52 @@ def run_comprehensive_asl_research(config: ResearchConfig, output_parent_dir: st
         optimizer = HyperparameterOptimizer(config, monitor, output_path) 
         best_optuna_params = optimizer.optimize()
         if best_optuna_params:
-            config.hidden_sizes = [best_optuna_params.get('hidden_size_1', config.hidden_sizes[0]),
-                                   best_optuna_params.get('hidden_size_2', config.hidden_sizes[1]),
-                                   best_optuna_params.get('hidden_size_3', config.hidden_sizes[2])]
-            config.learning_rate = best_optuna_params.get('learning_rate', config.learning_rate)
-            config.dropout_rate = best_optuna_params.get('dropout_rate', config.dropout_rate)
-            config.batch_size = best_optuna_params.get('batch_size', config.batch_size)
-            config.weight_decay = best_optuna_params.get('weight_decay', config.weight_decay) # Update weight_decay
+            config.hidden_sizes = [best_optuna_params.get('hidden_size_1', config.hidden_sizes[0]), best_optuna_params.get('hidden_size_2', config.hidden_sizes[1]), best_optuna_params.get('hidden_size_3', config.hidden_sizes[2])]
+            config.learning_rate = best_optuna_params.get('learning_rate', config.learning_rate); config.dropout_rate = best_optuna_params.get('dropout_rate', config.dropout_rate)
+            config.batch_size = best_optuna_params.get('batch_size', config.batch_size); config.weight_decay = best_optuna_params.get('weight_decay', config.weight_decay)
             monitor.log_progress("PHASE1", f"Updated config with Optuna best_params: {best_optuna_params}")
             if wandb_run: wandb.config.update(best_optuna_params, allow_val_change=True)
     else: monitor.log_progress("PHASE1", "Skipping hyperparameter optimization.")
 
     monitor.log_progress("PHASE2", "Starting ensemble training")
-    device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
-    monitor.log_progress("PHASE2", f"Using device: {device}")
+    device = torch.device('cuda' if torch.cuda.is_available() else 'cpu'); monitor.log_progress("PHASE2", f"Using device: {device}")
     
-    # --- FIX: Generate a balanced dataset with a uniform ATT distribution ---
     monitor.log_progress("PHASE2", "Generating balanced (uniform ATT) training dataset...")
-    precomputed_training_data = simulator.generate_balanced_dataset(
-        plds=plds_np, total_subjects=config.n_training_subjects,
-        noise_levels=config.training_noise_levels
-    )
+    precomputed_training_data = simulator.generate_balanced_dataset(plds=plds_np, total_subjects=config.n_training_subjects, noise_levels=config.training_noise_levels)
     
-    # --- FIX: Apply explicit feature engineering ---
     monitor.log_progress("PHASE2", "Applying signal feature engineering...")
     engineered_features = engineer_signal_features(precomputed_training_data['signals'], num_plds)
-    # Concatenate raw signals with new features
-    precomputed_training_data['signals'] = np.concatenate(
-        [precomputed_training_data['signals'], engineered_features], axis=1
-    )
+    precomputed_training_data['signals'] = np.concatenate([precomputed_training_data['signals'], engineered_features], axis=1)
     
     if 'parameters' in precomputed_training_data and precomputed_training_data['parameters'].size > 0:
         mean_att_balanced = np.mean(precomputed_training_data['parameters'][:, 1])
         monitor.log_progress("PHASE2", f"Mean ATT of new balanced dataset: {mean_att_balanced:.2f} ms")
         if wandb_run: wandb.summary['balanced_dataset_mean_att'] = mean_att_balanced
             
-    # Define model input size AFTER feature engineering
     base_input_size_nn = precomputed_training_data['signals'].shape[1]
     
-    model_creation_config = {
-        'hidden_sizes': config.hidden_sizes, 'dropout_rate': config.dropout_rate, 'norm_type': config.norm_type,
-        'use_transformer_temporal': config.use_transformer_temporal_model,
-        'use_focused_transformer': config.use_focused_transformer_model,
-        'transformer_d_model': config.transformer_d_model, 'transformer_d_model_focused': config.transformer_d_model_focused,
-        'transformer_nhead': config.transformer_nhead_model, 'transformer_nlayers': config.transformer_nlayers_model,
-        'm0_input_feature': False, # Feature engineering is more powerful than simple M0 feature for now
-        'log_var_cbf_min': config.log_var_cbf_min, 'log_var_cbf_max': config.log_var_cbf_max,
-        'log_var_att_min': config.log_var_att_min, 'log_var_att_max': config.log_var_att_max,
-        'loss_weight_cbf': config.loss_weight_cbf, 'loss_weight_att': config.loss_weight_att,
-        'loss_log_var_reg_lambda': config.loss_log_var_reg_lambda,
-        'n_plds': num_plds
-    }
+    model_creation_config = {k: v for k, v in asdict(config).items()}
 
-    # <<< FIX: The model factory closure now filters the kwargs to avoid TypeError.
     def create_main_model_closure(**kwargs):
         model_param_keys = inspect.signature(EnhancedASLNet).parameters.keys()
         filtered_kwargs = {k: v for k, v in kwargs.items() if k in model_param_keys}
         return EnhancedASLNet(input_size=base_input_size_nn, **filtered_kwargs)
 
-    trainer = EnhancedASLTrainer(
-        model_config=model_creation_config, # Pass the full config for the trainer to use
-        model_class=create_main_model_closure, # Pass the factory that correctly instantiates the model
-        input_size=base_input_size_nn, learning_rate=config.learning_rate,
-        weight_decay=config.weight_decay, batch_size=config.batch_size, 
-        n_ensembles=config.n_ensembles, device=device,
-        n_plds_for_model=num_plds, m0_input_feature_model=False
-    )
+    trainer = EnhancedASLTrainer(model_config=model_creation_config, model_class=create_main_model_closure, input_size=base_input_size_nn, learning_rate=config.learning_rate, weight_decay=config.weight_decay, batch_size=config.batch_size, n_ensembles=config.n_ensembles, device=device, n_plds_for_model=num_plds, m0_input_feature_model=False)
     
-    # --- FIX: Pass the pre-generated, feature-engineered data to the trainer ---
     monitor.log_progress("PHASE2", "Preparing curriculum data loaders from balanced, feature-rich dataset...")
-    train_loaders, val_loaders, norm_stats_final = trainer.prepare_curriculum_data(
-        simulator=simulator, plds=plds_np,
-        precomputed_dataset=precomputed_training_data,
-        val_split=config.val_split,
-        curriculum_att_ranges_config=config.att_ranges_config,
-        n_epochs_for_scheduler=config.training_n_epochs
-    )
+    train_loaders, val_loaders, norm_stats_final = trainer.prepare_curriculum_data(simulator=simulator, plds=plds_np, precomputed_dataset=precomputed_training_data, val_split=config.val_split, curriculum_att_ranges_config=config.att_ranges_config, n_epochs_for_scheduler=config.training_n_epochs)
 
     if norm_stats_final: 
         norm_stats_path = output_path / 'norm_stats.json'
         serializable_norm_stats = {k: (v.tolist() if isinstance(v, np.ndarray) else v) for k, v in norm_stats_final.items()}
         with open(norm_stats_path, 'w') as f: json.dump(serializable_norm_stats, f, indent=2)
         if wandb_run: wandb.save(str(norm_stats_path))
-    else:
-        monitor.log_progress("PHASE2", "No normalization stats generated.", logging.WARNING)
+    else: monitor.log_progress("PHASE2", "No normalization stats generated.", logging.WARNING)
 
     if not train_loaders:
         monitor.log_progress("PHASE2", "Failed to create training loaders. Aborting.", logging.CRITICAL)
-        if wandb_run: wandb_run.finish(exit_code=1)
-        return {"error": "Training data preparation failed."}
+        if wandb_run: wandb_run.finish(exit_code=1); return {"error": "Training data preparation failed."}
     
     monitor.log_progress("PHASE2", f"Training {config.n_ensembles}-model ensemble for {config.training_n_epochs} epochs per stage...")
     training_start_time = time.time()
@@ -744,53 +486,32 @@ def run_comprehensive_asl_research(config: ResearchConfig, output_parent_dir: st
         model_state_srs = trainer.best_states[0] if hasattr(trainer, 'best_states') and trainer.best_states and trainer.best_states[0] else trainer.models[0].state_dict()
         if model_state_srs: torch.save(model_state_srs, temp_srs_model_path); srs_model_path = str(temp_srs_model_path)
 
-    _, single_repeat_val_metrics = run_single_repeat_validation_main(
-        model_path=srs_model_path, base_nn_input_size_for_model_load=base_input_size_nn, 
-        nn_arch_config_for_model_load=model_creation_config, norm_stats_for_nn=norm_stats_final 
-    )
+    _, single_repeat_val_metrics = run_single_repeat_validation_main(model_path=srs_model_path, base_nn_input_size_for_model_load=base_input_size_nn, nn_arch_config_for_model_load=model_creation_config, norm_stats_for_nn=norm_stats_final)
     if srs_model_path and temp_srs_model_path.exists(): temp_srs_model_path.unlink()
 
     monitor.log_progress("PHASE4", "Benchmarking NN against conventional LS methods")
     total_test_subjects = config.n_test_subjects_per_att_range * len(config.att_ranges_config)
     n_base_subjects_for_benchmark = max(1, min(total_test_subjects, 2000) // (len(config.test_conditions) * len(config.test_snr_levels) * 3 if config.test_conditions and config.test_snr_levels else 1))
-
-    benchmark_test_dataset_raw = simulator.generate_diverse_dataset(
-        plds=plds_np, n_subjects=n_base_subjects_for_benchmark,
-        conditions=config.test_conditions, noise_levels=config.test_snr_levels
-    )
+    benchmark_test_dataset_raw = simulator.generate_diverse_dataset(plds=plds_np, n_subjects=n_base_subjects_for_benchmark, conditions=config.test_conditions, noise_levels=config.test_snr_levels)
     benchmark_y_all = benchmark_test_dataset_raw['parameters']
     
-    # Apply the same feature engineering to the benchmark data
     raw_benchmark_signals = benchmark_test_dataset_raw['signals']
     engineered_benchmark_features = engineer_signal_features(raw_benchmark_signals, num_plds)
     benchmark_X_all_nn_input = np.concatenate([raw_benchmark_signals, engineered_benchmark_features], axis=1)
 
-    benchmark_test_data_for_comp = {
-        'PCASL_LS': raw_benchmark_signals[:, :num_plds], 
-        'VSASL_LS': raw_benchmark_signals[:, num_plds:], 
-        'MULTIVERSE_LS_FORMAT': raw_benchmark_signals.reshape(-1, num_plds, 2),
-        'NN_INPUT_FORMAT': benchmark_X_all_nn_input
-    }
+    benchmark_test_data_for_comp = {'PCASL_LS': raw_benchmark_signals[:, :num_plds], 'VSASL_LS': raw_benchmark_signals[:, num_plds:], 'MULTIVERSE_LS_FORMAT': raw_benchmark_signals.reshape(-1, num_plds, 2), 'NN_INPUT_FORMAT': benchmark_X_all_nn_input}
 
-    nn_model_for_comp_path = None
-    temp_comp_model_save_path = output_path / 'temp_comp_model_0.pt'
+    nn_model_for_comp_path = None; temp_comp_model_save_path = output_path / 'temp_comp_model_0.pt'
     if trainer.models: 
         model_state_to_save_comp = trainer.best_states[0] if hasattr(trainer, 'best_states') and trainer.best_states and trainer.best_states[0] else trainer.models[0].state_dict()
-        if model_state_to_save_comp: torch.save(model_state_to_save_comp, temp_comp_model_save_path)
-        nn_model_for_comp_path = str(temp_comp_model_save_path)
+        if model_state_to_save_comp: torch.save(model_state_to_save_comp, temp_comp_model_save_path); nn_model_for_comp_path = str(temp_comp_model_save_path)
 
     comp_framework_output_dir = output_path / "comparison_framework_outputs"
-    comp_framework = ComprehensiveComparison(
-        nn_model_path=nn_model_for_comp_path, output_dir=str(comp_framework_output_dir), 
-        base_nn_input_size=base_input_size_nn, nn_n_plds=num_plds,
-        nn_model_arch_config=model_creation_config, norm_stats=norm_stats_final
-    )
+    comp_framework = ComprehensiveComparison(nn_model_path=nn_model_for_comp_path, output_dir=str(comp_framework_output_dir), base_nn_input_size=base_input_size_nn, nn_n_plds=num_plds, nn_model_arch_config=model_creation_config, norm_stats=norm_stats_final)
     comparison_results_df = comp_framework.compare_methods(benchmark_test_data_for_comp, benchmark_y_all, plds_np, config.att_ranges_config)
     if nn_model_for_comp_path and temp_comp_model_save_path.exists(): temp_comp_model_save_path.unlink() 
-    
     if not comparison_results_df.empty and wandb_run:
-        if (comp_framework_output_dir / 'comparison_results_detailed.csv').exists():
-             wandb.save(str(comp_framework_output_dir / 'comparison_results_detailed.csv'))
+        if (comp_framework_output_dir / 'comparison_results_detailed.csv').exists(): wandb.save(str(comp_framework_output_dir / 'comparison_results_detailed.csv'))
 
     nn_benchmark_metrics, baseline_ls_metrics = {}, {}
     if not comparison_results_df.empty:
@@ -804,9 +525,7 @@ def run_comprehensive_asl_research(config: ResearchConfig, output_parent_dir: st
 
     monitor.log_progress("PHASE5", "Generating publication-ready materials (tables only)")
     pub_gen = PublicationGenerator(config, output_path, monitor)
-    publication_package = pub_gen.generate_publication_package(
-        clinical_validation_results, comparison_results_df, single_repeat_val_metrics
-    )
+    publication_package = pub_gen.generate_publication_package(clinical_validation_results, comparison_results_df, single_repeat_val_metrics)
 
     monitor.log_progress("PHASE6", "Saving final models and summarizing results")
     models_dir = output_path / 'trained_models'; models_dir.mkdir(exist_ok=True)
@@ -816,16 +535,8 @@ def run_comprehensive_asl_research(config: ResearchConfig, output_parent_dir: st
             if model_state_val: torch.save(model_state_val, model_file_path_val)
             if wandb_run and model_file_path_val.exists(): wandb.save(str(model_file_path_val))
 
-    final_results_summary = {
-        'config': asdict(config), 'optuna_best_params': best_optuna_params,
-        'training_duration_hours': training_duration_hours, 
-        'clinical_validation_results': clinical_validation_results,
-        'single_repeat_validation_metrics': single_repeat_val_metrics,
-        'trained_models_dir': str(models_dir),
-        'wandb_run_url': wandb_run.url if wandb_run else None
-    }
-    with open(output_path / 'final_research_results.json', 'w') as f: 
-        json.dump(final_results_summary, f, indent=2, default=lambda o: f"<not_serializable_{type(o).__name__}>")
+    final_results_summary = {'config': asdict(config), 'optuna_best_params': best_optuna_params, 'training_duration_hours': training_duration_hours, 'clinical_validation_results': clinical_validation_results, 'single_repeat_validation_metrics': single_repeat_val_metrics, 'trained_models_dir': str(models_dir), 'wandb_run_url': wandb_run.url if wandb_run else None}
+    with open(output_path / 'final_research_results.json', 'w') as f: json.dump(final_results_summary, f, indent=2, default=lambda o: f"<not_serializable_{type(o).__name__}>")
     if wandb_run: wandb.save(str(output_path / 'final_research_results.json'))
     
     monitor.log_progress("COMPLETE", f"Research pipeline finished. Results in {output_path}")
@@ -833,43 +544,28 @@ def run_comprehensive_asl_research(config: ResearchConfig, output_parent_dir: st
     return final_results_summary
 
 if __name__ == "__main__":
-    logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(name)s - %(levelname)s - %(message)s', 
-                        handlers=[logging.StreamHandler(sys.stdout)], force=True) 
-    
+    logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(name)s - %(levelname)s - %(message)s', handlers=[logging.StreamHandler(sys.stdout)], force=True) 
     config_file_path_arg = sys.argv[1] if len(sys.argv) > 1 else "config/default.yaml"
     loaded_config_obj = ResearchConfig() 
 
-    # --- Corrected code block for main.py ---
     if Path(config_file_path_arg).exists():
         script_logger.info(f"Loading configuration from {config_file_path_arg}")
-        with open(config_file_path_arg, 'r') as f_yaml:
-            config_from_yaml = yaml.safe_load(f_yaml) or {}
-        
-        # Create a flat dictionary of all key-value pairs from the potentially nested YAML
+        with open(config_file_path_arg, 'r') as f_yaml: config_from_yaml = yaml.safe_load(f_yaml) or {}
         all_yaml_params = {}
         for key, value in config_from_yaml.items():
-            if isinstance(value, dict):
-                all_yaml_params.update(value)
-            else:
-                all_yaml_params[key] = value
-        
-        # Update the ResearchConfig object with the flattened parameters
+            if isinstance(value, dict): all_yaml_params.update(value)
+            else: all_yaml_params[key] = value
         for key, value in all_yaml_params.items():
-            if hasattr(loaded_config_obj, key):
-                setattr(loaded_config_obj, key, value)
-            else:
-                script_logger.warning(f"YAML key '{key}' not found in ResearchConfig, ignoring.")
+            if hasattr(loaded_config_obj, key): setattr(loaded_config_obj, key, value)
+            else: script_logger.warning(f"YAML key '{key}' not found in ResearchConfig, ignoring.")
     else: 
         script_logger.info(f"Config file {config_file_path_arg} not found. Using default ResearchConfig.")
 
     script_logger.info("\nStarting comprehensive ASL research pipeline with configuration:")
-    
     pipeline_results_dict = run_comprehensive_asl_research(config=loaded_config_obj)
-    
     script_logger.info("\n" + "=" * 80 + "\nRESEARCH PIPELINE COMPLETED!\n" + "=" * 80)
     if "error" not in pipeline_results_dict:
         script_logger.info(f"Results saved in: {pipeline_results_dict.get('trained_models_dir', 'Specified output directory')}")
-        if pipeline_results_dict.get('wandb_run_url'):
-            script_logger.info(f"W&B Run: {pipeline_results_dict['wandb_run_url']}")
+        if pipeline_results_dict.get('wandb_run_url'): script_logger.info(f"W&B Run: {pipeline_results_dict['wandb_run_url']}")
     else: 
         script_logger.error(f"Pipeline failed: {pipeline_results_dict.get('error')}")
