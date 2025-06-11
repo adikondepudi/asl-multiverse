@@ -321,7 +321,7 @@ class EnhancedASLTrainer:
             'w_att': model_config.get('loss_weight_att', 1.0),
             'log_var_reg_lambda': model_config.get('loss_log_var_reg_lambda', 0.0),
             'focal_gamma': model_config.get('focal_gamma', 1.5),
-            'pinn_weight': model_config.get('loss_pinn_weight', 0.0), # NEW
+            'pinn_weight': model_config.get('loss_pinn_weight_stage1', model_config.get('loss_pinn_weight', 0.0)), # Use stage1 as default
             'model_params': model_config # NEW: Pass all model params for physics constants
         }
         self.custom_loss_fn = CustomLoss(**loss_params)
@@ -475,7 +475,7 @@ class EnhancedASLTrainer:
     def train_ensemble(self,
                    train_loaders: List[DataLoader],
                    val_loaders: List[Optional[DataLoader]],
-                   n_epochs: int = 200,
+                   epoch_schedule: List[int],
                    early_stopping_patience: int = 20) -> Dict[str, Any]:
         
         histories = defaultdict(lambda: defaultdict(list))
@@ -486,16 +486,28 @@ class EnhancedASLTrainer:
             return {'final_mean_train_loss': float('nan'), 'final_mean_val_loss': float('nan'), 'all_histories': histories}
 
         for stage_idx, train_loader in enumerate(train_loaders):
+            # --- STAGE-SPECIFIC PARAMETER ADJUSTMENTS ---
+            if stage_idx == 0:
+                self.custom_loss_fn.pinn_weight = self.model_config.get('loss_pinn_weight_stage1', 10.0)
+                logger.info(f"--- STAGE {stage_idx+1}: Foundational Pre-training ---")
+                logger.info(f"  Setting PINN weight to {self.custom_loss_fn.pinn_weight}")
+            elif stage_idx == 1:
+                self.custom_loss_fn.pinn_weight = self.model_config.get('loss_pinn_weight_stage2', 0.1)
+                new_lr = self.model_config.get('learning_rate_stage2', self.learning_rate / 5.0)
+                logger.info(f"--- STAGE {stage_idx+1}: Full-Spectrum Fine-tuning ---")
+                logger.info(f"  Setting PINN weight to {self.custom_loss_fn.pinn_weight}")
+                logger.info(f"  Setting learning rate to {new_lr}")
+                for opt in self.optimizers:
+                    for param_group in opt.param_groups:
+                        param_group['lr'] = new_lr
+            # --- END of STAGE-SPECIFIC ADJUSTMENTS ---
+
             current_val_loader = val_loaders[stage_idx] if stage_idx < len(val_loaders) else None
             
-            logger.info(f"--- STAGE {stage_idx+1} START ---")
-            logger.info(f"  Resetting early stopping. Best val losses set to infinity.")
-            if current_val_loader:
-                logger.info(f"  Using validation loader with {len(current_val_loader)} batches.")
-            else:
-                logger.info("  No validation loader for this stage.")
+            if current_val_loader: logger.info(f"  Using validation loader with {len(current_val_loader)} batches.")
+            else: logger.info("  No validation loader for this stage.")
             
-            logger.info(f"\nStarting curriculum stage {stage_idx + 1}/{len(train_loaders)} with {len(train_loader)} train batches.")
+            logger.info(f"  Training for {epoch_schedule[stage_idx]} epochs with {len(train_loader)} train batches.")
             if len(train_loader) == 0:
                 logger.warning(f"Skipping empty curriculum training stage {stage_idx + 1}.")
                 continue
@@ -507,7 +519,8 @@ class EnhancedASLTrainer:
             if not hasattr(self, 'overall_best_val_losses'):
                 self.overall_best_val_losses = [float('inf')] * self.n_ensembles
 
-            for epoch in range(n_epochs):
+            n_epochs_stage = epoch_schedule[stage_idx]
+            for epoch in range(n_epochs_stage):
                 epoch_train_losses_all_models, epoch_val_metrics_all_models = [], []
                 
                 for model_idx in range(self.n_ensembles):
@@ -524,7 +537,6 @@ class EnhancedASLTrainer:
                         histories[model_idx][f'val_metrics_stage_{stage_idx}'].append(val_metrics_dict)
                         
                         val_loss_for_es = val_metrics_dict.get('val_loss', float('inf'))
-                        logger.info(f"  Epoch {epoch+1}, Model {model_idx}, Stage {stage_idx+1} Val Loss: {val_loss_for_es:.4f}")
                         
                         if val_loss_for_es < best_val_losses_stage[model_idx]:
                             best_val_losses_stage[model_idx] = val_loss_for_es
@@ -563,7 +575,7 @@ class EnhancedASLTrainer:
                     
                     mean_train_loss_console = np.nanmean(active_train_losses) if active_train_losses else float('nan')
                     mean_val_loss_console_stage = np.nanmean(active_val_losses_stage) if active_val_losses_stage else float('nan')
-                    logger.info(f"Stage {stage_idx+1}, Epoch {epoch + 1}/{n_epochs}: Mean Active Train Loss = {mean_train_loss_console:.6f}, Mean Active Val Loss (Stage) = {mean_val_loss_console_stage:.6f}")
+                    logger.info(f"Stage {stage_idx+1}, Epoch {epoch + 1}/{n_epochs_stage}: Mean Active Train Loss = {mean_train_loss_console:.6f}, Mean Active Val Loss (Stage) = {mean_val_loss_console_stage:.6f}")
         
         if not hasattr(self, 'overall_best_val_losses'):
             self.overall_best_val_losses = [float('inf')] * self.n_ensembles

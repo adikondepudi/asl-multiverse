@@ -23,7 +23,8 @@ warnings.filterwarnings('ignore', category=UserWarning)
 from enhanced_asl_network import EnhancedASLNet, CustomLoss
 from asl_simulation import ASLParameters
 from enhanced_simulation import RealisticASLSimulator
-from asl_trainer import EnhancedASLTrainer
+from asl_trainer import EnhancedASLTrainer, EnhancedASLDataset
+from torch.utils.data import DataLoader, WeightedRandomSampler
 from comparison_framework import ComprehensiveComparison, ComparisonResult
 from performance_metrics import ProposalEvaluator
 from single_repeat_validation import SingleRepeatValidator, run_single_repeat_validation_main
@@ -43,8 +44,16 @@ class ResearchConfig:
     weight_decay: float = 1e-5
     batch_size: int = 256
     val_split: float = 0.2
-    n_training_subjects: int = 10000 
-    training_n_epochs: int = 200
+    
+    # NEW: Two-stage curriculum parameters
+    n_subjects_stage1: int = 5000
+    n_subjects_stage2: int = 10000
+    n_epochs_stage1: int = 140
+    n_epochs_stage2: int = 60
+    loss_pinn_weight_stage1: float = 10.0
+    loss_pinn_weight_stage2: float = 0.1
+    learning_rate_stage2: float = 0.0002
+    
     n_ensembles: int = 5
     dropout_rate: float = 0.1
     norm_type: str = 'batch'
@@ -52,7 +61,7 @@ class ResearchConfig:
     m0_input_feature_model: bool = False
 
     use_transformer_temporal_model: bool = True
-    use_focused_transformer_model: bool = True # Changed default to True
+    use_focused_transformer_model: bool = True
     transformer_d_model_focused: int = 32      
     transformer_nhead_model: int = 4
     transformer_nlayers_model: int = 2
@@ -65,8 +74,7 @@ class ResearchConfig:
     loss_weight_cbf: float = 1.0
     loss_weight_att: float = 1.0
     loss_log_var_reg_lambda: float = 0.0
-    loss_pinn_weight: float = 0.0 # NEW: For physics-informed loss
-
+    
     optuna_n_trials: int = 20
     optuna_timeout_hours: float = 0.5
     optuna_n_subjects: int = 500 
@@ -195,7 +203,7 @@ class HyperparameterOptimizer:
         trial_config_dict = asdict(self.base_config) 
         trial_optuna_params = {'hidden_sizes': [hidden_size_1, hidden_size_2, hidden_size_3], 'learning_rate': learning_rate, 'dropout_rate': dropout_rate, 'batch_size': batch_size, 'weight_decay': weight_decay}
         trial_config_dict.update(trial_optuna_params)
-        trial_config_dict.update({'n_training_subjects': self.base_config.optuna_n_subjects, 'training_n_epochs': self.base_config.optuna_n_epochs, 'n_ensembles': 1})
+        trial_config_dict.update({'n_subjects_stage2': self.base_config.optuna_n_subjects, 'n_epochs_stage1': self.base_config.optuna_n_epochs, 'n_ensembles': 1})
         trial_run_config = ResearchConfig(**trial_config_dict)
         self.monitor.log_progress("OPTUNA_TRIAL", f"Trial {trial.number}: Params {trial.params}")
         if self.main_wandb_run_id and wandb.run and wandb.run.id == self.main_wandb_run_id: wandb.finish(quiet=True) 
@@ -236,10 +244,10 @@ class HyperparameterOptimizer:
             return EnhancedASLNet(input_size=base_nn_input_size, **filtered_kwargs)
 
         trainer_obj = EnhancedASLTrainer(model_config=trial_model_config, model_class=create_hpo_model, input_size=base_nn_input_size, learning_rate=config_obj.learning_rate, weight_decay=config_obj.weight_decay, batch_size=config_obj.batch_size, n_ensembles=config_obj.n_ensembles, device=device, n_plds_for_model=num_plds, m0_input_feature_model=config_obj.m0_input_feature_model)
-        train_loaders_list, val_loaders_list, _ = trainer_obj.prepare_curriculum_data(simulator_obj, plds=plds_numpy_arr, precomputed_dataset=precomputed_hpo_data, curriculum_att_ranges_config=config_obj.att_ranges_config, n_epochs_for_scheduler=config_obj.training_n_epochs)
+        train_loaders_list, val_loaders_list, _ = trainer_obj.prepare_curriculum_data(simulator_obj, plds=plds_numpy_arr, precomputed_dataset=precomputed_hpo_data, curriculum_att_ranges_config=config_obj.att_ranges_config, n_epochs_for_scheduler=config_obj.optuna_n_epochs)
         if not train_loaders_list: self.monitor.log_progress("OPTUNA_RUN", "No training data for HPO trial.", logging.ERROR); return None, None, {'val_loss': float('inf')}
         first_val_loader_for_hpo = next((vl for vl in val_loaders_list if vl and len(vl) > 0), val_loaders_list[0] if val_loaders_list else None)
-        history = trainer_obj.train_ensemble([train_loaders_list[0]] if train_loaders_list else [], [first_val_loader_for_hpo] if first_val_loader_for_hpo else [], n_epochs=config_obj.training_n_epochs, early_stopping_patience=5)
+        history = trainer_obj.train_ensemble([train_loaders_list[0]] if train_loaders_list else [], [first_val_loader_for_hpo] if first_val_loader_for_hpo else [], epoch_schedule=[config_obj.optuna_n_epochs], early_stopping_patience=5)
         final_val_loss = history.get('final_mean_val_loss', float('inf'))
         if np.isnan(final_val_loss): final_val_loss = float('inf')
         return trainer_obj, simulator_obj, {'val_loss': final_val_loss}
@@ -460,23 +468,81 @@ def run_comprehensive_asl_research(config: ResearchConfig, output_parent_dir: st
             if wandb_run: wandb.config.update(best_optuna_params, allow_val_change=True)
     else: monitor.log_progress("PHASE1", "Skipping hyperparameter optimization.")
 
-    monitor.log_progress("PHASE2", "Starting ensemble training")
+    monitor.log_progress("PHASE2", "Starting two-stage ensemble training")
     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu'); monitor.log_progress("PHASE2", f"Using device: {device}")
     
-    monitor.log_progress("PHASE2", "Generating balanced (uniform ATT) training dataset...")
-    precomputed_training_data = simulator.generate_balanced_dataset(plds=plds_np, total_subjects=config.n_training_subjects, noise_levels=config.training_noise_levels)
+    # --- STAGE 1: Foundational Pre-training Dataset ---
+    monitor.log_progress("PHASE2", "Generating Dataset A (Foundational: healthy, high-SNR)")
+    dataset_A = simulator.generate_balanced_dataset(plds=plds_np, total_subjects=config.n_subjects_stage1, noise_levels=[10.0, 15.0])
     
-    monitor.log_progress("PHASE2", "Applying signal feature engineering...")
-    engineered_features = engineer_signal_features(precomputed_training_data['signals'], num_plds)
-    precomputed_training_data['signals'] = np.concatenate([precomputed_training_data['signals'], engineered_features], axis=1)
+    # --- STAGE 2: Full-Spectrum Fine-tuning Dataset ---
+    monitor.log_progress("PHASE2", "Generating Dataset B (Full-Spectrum: all conditions, all noises)")
+    dataset_B = simulator.generate_balanced_dataset(plds=plds_np, total_subjects=config.n_subjects_stage2, noise_levels=config.training_noise_levels)
+
+    # --- Feature Engineering for both datasets ---
+    monitor.log_progress("PHASE2", "Applying signal feature engineering")
+    engineered_features_A = engineer_signal_features(dataset_A['signals'], num_plds)
+    dataset_A['signals'] = np.concatenate([dataset_A['signals'], engineered_features_A], axis=1)
+    engineered_features_B = engineer_signal_features(dataset_B['signals'], num_plds)
+    dataset_B['signals'] = np.concatenate([dataset_B['signals'], engineered_features_B], axis=1)
+
+    # --- Normalization based on Full-Spectrum dataset ---
+    monitor.log_progress("PHASE2", "Calculating normalization statistics from full-spectrum data")
+    X_B_raw, y_B_raw = dataset_B['signals'], dataset_B['parameters']
+    n_val_B = int(X_B_raw.shape[0] * config.val_split)
+    perm_B = np.random.permutation(X_B_raw.shape[0])
+    train_idx_B, val_idx_B = perm_B[:-n_val_B], perm_B[-n_val_B:]
+    X_train_B_raw, y_train_B_raw = X_B_raw[train_idx_B], y_B_raw[train_idx_B]
+
+    num_raw_signal_features = num_plds * 2
+    pcasl_train_signals = X_train_B_raw[:, :num_plds]
+    vsasl_train_signals = X_train_B_raw[:, num_plds:num_raw_signal_features]
+    norm_stats_final = {
+        'pcasl_mean': np.mean(pcasl_train_signals, axis=0), 'pcasl_std': np.std(pcasl_train_signals, axis=0),
+        'vsasl_mean': np.mean(vsasl_train_signals, axis=0), 'vsasl_std': np.std(vsasl_train_signals, axis=0),
+        'y_mean_cbf': np.mean(y_train_B_raw[:, 0]), 'y_std_cbf': np.std(y_train_B_raw[:, 0]),
+        'y_mean_att': np.mean(y_train_B_raw[:, 1]), 'y_std_att': np.std(y_train_B_raw[:, 1])
+    }
     
-    if 'parameters' in precomputed_training_data and precomputed_training_data['parameters'].size > 0:
-        mean_att_balanced = np.mean(precomputed_training_data['parameters'][:, 1])
-        monitor.log_progress("PHASE2", f"Mean ATT of new balanced dataset: {mean_att_balanced:.2f} ms")
-        if wandb_run: wandb.summary['balanced_dataset_mean_att'] = mean_att_balanced
-            
-    base_input_size_nn = precomputed_training_data['signals'].shape[1]
+    # --- FIX START: Handle arrays and scalars separately ---
+    # Handle array-based stats (for signals)
+    for key in ['pcasl_std', 'vsasl_std']:
+        norm_stats_final[key][norm_stats_final[key] < 1e-6] = 1.0
+
+    # Handle scalar stats (for parameters)
+    if norm_stats_final['y_std_cbf'] < 1e-6:
+        norm_stats_final['y_std_cbf'] = 1.0
+    if norm_stats_final['y_std_att'] < 1e-6:
+        norm_stats_final['y_std_att'] = 1.0
+    # --- FIX END ---
+
+    # --- Function to create dataloaders for a given dataset ---
+    def create_dataloaders(dataset_dict, norm_stats, val_split, batch_size):
+        X_all, y_all = dataset_dict['signals'], dataset_dict['parameters']
+        X_all_norm = np.array([apply_normalization_to_input_flat(s, norm_stats, num_plds, False) for s in X_all])
+        y_all_norm = np.column_stack([
+            (y_all[:, 0] - norm_stats['y_mean_cbf']) / norm_stats['y_std_cbf'],
+            (y_all[:, 1] - norm_stats['y_mean_att']) / norm_stats['y_std_att']
+        ])
+        perm = np.random.permutation(len(X_all))
+        n_val = int(len(X_all) * val_split)
+        train_idx, val_idx = perm[:-n_val], perm[-n_val:]
+        X_train, y_train_norm, y_train_raw = X_all_norm[train_idx], y_all_norm[train_idx], y_all[train_idx]
+        X_val, y_val_norm = X_all_norm[val_idx], y_all_norm[val_idx]
+        
+        train_att_weights = np.exp(-np.clip(y_train_raw[:, 1], 100.0, None) / 2000.0)
+        train_sampler = WeightedRandomSampler(train_att_weights, len(train_att_weights), replacement=True)
+        
+        train_dataset = EnhancedASLDataset(X_train, y_train_norm)
+        train_loader = DataLoader(train_dataset, batch_size=batch_size, sampler=train_sampler, drop_last=True)
+        val_loader = DataLoader(EnhancedASLDataset(X_val, y_val_norm), batch_size=batch_size) if len(X_val) > 0 else None
+        return train_loader, val_loader
     
+    monitor.log_progress("PHASE2", "Creating DataLoaders for both training stages")
+    train_loader_A, val_loader_A = create_dataloaders(dataset_A, norm_stats_final, config.val_split, config.batch_size)
+    train_loader_B, val_loader_B = create_dataloaders(dataset_B, norm_stats_final, config.val_split, config.batch_size)
+    
+    base_input_size_nn = dataset_A['signals'].shape[1]
     model_creation_config = {k: v for k, v in asdict(config).items()}
 
     def create_main_model_closure(**kwargs):
@@ -485,10 +551,14 @@ def run_comprehensive_asl_research(config: ResearchConfig, output_parent_dir: st
         return EnhancedASLNet(input_size=base_input_size_nn, **filtered_kwargs)
 
     trainer = EnhancedASLTrainer(model_config=model_creation_config, model_class=create_main_model_closure, input_size=base_input_size_nn, learning_rate=config.learning_rate, weight_decay=config.weight_decay, batch_size=config.batch_size, n_ensembles=config.n_ensembles, device=device, n_plds_for_model=num_plds, m0_input_feature_model=False)
-    
-    monitor.log_progress("PHASE2", "Preparing curriculum data loaders from balanced, feature-rich dataset...")
-    train_loaders, val_loaders, norm_stats_final = trainer.prepare_curriculum_data(simulator=simulator, plds=plds_np, precomputed_dataset=precomputed_training_data, val_split=config.val_split, curriculum_att_ranges_config=config.att_ranges_config, n_epochs_for_scheduler=config.training_n_epochs)
 
+    trainer.norm_stats = norm_stats_final
+    trainer.custom_loss_fn.norm_stats = norm_stats_final
+    
+    total_steps = len(train_loader_A) * config.n_epochs_stage1 + len(train_loader_B) * config.n_epochs_stage2
+    for opt in trainer.optimizers:
+        trainer.schedulers.append(torch.optim.lr_scheduler.OneCycleLR(opt, max_lr=config.learning_rate, total_steps=total_steps))
+    
     if norm_stats_final: 
         norm_stats_path = output_path / 'norm_stats.json'
         serializable_norm_stats = {k: (v.tolist() if isinstance(v, np.ndarray) else v) for k, v in norm_stats_final.items()}
@@ -496,13 +566,13 @@ def run_comprehensive_asl_research(config: ResearchConfig, output_parent_dir: st
         if wandb_run: wandb.save(str(norm_stats_path))
     else: monitor.log_progress("PHASE2", "No normalization stats generated.", logging.WARNING)
 
-    if not train_loaders:
-        monitor.log_progress("PHASE2", "Failed to create training loaders. Aborting.", logging.CRITICAL)
-        if wandb_run: wandb_run.finish(exit_code=1); return {"error": "Training data preparation failed."}
-    
-    monitor.log_progress("PHASE2", f"Training {config.n_ensembles}-model ensemble for {config.training_n_epochs} epochs per stage...")
+    monitor.log_progress("PHASE2", f"Training {config.n_ensembles}-model ensemble using 2-stage curriculum...")
     training_start_time = time.time()
-    training_histories_dict = trainer.train_ensemble(train_loaders, val_loaders, n_epochs=config.training_n_epochs)
+    training_histories_dict = trainer.train_ensemble(
+        train_loaders=[train_loader_A, train_loader_B], 
+        val_loaders=[val_loader_A, val_loader_B], 
+        epoch_schedule=[config.n_epochs_stage1, config.n_epochs_stage2]
+    )
     training_duration_hours = (time.time() - training_start_time) / 3600
     monitor.log_progress("PHASE2", f"Training completed in {training_duration_hours:.2f} hours.")
     if wandb_run: wandb.summary['training_duration_hours'] = training_duration_hours

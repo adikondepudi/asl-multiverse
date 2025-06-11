@@ -1,17 +1,23 @@
-
 # config/debug.yaml
 
 training:
   hidden_sizes: [64, 32]
   n_ensembles: 1
-  n_training_subjects: 500
-  training_n_epochs: 20
-  loss_weight_cbf: 1.0
-  loss_weight_att: 1.0
-  weight_decay: 0.0001
   learning_rate: 0.001 
+  weight_decay: 0.0001
   dropout_rate: 0.1
   norm_type: "batch"
+  
+  # NEW: Two-stage curriculum params
+  n_subjects_stage1: 200
+  n_subjects_stage2: 300
+  n_epochs_stage1: 10
+  n_epochs_stage2: 10
+  loss_pinn_weight_stage1: 10.0
+  loss_pinn_weight_stage2: 0.1
+  learning_rate_stage2: 0.0002
+
+  # Model-specific params
   use_transformer_temporal_model: true
   m0_input_feature_model: false 
   use_focused_transformer_model: true 
@@ -23,7 +29,6 @@ training:
   log_var_att_min: -2.0
   log_var_att_max: 14.0
   loss_log_var_reg_lambda: 0.0
-  loss_pinn_weight: 0.1 # NEW: Enable physics-informed loss for debugging
 
 optuna:
   optuna_n_trials: 0
