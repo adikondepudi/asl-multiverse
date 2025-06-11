@@ -275,7 +275,16 @@ class ClinicalValidator:
             self.monitor.log_progress("CLINICAL_VAL", f"  Validating {scenario_name}...")
             n_subjects = self.config.n_clinical_scenario_subjects
             true_cbf_vals = np.random.uniform(*params['cbf_range'], n_subjects); true_att_vals = np.random.uniform(*params['att_range'], n_subjects); current_snr = params['snr']
-            scenario_metrics_collector = {'neural_network': {'cbf_preds': [], 'att_preds': [], 'cbf_uncs': [], 'att_uncs': []}, 'multiverse_ls_single_repeat': {'cbf_preds': [], 'att_preds': []}, 'multiverse_ls_multi_repeat_avg': {'cbf_preds': [], 'att_preds': []}}
+            
+            # MODIFICATION START: Add a key for the new method
+            scenario_metrics_collector = {
+                'neural_network': {'cbf_preds': [], 'att_preds': [], 'cbf_uncs': [], 'att_uncs': []},
+                'multiverse_ls_single_repeat': {'cbf_preds': [], 'att_preds': []},
+                'multiverse_ls_multi_repeat_avg': {'cbf_preds': [], 'att_preds': []},
+                'neural_network_multi_repeat_avg': {'cbf_preds': [], 'att_preds': [], 'cbf_uncs': [], 'att_uncs': []}
+            }
+            # MODIFICATION END
+
             for i in range(n_subjects):
                 true_cbf, true_att = true_cbf_vals[i], true_att_vals[i]
                 single_repeat_data_dict = self.simulator.generate_synthetic_data(self.plds_np, np.array([true_att]), n_noise=1, tsnr=current_snr, cbf_val=true_cbf)
@@ -302,6 +311,29 @@ class ClinicalValidator:
                     beta_ls_mr, _, _, _ = fit_PCVSASL_misMatchPLD_vectInit_pep(pldti, avg_multi_repeat_signal_arr, [50.0/6000.0, 1500.0], self.config.T1_artery, self.config.T_tau, self.config.T2_factor, self.config.alpha_BS1, self.config.alpha_PCASL, self.config.alpha_VSASL)
                     scenario_metrics_collector['multiverse_ls_multi_repeat_avg']['cbf_preds'].append(beta_ls_mr[0] * 6000.0); scenario_metrics_collector['multiverse_ls_multi_repeat_avg']['att_preds'].append(beta_ls_mr[1])
                 except Exception: scenario_metrics_collector['multiverse_ls_multi_repeat_avg']['cbf_preds'].append(np.nan); scenario_metrics_collector['multiverse_ls_multi_repeat_avg']['att_preds'].append(np.nan)
+
+                # MODIFICATION START: Add logic for averaged NN prediction
+                if trained_nn_models:
+                    # Average the PCASL and VSASL components separately to create the flat input vector for the NN
+                    avg_pcasl_signals = np.mean([sig[:, 0] for sig in avg_multi_repeat_signals_collector], axis=0)
+                    avg_vsasl_signals = np.mean([sig[:, 1] for sig in avg_multi_repeat_signals_collector], axis=0)
+                    
+                    raw_nn_signal_avg = np.concatenate([avg_pcasl_signals, avg_vsasl_signals])
+                    engineered_features_avg = engineer_signal_features(raw_nn_signal_avg.reshape(1,-1), num_plds_per_mod)
+                    nn_input_signal_flat_avg = np.concatenate([raw_nn_signal_avg, engineered_features_avg.flatten()])
+                
+                    # Predict with the NN using the averaged signal
+                    cbf_nn_avg, att_nn_avg, cbf_std_avg, att_std_avg = self._ensemble_predict(trained_nn_models, nn_input_signal_flat_avg)
+                    scenario_metrics_collector['neural_network_multi_repeat_avg']['cbf_preds'].append(cbf_nn_avg)
+                    scenario_metrics_collector['neural_network_multi_repeat_avg']['att_preds'].append(att_nn_avg)
+                    scenario_metrics_collector['neural_network_multi_repeat_avg']['cbf_uncs'].append(cbf_std_avg)
+                    scenario_metrics_collector['neural_network_multi_repeat_avg']['att_uncs'].append(att_std_avg)
+                else:
+                    # Append NaN if no model is available
+                    for k_fill in scenario_metrics_collector['neural_network_multi_repeat_avg']: 
+                        scenario_metrics_collector['neural_network_multi_repeat_avg'][k_fill].append(np.nan)
+                # MODIFICATION END
+
             all_scenario_results[scenario_name] = {}
             temp_comparator = ComprehensiveComparison() 
             for method_key_str, data_dict_val in scenario_metrics_collector.items():
