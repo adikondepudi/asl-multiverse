@@ -70,6 +70,50 @@ def load_artifacts(results_dir: Path) -> tuple:
         
     return ensemble_models, config, norm_stats
 
+def analyze_and_report_full_grid(results_collector: dict, true_params_grid: np.ndarray) -> pd.DataFrame:
+    """
+    Analyzes results for each point on the full CBF/ATT grid without aggregation.
+
+    Returns:
+        A detailed DataFrame with one row per (method, grid_point).
+    """
+    n_points = true_params_grid.shape[0]
+    full_results_list = []
+
+    for i in range(n_points):
+        true_cbf = true_params_grid[i, 0]
+        true_att = true_params_grid[i, 1]
+
+        for method, all_preds in results_collector.items():
+            pred_cbf, pred_att = all_preds[i] # Get the prediction for this specific point
+
+            if np.isnan(pred_cbf) or np.isnan(pred_att):
+                # Handle cases where the fitting failed (NaN prediction)
+                cbf_error = np.nan
+                att_error = np.nan
+                cbf_rel_error = np.nan
+                att_rel_error = np.nan
+            else:
+                cbf_error = pred_cbf - true_cbf
+                att_error = pred_att - true_att
+                # Avoid division by zero, though true values shouldn't be zero here
+                cbf_rel_error = (cbf_error / true_cbf) * 100 if true_cbf != 0 else np.nan
+                att_rel_error = (att_error / true_att) * 100 if true_att != 0 else np.nan
+
+            full_results_list.append({
+                'True CBF': true_cbf,
+                'True ATT': true_att,
+                'Method': method,
+                'Predicted CBF': pred_cbf,
+                'Predicted ATT': pred_att,
+                'CBF Error': cbf_error,
+                'ATT Error (ms)': att_error,
+                'CBF Rel Error %': cbf_rel_error,
+                'ATT Rel Error %': att_rel_error
+            })
+
+    return pd.DataFrame(full_results_list)
+
 def run_evaluation(models: list, config: dict, norm_stats: dict):
     """Generates data and runs the 4 specified comparison scenarios across the landscape."""
     
@@ -81,23 +125,24 @@ def run_evaluation(models: list, config: dict, norm_stats: dict):
     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
     for model in models: model.to(device)
 
-    # Define the test landscape
-    cbf_grid = np.linspace(20, 80, 8)
-    att_grid = np.linspace(800, 3500, 10)
+    # Define the test landscape to cover the full physiological range
+    cbf_grid = np.linspace(20, 100, 8)
+    att_grid = np.linspace(500, 4000, 10)
     true_params_grid = np.array(np.meshgrid(cbf_grid, att_grid)).T.reshape(-1, 2)
     n_points = len(true_params_grid)
     logging.info(f"Testing on a systematic {len(cbf_grid)}x{len(att_grid)} CBF/ATT grid ({n_points} points).")
     
     # 2. Data Generation and Prediction Loop
     results_collector = {
-        'NLLS (4-repeat avg)': [], 'NLLS (1-repeat)': [],
-        'NN (4-repeat avg)': [], 'NN (1-repeat)': []
+        'NLLS (4-repeat avg)': [], 
+        'NLLS (1-repeat)': [],
+        'NN (4-repeat avg)': [], 
+        'NN (1-repeat)': []
     }
     
     for i in tqdm(range(n_points), desc="Processing Grid Points"):
         true_cbf, true_att = true_params_grid[i]
         
-        # Generate 4 independent noisy repeats
         repeats_data = []
         for _ in range(4):
             data_dict = simulator.generate_synthetic_data(
@@ -122,41 +167,11 @@ def run_evaluation(models: list, config: dict, norm_stats: dict):
         cbf_nn_1, att_nn_1 = predict_nn(models, single_signal_nn, num_plds, norm_stats, device)
         results_collector['NN (1-repeat)'].append([cbf_nn_1, att_nn_1])
 
-    # 3. Collate and Analyze Results by ATT Range
-    final_results = []
-    att_ranges = config.get('att_ranges_config', [])
-    
-    for att_min, att_max, range_name in att_ranges:
-        # Create a boolean mask to select points within the current ATT range
-        mask = (true_params_grid[:, 1] >= att_min) & (true_params_grid[:, 1] < att_max)
-        if not np.any(mask):
-            continue
-
-        for method, preds in results_collector.items():
-            preds_np = np.array(preds)[mask] # Apply mask to get predictions for this range
-            true_params_range = true_params_grid[mask]
+    # 3. Collate and Analyze Full Grid Results
+    logging.info("Collating full grid results without aggregation...")
+    detailed_df = analyze_and_report_full_grid(results_collector, true_params_grid)
             
-            pred_cbf, pred_att = preds_np[:, 0], preds_np[:, 1]
-            valid_mask = ~np.isnan(pred_cbf) & ~np.isnan(pred_att)
-            
-            # Calculate metrics only on valid predictions within the range
-            cbf_rmse = np.sqrt(np.mean((pred_cbf[valid_mask] - true_params_range[valid_mask, 0])**2))
-            att_rmse = np.sqrt(np.mean((pred_att[valid_mask] - true_params_range[valid_mask, 1])**2))
-            cbf_bias = np.mean(pred_cbf[valid_mask] - true_params_range[valid_mask, 0])
-            att_bias = np.mean(pred_att[valid_mask] - true_params_range[valid_mask, 1])
-            success_rate = np.mean(valid_mask) * 100
-            
-            final_results.append({
-                'ATT Range': range_name,
-                'Method': method,
-                'CBF Bias': cbf_bias,
-                'CBF RMSE': cbf_rmse,
-                'ATT Bias (ms)': att_bias,
-                'ATT RMSE (ms)': att_rmse,
-                'Success Rate (%)': success_rate
-            })
-            
-    return pd.DataFrame(final_results)
+    return detailed_df
 
 def fit_conventional(signal_reshaped: np.ndarray, plds: np.ndarray, params: ASLParameters) -> tuple:
     """Helper function to run the conventional NLLS fit."""
@@ -196,24 +211,32 @@ def predict_nn(models: list, signal_flat: np.ndarray, num_plds: int, norm_stats:
     return cbf_denorm, att_denorm
 
 if __name__ == '__main__':
-    parser = argparse.ArgumentParser(description="Evaluate a pre-trained ASL model ensemble against conventional methods in 1-repeat vs 4-repeat scenarios across the full ATT landscape.")
+    parser = argparse.ArgumentParser(description="Evaluate a pre-trained ASL model ensemble against conventional methods in 1-repeat vs 4-repeat scenarios across the full ATT and CBF landscape.")
     parser.add_argument("results_dir", type=str, help="Path to the results directory containing models, config, and norm_stats.")
     args = parser.parse_args()
 
     # 1. Load artifacts
     models, config, norm_stats = load_artifacts(Path(args.results_dir))
     
-    # 2. Run the specific evaluation scenarios
+    # 2. Run the specific evaluation scenarios and get the detailed, un-aggregated DataFrame
     results_df = run_evaluation(models, config, norm_stats)
     
-    # 3. Display final comparison table
-    print("\n" + "="*80)
-    print("--- 1-Repeat vs. 4-Repeat Benchmark Results (Across ATT Ranges) ---")
-    print("="*80)
+    # 3. Display the final detailed comparison table
+    print("\n" + "="*120)
+    print("--- Full Landscape Benchmark Results (Disaggregated by CBF and ATT) ---")
+    print("="*120)
     if not results_df.empty:
         # Sort for better readability
-        sorted_df = results_df.sort_values(by=['ATT Range', 'Method'])
+        sorted_df = results_df.sort_values(by=['True ATT', 'True CBF', 'Method'])
+        # Set pandas options to display the full DataFrame without truncation
+        pd.set_option('display.max_rows', None)
+        pd.set_option('display.max_columns', None)
+        pd.set_option('display.width', 1000)
         print(sorted_df.to_string(index=False, float_format="%.2f"))
+        # Save the detailed report to a CSV file for further analysis
+        output_file = Path(args.results_dir) / 'full_landscape_evaluation.csv'
+        sorted_df.to_csv(output_file, index=False, float_format='%.3f')
+        print(f"\nDetailed report saved to: {output_file}")
     else:
         print("No results were generated.")
-    print("="*80)
+    print("="*120)

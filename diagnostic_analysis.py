@@ -24,7 +24,7 @@ import matplotlib.pyplot as plt
 import inspect
 
 # --- Configuration: SET THIS PATH ---
-RESULTS_DIR = "./comprehensive_results/asl_research_20250608_195214/"  # <-- Edit this line!
+RESULTS_DIR = "./comprehensive_results/asl_research_20250609_204045/"  # <-- Edit this line!
 # --- End Configuration ---
 
 # Import your project's custom modules
@@ -40,6 +40,8 @@ except ImportError as e:
 
 # --- Utility Functions ---
 
+# In diagnostic_analysis.py
+
 def load_analysis_artifacts(results_dir: str):
     """Loads the model, config, and norm_stats for analysis.
     
@@ -52,14 +54,43 @@ def load_analysis_artifacts(results_dir: str):
     if not os.path.exists(results_dir):
         raise FileNotFoundError(f"Results directory not found: {results_dir}")
 
-    # Load the run's configuration
+    # --- FIX STARTS HERE ---
+
+    # 1. Load the initial config file
     config_path = os.path.join(results_dir, 'research_config.json')
     if not os.path.exists(config_path):
-        raise FileNotFoundError(f"Config file not found: {config_path}")
-    
+        raise FileNotFoundError(f"Initial config file not found: {config_path}")
     with open(config_path, 'r') as f:
         config = json.load(f)
-    print(f"Loaded config from: {config_path}")
+    print(f"Loaded initial config from: {config_path}")
+
+    # 2. Load the final results to get the *actual* parameters used for training
+    final_results_path = os.path.join(results_dir, 'final_research_results.json')
+    if os.path.exists(final_results_path):
+        with open(final_results_path, 'r') as f:
+            final_results = json.load(f)
+        
+        # Check for Optuna's best params and update the config with them
+        if 'optuna_best_params' in final_results and final_results['optuna_best_params']:
+            print("Found Optuna results. Updating config with optimized parameters.")
+            best_params = final_results['optuna_best_params']
+            
+            # This logic needs to match how main.py updates the config
+            if all(k in best_params for k in ['hidden_size_1', 'hidden_size_2', 'hidden_size_3']):
+                 config['hidden_sizes'] = [
+                    best_params['hidden_size_1'], best_params['hidden_size_2'], best_params['hidden_size_3']
+                 ]
+            if 'dropout_rate' in best_params:
+                config['dropout_rate'] = best_params['dropout_rate']
+            
+            print(f"Using optimized hidden_sizes: {config['hidden_sizes']}")
+        
+        # More robust: use the config saved within the final results if it exists
+        elif 'config' in final_results:
+             print("Loading config from final_research_results.json for accuracy.")
+             config = final_results['config']
+
+    # --- FIX ENDS HERE ---
 
     # Load the normalization stats
     norm_stats_path = os.path.join(results_dir, 'norm_stats.json')
@@ -73,35 +104,21 @@ def load_analysis_artifacts(results_dir: str):
     # Load the first model from the ensemble
     model_path = os.path.join(results_dir, 'trained_models', 'ensemble_model_0.pt')
     if not os.path.exists(model_path):
-        # Fallback for older runs that might not have the ensemble structure
-        model_path_alt = os.path.join(results_dir, 'trained_models', 'best_model.pt')
-        if os.path.exists(model_path_alt):
-            model_path = model_path_alt
-        else:
-            raise FileNotFoundError(f"Model file not found: Neither {model_path} nor {model_path_alt} exist.")
+        raise FileNotFoundError(f"Model file not found: {model_path}")
 
-    # Re-create the model with the correct architecture from the config file
+    # Re-create the model with the correct architecture from the now-updated config file
     plds_np = np.array(config.get('pld_values', range(500, 3001, 500)))
     num_plds = len(plds_np)
     # The input size is num_plds * 2 (raw signals) + 4 (engineered features)
     base_input_size_nn = num_plds * 2 + 4
 
-    # Handle potential key mismatches between older/newer configs
-    model_creation_config = {
-        'hidden_sizes': config.get('hidden_sizes'),
-        'dropout_rate': config.get('dropout_rate'),
-        'norm_type': config.get('norm_type', 'batch'),
-        'use_transformer_temporal': config.get('use_transformer_temporal_model', True),
-        'use_focused_transformer': config.get('use_focused_transformer_model', True),
-        'transformer_d_model_focused': config.get('transformer_d_model_focused', 32),
-        'transformer_nhead': config.get('transformer_nhead_model', 4),
-        'transformer_nlayers': config.get('transformer_nlayers_model', 2),
-        'n_plds': num_plds
-    }
-
     # Filter kwargs to match EnhancedASLNet signature
     model_param_keys = inspect.signature(EnhancedASLNet).parameters.keys()
-    filtered_kwargs = {k: v for k, v in model_creation_config.items() if k in model_param_keys}
+    filtered_kwargs = {k: v for k, v in config.items() if k in model_param_keys}
+    
+    # Add n_plds to the config for the model if it's missing
+    if 'n_plds' not in filtered_kwargs:
+        filtered_kwargs['n_plds'] = num_plds
 
     model = EnhancedASLNet(input_size=base_input_size_nn, **filtered_kwargs)
     model.load_state_dict(torch.load(model_path, map_location=torch.device('cpu')))
@@ -109,7 +126,6 @@ def load_analysis_artifacts(results_dir: str):
     print(f"Successfully loaded model from: {model_path}")
     
     return model, config, norm_stats
-
 
 # --- Analysis Functions ---
 
