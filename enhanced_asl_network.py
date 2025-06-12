@@ -70,6 +70,14 @@ class EnhancedASLNet(nn.Module):
         # All other features (engineered, M0, etc.) are processed by the CBF stream
         self.num_engineered_features = input_size - self.num_raw_signal_features
 
+        # --- Buffers for normalization statistics ---
+        self.register_buffer('pcasl_mean', torch.zeros(n_plds))
+        self.register_buffer('pcasl_std', torch.ones(n_plds))
+        self.register_buffer('vsasl_mean', torch.zeros(n_plds))
+        self.register_buffer('vsasl_std', torch.ones(n_plds))
+        self.register_buffer('amplitude_mean', torch.tensor(0.0))
+        self.register_buffer('amplitude_std', torch.tensor(1.0))
+
         # --- ATT Stream (Shape-based) ---
         # This stream uses focused transformers on the shape-normalized signal.
         self.att_d_model = transformer_d_model_focused
@@ -99,7 +107,7 @@ class EnhancedASLNet(nn.Module):
         
         # --- CBF Stream (Amplitude-based) ---
         # This stream uses a simple MLP on the signal amplitude and engineered features.
-        cbf_mlp_input_size = 1 + self.num_engineered_features # 1 for amplitude
+        cbf_mlp_input_size = 1 + self.num_engineered_features # 1 for normalized amplitude
         self.cbf_mlp = nn.Sequential(
             nn.Linear(cbf_mlp_input_size, 64),
             nn.ReLU(),
@@ -109,22 +117,50 @@ class EnhancedASLNet(nn.Module):
         )
         self.cbf_uncertainty = UncertaintyHead(32, 1, log_var_min=log_var_cbf_min, log_var_max=log_var_cbf_max)
 
+    def set_norm_stats(self, norm_stats: Dict):
+        """A helper method to set the normalization statistics from a dictionary."""
+        if not norm_stats:
+            return
+        
+        def to_tensor(val):
+            return torch.tensor(val, device=self.pcasl_mean.device, dtype=torch.float32)
+
+        self.pcasl_mean.data = to_tensor(norm_stats.get('pcasl_mean', 0.0))
+        self.pcasl_std.data = to_tensor(norm_stats.get('pcasl_std', 1.0))
+        self.vsasl_mean.data = to_tensor(norm_stats.get('vsasl_mean', 0.0))
+        self.vsasl_std.data = to_tensor(norm_stats.get('vsasl_std', 1.0))
+        self.amplitude_mean.data = to_tensor(norm_stats.get('amplitude_mean', 0.0))
+        self.amplitude_std.data = to_tensor(norm_stats.get('amplitude_std', 1.0))
+
     def forward(self, x: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
         # --- 1. Disentangle Input ---
-        raw_signal = x[:, :self.num_raw_signal_features]
+        # The input `x` contains the Z-scored signal and un-normalized engineered features.
+        normalized_signal = x[:, :self.num_raw_signal_features]
         engineered_features = x[:, self.num_raw_signal_features:]
-        
-        # Calculate amplitude (L2 norm) and shape-normalized signal
-        amplitude = torch.linalg.norm(raw_signal, dim=1, keepdim=True) + 1e-6
-        shape_input = raw_signal / amplitude
-        
-        pcasl_shape_seq = shape_input[:, :self.n_plds]
-        vsasl_shape_seq = shape_input[:, self.n_plds:self.num_raw_signal_features]
-        
-        # Prepare input for the CBF stream
-        cbf_stream_input = torch.cat([amplitude - 1e-6, engineered_features], dim=1)
 
-        # --- 2. ATT Stream Processing ---
+        # --- 2. Un-normalize to get physical signal ---
+        pcasl_norm = normalized_signal[:, :self.n_plds]
+        vsasl_norm = normalized_signal[:, self.n_plds:self.num_raw_signal_features]
+        pcasl_raw = pcasl_norm * self.pcasl_std + self.pcasl_mean
+        vsasl_raw = vsasl_norm * self.vsasl_std + self.vsasl_mean
+        raw_signal = torch.cat([pcasl_raw, vsasl_raw], dim=1)
+
+        # --- 3. Extract physical features & re-normalize for network input ---
+        # Extract physical amplitude for the CBF stream
+        amplitude_physical = torch.linalg.norm(raw_signal, dim=1, keepdim=True)
+        # Normalize the physical amplitude before feeding to the network
+        amplitude_norm = (amplitude_physical - self.amplitude_mean) / (self.amplitude_std + 1e-6)
+        
+        # Use the original Z-scored signal as the shape input for the ATT stream
+        pcasl_shape_seq = normalized_signal[:, :self.n_plds]
+        vsasl_shape_seq = normalized_signal[:, self.n_plds:self.num_raw_signal_features]
+
+        # --- 4. CBF Stream Processing ---
+        cbf_stream_input = torch.cat([amplitude_norm, engineered_features], dim=1)
+        cbf_final_features = self.cbf_mlp(cbf_stream_input)
+        cbf_mean, cbf_log_var = self.cbf_uncertainty(cbf_final_features)
+
+        # --- 5. ATT Stream Processing ---
         # PCASL branch
         pcasl_in_att = self.pcasl_input_proj_att(pcasl_shape_seq.unsqueeze(-1))
         pcasl_out_att = self.pcasl_transformer_att(pcasl_in_att)
@@ -139,10 +175,6 @@ class EnhancedASLNet(nn.Module):
         att_stream_features = torch.cat([pcasl_features_att, vsasl_features_att], dim=1)
         att_final_features = self.att_mlp(att_stream_features)
         att_mean, att_log_var = self.att_uncertainty(att_final_features)
-
-        # --- 3. CBF Stream Processing ---
-        cbf_final_features = self.cbf_mlp(cbf_stream_input)
-        cbf_mean, cbf_log_var = self.cbf_uncertainty(cbf_final_features)
         
         return cbf_mean, att_mean, cbf_log_var, att_log_var
 

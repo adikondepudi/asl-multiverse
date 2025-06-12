@@ -380,7 +380,8 @@ class EnhancedASLTrainer:
         norm_stats = { 
             'pcasl_mean': np.zeros(len(plds)), 'pcasl_std': np.ones(len(plds)),
             'vsasl_mean': np.zeros(len(plds)), 'vsasl_std': np.ones(len(plds)),
-            'y_mean_cbf': 0.0, 'y_std_cbf': 1.0, 'y_mean_att': 0.0, 'y_std_att': 1.0
+            'y_mean_cbf': 0.0, 'y_std_cbf': 1.0, 'y_mean_att': 0.0, 'y_std_att': 1.0,
+            'amplitude_mean': 0.0, 'amplitude_std': 1.0
         }
 
         if X_train_raw_signal_part.shape[0] > 0 :
@@ -394,6 +395,12 @@ class EnhancedASLTrainer:
             norm_stats['vsasl_std'] = np.std(vsasl_train_signals, axis=0)
             norm_stats['vsasl_std'][norm_stats['vsasl_std'] < 1e-6] = 1.0
             
+            # --- FIX: Calculate and add amplitude statistics ---
+            amplitudes = np.linalg.norm(X_train_raw_signal_part, axis=1)
+            norm_stats['amplitude_mean'] = np.mean(amplitudes)
+            norm_stats['amplitude_std'] = np.std(amplitudes)
+            if norm_stats['amplitude_std'] < 1e-6: norm_stats['amplitude_std'] = 1.0
+
             norm_stats['y_mean_cbf'] = np.mean(y_train_raw[:, 0])
             norm_stats['y_std_cbf'] = np.std(y_train_raw[:, 0])
             if norm_stats['y_std_cbf'] < 1e-6: norm_stats['y_std_cbf'] = 1.0
@@ -414,6 +421,11 @@ class EnhancedASLTrainer:
 
         self.norm_stats = norm_stats
         self.custom_loss_fn.norm_stats = norm_stats # NEW: Give loss function access to norm_stats
+
+        # --- FIX: Set the normalization stats on each model in the ensemble ---
+        for model in self.models:
+            model.set_norm_stats(self.norm_stats)
+        logger.info("Normalization stats buffers set on all ensemble models.")
 
         logger.info(f"Total processed samples for training/validation: {X_all_processed.shape[0]}")
         

@@ -488,24 +488,25 @@ def run_comprehensive_asl_research(config: ResearchConfig, output_parent_dir: st
     num_raw_signal_features = num_plds * 2
     pcasl_train_signals = X_train_B_raw[:, :num_plds]
     vsasl_train_signals = X_train_B_raw[:, num_plds:num_raw_signal_features]
+    
+    # Calculate amplitude from the raw signal portion of the training data
+    raw_train_signals_for_amp = X_train_B_raw[:, :num_raw_signal_features]
+    amplitudes = np.linalg.norm(raw_train_signals_for_amp, axis=1)
+    
     norm_stats_final = {
         'pcasl_mean': np.mean(pcasl_train_signals, axis=0), 'pcasl_std': np.std(pcasl_train_signals, axis=0),
         'vsasl_mean': np.mean(vsasl_train_signals, axis=0), 'vsasl_std': np.std(vsasl_train_signals, axis=0),
         'y_mean_cbf': np.mean(y_train_B_raw[:, 0]), 'y_std_cbf': np.std(y_train_B_raw[:, 0]),
-        'y_mean_att': np.mean(y_train_B_raw[:, 1]), 'y_std_att': np.std(y_train_B_raw[:, 1])
+        'y_mean_att': np.mean(y_train_B_raw[:, 1]), 'y_std_att': np.std(y_train_B_raw[:, 1]),
+        'amplitude_mean': np.mean(amplitudes), 'amplitude_std': np.std(amplitudes)
     }
     
-    # --- FIX START: Handle arrays and scalars separately ---
-    # Handle array-based stats (for signals)
+    # Defensively handle potential zero standard deviation
     for key in ['pcasl_std', 'vsasl_std']:
         norm_stats_final[key][norm_stats_final[key] < 1e-6] = 1.0
-
-    # Handle scalar stats (for parameters)
-    if norm_stats_final['y_std_cbf'] < 1e-6:
-        norm_stats_final['y_std_cbf'] = 1.0
-    if norm_stats_final['y_std_att'] < 1e-6:
-        norm_stats_final['y_std_att'] = 1.0
-    # --- FIX END ---
+    for key in ['y_std_cbf', 'y_std_att', 'amplitude_std']:
+        if norm_stats_final[key] < 1e-6:
+            norm_stats_final[key] = 1.0
 
     # --- Function to create dataloaders for a given dataset ---
     def create_dataloaders(dataset_dict, norm_stats, val_split, batch_size):
@@ -546,6 +547,11 @@ def run_comprehensive_asl_research(config: ResearchConfig, output_parent_dir: st
 
     trainer.norm_stats = norm_stats_final
     trainer.custom_loss_fn.norm_stats = norm_stats_final
+
+    # Set normalization statistics buffers on each model in the ensemble
+    for model in trainer.models:
+        model.set_norm_stats(norm_stats_final)
+    monitor.log_progress("PHASE2", "Normalization stats buffers set on all ensemble models.")
     
     total_steps = len(train_loader_A) * config.n_epochs_stage1 + len(train_loader_B) * config.n_epochs_stage2
     for opt in trainer.optimizers:
@@ -601,7 +607,7 @@ def run_comprehensive_asl_research(config: ResearchConfig, output_parent_dir: st
         if model_state_to_save_comp: torch.save(model_state_to_save_comp, temp_comp_model_save_path); nn_model_for_comp_path = str(temp_comp_model_save_path)
 
     comp_framework_output_dir = output_path / "comparison_framework_outputs"
-    comp_framework = ComprehensiveComparison(nn_model_path=nn_model_for_comp_path, output_dir=str(comp_framework_output_dir), base_nn_input_size=base_input_size_nn, nn_n_plds=num_plds, nn_model_arch_config=model_creation_config, norm_stats=norm_stats_final)
+    comp_framework = ComprehensiveComparison(nn_model_path=nn_model_for_comp_path, output_dir=str(comp_framework_output_dir), base_nn_input_size=base_input_size_nn, nn_model_arch_config=model_creation_config, norm_stats=norm_stats_final)
     comparison_results_df = comp_framework.compare_methods(benchmark_test_data_for_comp, benchmark_y_all, plds_np, config.att_ranges_config)
     if nn_model_for_comp_path and temp_comp_model_save_path.exists(): temp_comp_model_save_path.unlink() 
     if not comparison_results_df.empty and wandb_run:
