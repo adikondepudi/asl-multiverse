@@ -10,7 +10,7 @@ from dataclasses import dataclass, asdict
 import wandb
 import inspect
 
-from vsasl_functions import fit_PCVSASL_misMatchPLD_vectInit_pep
+from multiverse_functions import fit_PCVSASL_misMatchPLD_vectInit_pep
 from enhanced_asl_network import EnhancedASLNet
 
 import logging
