@@ -534,7 +534,8 @@ def run_comprehensive_asl_research(config: ResearchConfig, output_parent_dir: st
         train_sampler = WeightedRandomSampler(train_att_weights, len(train_att_weights), replacement=True)
         
         train_dataset = EnhancedASLDataset(X_train, y_train_norm)
-        train_loader = DataLoader(train_dataset, batch_size=batch_size, sampler=train_sampler, drop_last=True)
+        drop_last_flag = len(X_train) > batch_size
+        train_loader = DataLoader(train_dataset, batch_size=batch_size, sampler=train_sampler, drop_last=drop_last_flag)
         val_loader = DataLoader(EnhancedASLDataset(X_val, y_val_norm), batch_size=batch_size) if len(X_val) > 0 else None
         return train_loader, val_loader
     
