@@ -244,9 +244,10 @@ class CustomLoss(nn.Module):
                  w_att: float = 1.0, 
                  log_var_reg_lambda: float = 0.0,
                  focal_gamma: float = 1.5,
-                 pinn_weight: float = 0.0, # NEW: Weight for the physics-informed loss
-                 model_params: Optional[Dict[str, Any]] = None, # NEW: For physics constants
-                 att_epoch_weight_schedule: Optional[callable] = None
+                 pinn_weight: float = 0.0,
+                 model_params: Optional[Dict[str, Any]] = None,
+                 att_epoch_weight_schedule: Optional[callable] = None,
+                 pinn_att_weighting_sigma: float = 500.0 # NEW: Sigma for PINN loss weighting
                 ):
         super().__init__()
         self.w_cbf = w_cbf
@@ -255,11 +256,12 @@ class CustomLoss(nn.Module):
         self.focal_gamma = focal_gamma
         self.pinn_weight = pinn_weight
         self.model_params = model_params if model_params is not None else {}
-        self.norm_stats = None # To be populated by the trainer
+        self.norm_stats = None
         self.att_epoch_weight_schedule = att_epoch_weight_schedule or (lambda _: 1.0)
-        
+        self.pinn_att_weighting_sigma = pinn_att_weighting_sigma
+
     def forward(self,
-                normalized_input_signal: torch.Tensor, # NEW: The original input to the model
+                normalized_input_signal: torch.Tensor,
                 cbf_pred_norm: torch.Tensor, att_pred_norm: torch.Tensor, 
                 cbf_true_norm: torch.Tensor, att_true_norm: torch.Tensor, 
                 cbf_log_var: torch.Tensor, att_log_var: torch.Tensor, 
@@ -288,19 +290,36 @@ class CustomLoss(nn.Module):
         if self.log_var_reg_lambda > 0:
             log_var_regularization = self.log_var_reg_lambda * (torch.mean(cbf_log_var**2) + torch.mean(att_log_var**2))
             
-        # --- NEW: Physics-Informed (PINN) Regularization ---
+        # --- Physics-Informed (PINN) Regularization with Physics-Guided Attention ---
         pinn_loss = 0.0
-        if self.pinn_weight > 0 and self.norm_stats and self.model_params and epoch > 10: # Activate after some epochs
-            # Reconstruct signal from model predictions
+        if self.pinn_weight > 0 and self.norm_stats and self.model_params and epoch > 10:
             reconstructed_signal_norm = torch_kinetic_model(
                 cbf_pred_norm, att_pred_norm, self.norm_stats, self.model_params
             )
-            # Compare reconstructed signal with the actual input signal (raw signal part only)
+            
+            # Create physics-guided weights for the PINN loss
+            with torch.no_grad():
+                device = att_true_norm.device
+                plds = torch.tensor(self.model_params['pld_values'], device=device, dtype=torch.float32)
+                y_mean_att = self.norm_stats['y_mean_att']
+                y_std_att = self.norm_stats['y_std_att']
+                att_true_ms = att_true_norm * y_std_att + y_mean_att # De-normalize ATT to ms
+                
+                # Create Gaussian weights centered at the true ATT for each sample in the batch
+                plds_b = plds.unsqueeze(0).expand(att_true_ms.shape[0], -1) # (B, N_plds)
+                pinn_weights_pcasl = torch.exp(-((plds_b - att_true_ms)**2) / (2 * self.pinn_att_weighting_sigma**2))
+                
+                # Apply same weighting to both PCASL and VSASL parts of the signal vector
+                pinn_loss_weights = torch.cat([pinn_weights_pcasl, pinn_weights_pcasl], dim=1)
+                
+                # Normalize weights to keep loss magnitude consistent
+                pinn_loss_weights = pinn_loss_weights * pinn_loss_weights.numel() / (pinn_loss_weights.sum() + 1e-9)
+
+            # Calculate weighted MSE for PINN loss
             num_raw_signal_feats = len(self.model_params.get('pld_values', [])) * 2
-            pinn_loss = F.mse_loss(
-                reconstructed_signal_norm,
-                normalized_input_signal[:, :num_raw_signal_feats]
-            )
+            input_signal_norm = normalized_input_signal[:, :num_raw_signal_feats]
+            
+            pinn_loss = torch.mean(pinn_loss_weights * (reconstructed_signal_norm - input_signal_norm)**2)
 
         total_loss = total_param_loss + log_var_regularization + self.pinn_weight * pinn_loss
         
