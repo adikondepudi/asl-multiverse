@@ -50,7 +50,7 @@ class ResearchConfig:
     n_subjects_stage2: int = 10000
     n_epochs_stage1: int = 140
     n_epochs_stage2: int = 60
-    loss_pinn_weight_stage1: float = 10.0
+    loss_pinn_weight_stage1: float = 1.0
     loss_pinn_weight_stage2: float = 0.1
     learning_rate_stage2: float = 0.0002
     

@@ -488,7 +488,7 @@ class EnhancedASLTrainer:
         for stage_idx, train_loader in enumerate(train_loaders):
             # --- STAGE-SPECIFIC PARAMETER ADJUSTMENTS ---
             if stage_idx == 0:
-                self.custom_loss_fn.pinn_weight = self.model_config.get('loss_pinn_weight_stage1', 10.0)
+                self.custom_loss_fn.pinn_weight = self.model_config.get('loss_pinn_weight_stage1', 1.0)
                 logger.info(f"--- STAGE {stage_idx+1}: Foundational Pre-training ---")
                 logger.info(f"  Setting PINN weight to {self.custom_loss_fn.pinn_weight}")
             elif stage_idx == 1:
