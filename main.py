@@ -231,7 +231,7 @@ class HyperparameterOptimizer:
         asl_params_for_sim = ASLParameters(T1_artery=config_obj.T1_artery, T_tau=config_obj.T_tau, alpha_PCASL=config_obj.alpha_PCASL, alpha_VSASL=config_obj.alpha_VSASL)
         simulator_obj = RealisticASLSimulator(params=asl_params_for_sim)
         plds_numpy_arr = np.array(config_obj.pld_values); num_plds = len(plds_numpy_arr)
-        precomputed_hpo_data = simulator_obj.generate_balanced_dataset(plds=plds_numpy_arr, total_subjects=config_obj.n_training_subjects, noise_levels=config_obj.training_noise_levels[:1])
+        precomputed_hpo_data = simulator_obj.generate_balanced_dataset(plds=plds_numpy_arr, total_subjects=config_obj.optuna_n_subjects, noise_levels=config_obj.training_noise_levels[:1])
         engineered_features_hpo = engineer_signal_features(precomputed_hpo_data['signals'], num_plds)
         precomputed_hpo_data['signals'] = np.concatenate([precomputed_hpo_data['signals'], engineered_features_hpo], axis=1)
         base_nn_input_size = precomputed_hpo_data['signals'].shape[1]
