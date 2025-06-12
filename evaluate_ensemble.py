@@ -134,9 +134,9 @@ def run_evaluation(models: list, config: dict, norm_stats: dict):
     
     # 2. Data Generation and Prediction Loop
     results_collector = {
-        'NLLS (4-repeat avg)': [], 
-        'NLLS (1-repeat)': [],
-        'NN (4-repeat avg)': [], 
+        'LS (4-repeat)': [], 
+        'LS (1-repeat)': [],
+        'NN (4-repeat)': [], 
         'NN (1-repeat)': []
     }
     
@@ -151,17 +151,17 @@ def run_evaluation(models: list, config: dict, norm_stats: dict):
             repeats_data.append(data_dict['MULTIVERSE'][0, 0, :, :])
 
         # --- Process the 4 Scenarios ---
-        avg_signal_nlls = np.mean(repeats_data, axis=0)
-        cbf_nlls_4, att_nlls_4 = fit_conventional(avg_signal_nlls, plds_np, simulator.params)
-        results_collector['NLLS (4-repeat avg)'].append([cbf_nlls_4, att_nlls_4])
+        avg_signal_ls = np.mean(repeats_data, axis=0)
+        cbf_ls_4, att_ls_4 = fit_conventional(avg_signal_ls, plds_np, simulator.params)
+        results_collector['LS (4-repeat)'].append([cbf_ls_4, att_ls_4])
 
-        single_signal_nlls = repeats_data[0]
-        cbf_nlls_1, att_nlls_1 = fit_conventional(single_signal_nlls, plds_np, simulator.params)
-        results_collector['NLLS (1-repeat)'].append([cbf_nlls_1, att_nlls_1])
+        single_signal_ls = repeats_data[0]
+        cbf_ls_1, att_ls_1 = fit_conventional(single_signal_ls, plds_np, simulator.params)
+        results_collector['LS (1-repeat)'].append([cbf_ls_1, att_ls_1])
         
         avg_signal_nn = np.mean(repeats_data, axis=0).flatten()
         cbf_nn_4, att_nn_4 = predict_nn(models, avg_signal_nn, num_plds, norm_stats, device)
-        results_collector['NN (4-repeat avg)'].append([cbf_nn_4, att_nn_4])
+        results_collector['NN (4-repeat)'].append([cbf_nn_4, att_nn_4])
 
         single_signal_nn = repeats_data[0].flatten()
         cbf_nn_1, att_nn_1 = predict_nn(models, single_signal_nn, num_plds, norm_stats, device)
@@ -211,7 +211,9 @@ def predict_nn(models: list, signal_flat: np.ndarray, num_plds: int, norm_stats:
     return cbf_denorm, att_denorm
 
 if __name__ == '__main__':
-    parser = argparse.ArgumentParser(description="Evaluate a pre-trained ASL model ensemble against conventional methods in 1-repeat vs 4-repeat scenarios across the full ATT and CBF landscape.")
+    parser = argparse.ArgumentParser(description="Evaluate a pre-trained ASL model ensemble against conventional Least-Squares (LS) fitting. "
+                                                 "This script compares performance under two conditions for each method: "
+                                                 "1) using a single, noisy data repeat, and 2) using data averaged over 4 repeats.")
     parser.add_argument("results_dir", type=str, help="Path to the results directory containing models, config, and norm_stats.")
     args = parser.parse_args()
 

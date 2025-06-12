@@ -63,21 +63,19 @@ def load_data(results_dir_str: str) -> (pd.DataFrame, dict):
 
 def plot_performance_metrics(df: pd.DataFrame, output_dir: str):
     """
-    Generate Figure 1: A 2x2 grid comparing the Neural Network and MULTIVERSE-LS
+    Generate Figure 1: A 2x2 grid comparing the Neural Network and Least-Squares
     on key precision (CoV) and accuracy (nRMSE) metrics.
     """
     print("Generating Figure 1: Core Performance Metrics...")
     
-    # Filter for the two methods we want to compare
-    df_plot = df[df['method'].isin(['Neural Network', 'MULTIVERSE-LS'])].copy()
+    df_plot = df[df['method'].isin(['NN', 'LS'])].copy()
     
-    # Define order and colors for a consistent, professional look
-    method_order = ['MULTIVERSE-LS', 'Neural Network']
-    palette = {'MULTIVERSE-LS': '#4c72b0', 'Neural Network': '#dd8452'}
+    method_order = ['LS', 'NN']
+    palette = {'LS': '#4c72b0', 'NN': '#dd8452'}
     
     sns.set_theme(style="whitegrid", context="talk")
     fig, axes = plt.subplots(2, 2, figsize=(16, 14), sharex=True)
-    fig.suptitle('Performance Comparison: Neural Network vs. Conventional Fitting', fontsize=24, weight='bold')
+    fig.suptitle('Performance Comparison: Neural Network vs. Least-Squares Fitting', fontsize=24, weight='bold')
 
     metrics_to_plot = [
         ('cbf_cov', 'CBF Precision (CoV %)', axes[0, 0]),
@@ -87,7 +85,6 @@ def plot_performance_metrics(df: pd.DataFrame, output_dir: str):
     ]
     
     for metric_key, title, ax in metrics_to_plot:
-        # FIX: Use errorbar=None instead of the deprecated ci=None
         sns.barplot(data=df_plot, x='att_range_name', y=metric_key, hue='method',
                     hue_order=method_order, palette=palette, ax=ax, errorbar=None)
         ax.set_title(title, fontsize=18, weight='medium')
@@ -97,7 +94,6 @@ def plot_performance_metrics(df: pd.DataFrame, output_dir: str):
         ax.tick_params(axis='y', labelsize=14)
         ax.get_legend().remove()
 
-    # Clean up axes and add a single legend
     axes[1, 0].set_xlabel('ATT Range', fontsize=16)
     axes[1, 1].set_xlabel('ATT Range', fontsize=16)
     handles, labels = axes[0, 0].get_legend_handles_labels()
@@ -105,7 +101,6 @@ def plot_performance_metrics(df: pd.DataFrame, output_dir: str):
     
     plt.tight_layout(rect=[0, 0, 1, 0.96])
     
-    # Save the figure
     fig_path = os.path.join(output_dir, 'figure1_performance_summary.png')
     plt.savefig(fig_path, dpi=300, bbox_inches='tight')
     plt.close(fig)
@@ -118,52 +113,47 @@ def plot_clinical_scenarios(clinical_data: dict, output_dir: str):
     """
     print("Generating Figure 2: Clinical Scenario Validation...")
 
-    # Reformat the data for easier plotting with Seaborn
     plot_data = []
     for scenario, methods in clinical_data.items():
         for method, metrics in methods.items():
-            # Skip empty entries
             if not metrics:
                 continue
             
-            # Prettify names for the plot
             scenario_name_map = {
                 'healthy_adult': 'Healthy Adult', 'elderly_patient': 'Elderly Patient',
                 'stroke_patient': 'Stroke Patient', 'tumor_patient': 'Tumor Patient'
             }
-            method_name_map = {
-                'neural_network': 'NN (Single Repeat)',
-                'multiverse_ls_single_repeat': 'LS (Single Repeat)',
-                'multiverse_ls_multi_repeat_avg': 'LS (4x Average)'
-            }
             
             plot_data.append({
                 'Scenario': scenario_name_map.get(scenario, scenario),
-                'Method': method_name_map.get(method, method),
+                'Method': method,
                 'Metric': 'CBF RMSE (mL/100g/min)',
                 'Value': metrics.get('cbf_rmse', np.nan)
             })
             plot_data.append({
                 'Scenario': scenario_name_map.get(scenario, scenario),
-                'Method': method_name_map.get(method, method),
+                'Method': method,
                 'Metric': 'ATT RMSE (ms)',
                 'Value': metrics.get('att_rmse', np.nan)
             })
     
     df_plot = pd.DataFrame(plot_data)
-
+    method_order = ['LS (1-repeat)', 'LS (4-repeat)', 'NN (1-repeat)', 'NN (4-repeat)']
+    
     sns.set_theme(style="whitegrid", context="talk")
     g = sns.catplot(
         data=df_plot, kind='bar',
         x='Scenario', y='Value', hue='Method', col='Metric',
+        hue_order=[m for m in method_order if m in df_plot['Method'].unique()],
         sharey=False, height=6, aspect=1.2,
-        palette='viridis', legend_out=False
+        palette='viridis', legend_out=True
     )
     g.fig.suptitle('Performance in Simulated Clinical Scenarios', fontsize=22, weight='bold', y=1.03)
     g.set_axis_labels("", "Root Mean Square Error (RMSE)")
     g.set_titles("{col_name}", size=18)
     g.despine(left=True)
-    plt.legend(title='Method', fontsize=14)
+    g.legend.set_title("Method")
+    plt.tight_layout(rect=[0, 0, 1, 0.95])
     
     fig_path = os.path.join(output_dir, 'figure2_clinical_scenarios.png')
     plt.savefig(fig_path, dpi=300, bbox_inches='tight')
@@ -178,22 +168,18 @@ def plot_diagnostic_example(results_dir_str: str, output_dir: str):
     """
     print("Generating Figure 3: Diagnostic Signal Reconstruction...")
 
-    # --- 1. Load all necessary artifacts ---
     try:
-        # FIX: Load from the final_results.json which contains the *actual* run config
         final_results_path = os.path.join(results_dir_str, 'final_research_results.json')
         with open(final_results_path, 'r') as f:
             final_results = json.load(f)
-        config = final_results['config'] # Use the config from the results file
+        config = final_results['config']
 
         model_path = os.path.join(results_dir_str, 'trained_models', 'ensemble_model_0.pt')
         
-        # Create model instance based on the loaded config
         num_plds = len(config.get('pld_values', []))
-        input_size = num_plds * 2 + 4 # 4 engineered features
+        input_size = num_plds * 2 + 4
         model_param_keys = inspect.signature(EnhancedASLNet).parameters.keys()
         
-        # FIX: Pass the correct config dictionary to the model
         filtered_kwargs = {k: v for k, v in config.items() if k in model_param_keys}
         
         model = EnhancedASLNet(input_size=input_size, **filtered_kwargs)
@@ -204,7 +190,6 @@ def plot_diagnostic_example(results_dir_str: str, output_dir: str):
         print(f"Could not load model for diagnostic plot. Skipping. Error: {e}")
         return
 
-    # --- 2. Generate a specific, challenging data point ---
     asl_params = ASLParameters(**{k: v for k, v in config.items() if k in ASLParameters.__annotations__})
     simulator = RealisticASLSimulator(params=asl_params)
     plds = np.array(config['pld_values'])
@@ -215,7 +200,6 @@ def plot_diagnostic_example(results_dir_str: str, output_dir: str):
     noisy_pcasl = data_dict['PCASL'][0, 0, :]
     noisy_vsasl = data_dict['VSASL'][0, 0, :]
     
-    # --- 3. Get the NN's prediction ---
     from main import engineer_signal_features
     raw_signal = np.concatenate([noisy_pcasl, noisy_vsasl])
     engineered_feats = engineer_signal_features(raw_signal.reshape(1, -1), len(plds))
@@ -231,8 +215,6 @@ def plot_diagnostic_example(results_dir_str: str, output_dir: str):
     pred_cbf = pred_cbf_norm.item() * norm_stats['y_std_cbf'] + norm_stats['y_mean_cbf']
     pred_att = pred_att_norm.item() * norm_stats['y_std_att'] + norm_stats['y_mean_att']
     
-    # --- 4. Create the plot ---
-    # Convert config dict to kwargs for the fitting functions
     pcasl_kwargs = {'T1_artery': config['T1_artery'], 'T_tau': config['T_tau'], 'T2_factor': config['T2_factor'], 'alpha_BS1': config['alpha_BS1'], 'alpha_PCASL': config['alpha_PCASL']}
     vsasl_kwargs = {'T1_artery': config['T1_artery'], 'T2_factor': config['T2_factor'], 'alpha_BS1': config['alpha_BS1'], 'alpha_VSASL': config['alpha_VSASL']}
     
