@@ -56,7 +56,7 @@ for PAIR in "${ABLATION_PAIRS[@]}"; do
 
     # Run the main script with the modified config and specific output directory
     # Note: Assumes you've made the change to main.py to accept a second argument
-    python main.py "${TEMP_CONFIG_FILE}" "${RUN_DIR}"
+    WANDB_MODE=offline python main.py "${TEMP_CONFIG_FILE}" "${RUN_DIR}"
     
     echo "----- Finished run for weights [${WEIGHT_S1}, ${WEIGHT_S2}] -----"
     echo "Results are in ${RUN_DIR}"
