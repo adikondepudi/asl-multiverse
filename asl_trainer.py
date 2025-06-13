@@ -492,6 +492,7 @@ class EnhancedASLTrainer:
         
         histories = defaultdict(lambda: defaultdict(list))
         self.global_step = 0
+        global_epoch_counter = 0  # <<< FIX: Initialize global epoch counter
 
         if not train_loaders:
             logger.error("train_loaders is empty. Aborting training.")
@@ -539,12 +540,12 @@ class EnhancedASLTrainer:
                     train_loss_epoch = self._train_epoch(self.models[model_idx], train_loader, 
                                                        self.optimizers[model_idx], 
                                                        self.schedulers[model_idx] if self.schedulers else None, 
-                                                       epoch)
+                                                       global_epoch_counter) # <<< FIX: Pass global_epoch_counter
                     epoch_train_losses_all_models.append(train_loss_epoch)
                     histories[model_idx][f'train_losses_stage_{stage_idx}'].append(train_loss_epoch)
                     
                     if current_val_loader:
-                        val_metrics_dict = self._validate(self.models[model_idx], current_val_loader, epoch)
+                        val_metrics_dict = self._validate(self.models[model_idx], current_val_loader, global_epoch_counter) # <<< FIX: Pass global_epoch_counter
                         epoch_val_metrics_all_models.append(val_metrics_dict)
                         histories[model_idx][f'val_metrics_stage_{stage_idx}'].append(val_metrics_dict)
                         
@@ -566,7 +567,8 @@ class EnhancedASLTrainer:
 
                 if wandb.run:
                     mean_epoch_train_loss = np.nanmean(epoch_train_losses_all_models) if epoch_train_losses_all_models else float('nan')
-                    wandb.log({f'Epoch_Stage{stage_idx}/Mean_Train_Loss': mean_epoch_train_loss, 'epoch_global': self.global_step, 'epoch_stage': epoch})
+                    # <<< FIX: Use global_epoch_counter for 'epoch_global' logging
+                    wandb.log({f'Epoch_Stage{stage_idx}/Mean_Train_Loss': mean_epoch_train_loss, 'epoch_global': global_epoch_counter, 'epoch_stage': epoch})
                     if current_val_loader and len(current_val_loader) > 0 and epoch_val_metrics_all_models:
                         epoch_val_metrics_agg = defaultdict(list)
                         for model_metrics in epoch_val_metrics_all_models:
@@ -575,7 +577,7 @@ class EnhancedASLTrainer:
                         
                         for metric_name, values_list in epoch_val_metrics_agg.items():
                             mean_val_metric = np.nanmean(values_list) if values_list else float('nan')
-                            wandb.log({f'Epoch_Stage{stage_idx}/Mean_Val_{metric_name.capitalize()}': mean_val_metric, 'epoch_global': self.global_step, 'epoch_stage': epoch})
+                            wandb.log({f'Epoch_Stage{stage_idx}/Mean_Val_{metric_name.capitalize()}': mean_val_metric, 'epoch_global': global_epoch_counter, 'epoch_stage': epoch})
 
                 if sum(1 for p_count in patience_counters_stage if p_count < early_stopping_patience) == 0 and epoch > 0 : 
                     logger.info(f"All active models early stopped within stage {stage_idx+1}, epoch {epoch+1}. Moving to next stage.")
@@ -588,7 +590,9 @@ class EnhancedASLTrainer:
                     mean_train_loss_console = np.nanmean(active_train_losses) if active_train_losses else float('nan')
                     mean_val_loss_console_stage = np.nanmean(active_val_losses_stage) if active_val_losses_stage else float('nan')
                     logger.info(f"Stage {stage_idx+1}, Epoch {epoch + 1}/{n_epochs_stage}: Mean Active Train Loss = {mean_train_loss_console:.6f}, Mean Active Val Loss (Stage) = {mean_val_loss_console_stage:.6f}")
-        
+                
+                global_epoch_counter += 1 # <<< FIX: Increment global counter after each full epoch
+
         if not hasattr(self, 'overall_best_val_losses'):
             self.overall_best_val_losses = [float('inf')] * self.n_ensembles
 
