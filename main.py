@@ -428,9 +428,16 @@ class PublicationGenerator:
         if wandb.run: wandb.save(str(fpath))
 
 
-def run_comprehensive_asl_research(config: ResearchConfig, output_parent_dir: str = 'comprehensive_results') -> Dict:
-    timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
-    output_path = Path(output_parent_dir) / f'asl_research_{timestamp}'
+def run_comprehensive_asl_research(config: ResearchConfig, output_parent_dir: Optional[str] = None) -> Dict:
+    # If no output directory is provided, use the default. Otherwise, use the specified one.
+    if output_parent_dir is None:
+        output_parent_dir = 'comprehensive_results'
+        timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
+        output_path = Path(output_parent_dir) / f'asl_research_{timestamp}'
+    else:
+        # The script will provide a full, unique path, so no timestamp is needed here.
+        output_path = Path(output_parent_dir)
+
     output_path.mkdir(parents=True, exist_ok=True)
     
     wandb_run = wandb.init(project=config.wandb_project, entity=config.wandb_entity, config=asdict(config), name=f"run_{timestamp}", job_type="research_pipeline")
@@ -646,6 +653,10 @@ def run_comprehensive_asl_research(config: ResearchConfig, output_parent_dir: st
 if __name__ == "__main__":
     logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(name)s - %(levelname)s - %(message)s', handlers=[logging.StreamHandler(sys.stdout)], force=True) 
     config_file_path_arg = sys.argv[1] if len(sys.argv) > 1 else "config/default.yaml"
+    
+    # NEW: Check for an output directory argument
+    output_dir_arg = sys.argv[2] if len(sys.argv) > 2 else None
+
     loaded_config_obj = ResearchConfig() 
 
     if Path(config_file_path_arg).exists():
@@ -662,7 +673,8 @@ if __name__ == "__main__":
         script_logger.info(f"Config file {config_file_path_arg} not found. Using default ResearchConfig.")
 
     script_logger.info("\nStarting comprehensive ASL research pipeline with configuration:")
-    pipeline_results_dict = run_comprehensive_asl_research(config=loaded_config_obj)
+    # Pass the output directory to the main function
+    pipeline_results_dict = run_comprehensive_asl_research(config=loaded_config_obj, output_parent_dir=output_dir_arg)
     script_logger.info("\n" + "=" * 80 + "\nRESEARCH PIPELINE COMPLETED!\n" + "=" * 80)
     if "error" not in pipeline_results_dict:
         script_logger.info(f"Results saved in: {pipeline_results_dict.get('trained_models_dir', 'Specified output directory')}")
