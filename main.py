@@ -429,22 +429,25 @@ class PublicationGenerator:
 
 
 def run_comprehensive_asl_research(config: ResearchConfig, output_parent_dir: Optional[str] = None) -> Dict:
-    # If no output directory is provided, use the default. Otherwise, use the specified one.
+    timestamp = datetime.now().strftime('%Y%m%d_%H%M%S') # <-- FIX: Define timestamp at the start
+
+    # If no output directory is provided, create a default one using the timestamp.
+    # Otherwise, use the specified one.
     if output_parent_dir is None:
-        output_parent_dir = 'comprehensive_results'
-        timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
-        output_path = Path(output_parent_dir) / f'asl_research_{timestamp}'
+        output_dir_base = 'comprehensive_results'
+        output_path = Path(output_dir_base) / f'asl_research_{timestamp}'
     else:
-        # The script will provide a full, unique path, so no timestamp is needed here.
         output_path = Path(output_parent_dir)
 
     output_path.mkdir(parents=True, exist_ok=True)
     
+    # The wandb run name will now always have a valid timestamp
     wandb_run = wandb.init(project=config.wandb_project, entity=config.wandb_entity, config=asdict(config), name=f"run_{timestamp}", job_type="research_pipeline")
     if wandb_run: script_logger.info(f"W&B Run URL: {wandb_run.url}")
 
     monitor = PerformanceMonitor(config, output_path) 
     monitor.log_progress("SETUP", f"Initializing. Output: {output_path}")
+    # ... rest of the function (no other changes needed)
     config_save_path = output_path / 'research_config.json'
     with open(config_save_path, 'w') as f: json.dump(asdict(config), f, indent=2)
     if wandb_run: wandb.save(str(config_save_path))
