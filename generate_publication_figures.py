@@ -1,19 +1,3 @@
-# generate_publication_figures.py
-#
-# A script to generate publication-quality figures from the final experimental results.
-#
-# HOW TO USE:
-# 1. Place this file in the root directory of your `adikondepudi-asl-multiverse` project.
-# 2. IMPORTANT: Edit the `RESULTS_DIR` variable below to point to the specific
-#    final results folder you want to analyze.
-# 3. Run from your terminal: `python generate_publication_figures.py`
-#
-# This script will generate and save three key figures:
-#   - Figure 1: Core performance metrics (nRMSE, CoV) comparing the NN and LS methods.
-#   - Figure 2: Performance across simulated clinical scenarios.
-#   - Figure 3: A diagnostic plot showing the NN's learned physics for a sample case.
-#
-
 import os
 import json
 import inspect
@@ -25,7 +9,7 @@ import torch
 
 # --- Configuration: SET THIS PATH ---
 # USE THE FOLDER FROM YOUR SUCCESSFUL RUN WITH THE STRONG PINN LOSS
-RESULTS_DIR = "./comprehensive_results/asl_research_20250609_204045/"  # <-- Edit this line!
+RESULTS_DIR = "./comprehensive_results/asl_research_20250612_210751/"  # <-- Edit this line!
 # --- End Configuration ---
 
 # Import your project's custom modules for the diagnostic plot

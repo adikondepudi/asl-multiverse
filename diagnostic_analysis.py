@@ -1,21 +1,3 @@
-# diagnostic_analysis.py
-#
-# A script for deep interrogation of model performance and training data.
-#
-# HOW TO USE:
-# 1. Place this file in the root directory of your `adikondepudi-asl-multiverse` project.
-# 2. IMPORTANT: Edit the `RESULTS_DIR` variable below (line 18) to point to the
-#    specific results folder you want to analyze.
-# 3. Run from your terminal: `python diagnostic_analysis.py`
-#
-# This script will:
-#   - Part 1: Find the worst ATT predictions for the "Healthy Adult" scenario,
-#             and generate plots comparing the noisy input signal vs. the ground-truth
-#             signal vs. the signal produced by the network's flawed prediction.
-#   - Part 2: Generate and plot a 2D histogram of the training data distribution
-#             to check for unintended biases or sparse regions.
-#
-
 import torch
 import numpy as np
 import json
@@ -24,7 +6,7 @@ import matplotlib.pyplot as plt
 import inspect
 
 # --- Configuration: SET THIS PATH ---
-RESULTS_DIR = "./comprehensive_results/asl_research_20250609_204045/"  # <-- Edit this line!
+RESULTS_DIR = "./comprehensive_results/asl_research_20250612_210751/"  # <-- Edit this line!
 # --- End Configuration ---
 
 # Import your project's custom modules
