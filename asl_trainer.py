@@ -532,15 +532,20 @@ class EnhancedASLTrainer:
                 self.custom_loss_fn.pinn_weight = self.model_config.get('loss_pinn_weight_stage1', 1.0)
                 logger.info(f"--- STAGE {stage_idx+1}: Foundational Pre-training ---")
                 logger.info(f"  Setting PINN weight to {self.custom_loss_fn.pinn_weight}")
+            # elif stage_idx == 1:
+            #     self.custom_loss_fn.pinn_weight = self.model_config.get('loss_pinn_weight_stage2', 0.1)
+            #     new_lr = self.model_config.get('learning_rate_stage2', self.learning_rate / 5.0)
+            #     logger.info(f"--- STAGE {stage_idx+1}: Full-Spectrum Fine-tuning ---")
+            #     logger.info(f"  Setting PINN weight to {self.custom_loss_fn.pinn_weight}")
+            #     logger.info(f"  Setting learning rate to {new_lr}")
+            #     for opt in self.optimizers:
+            #         for param_group in opt.param_groups:
+            #             param_group['lr'] = new_lr
             elif stage_idx == 1:
                 self.custom_loss_fn.pinn_weight = self.model_config.get('loss_pinn_weight_stage2', 0.1)
-                new_lr = self.model_config.get('learning_rate_stage2', self.learning_rate / 5.0)
                 logger.info(f"--- STAGE {stage_idx+1}: Full-Spectrum Fine-tuning ---")
                 logger.info(f"  Setting PINN weight to {self.custom_loss_fn.pinn_weight}")
-                logger.info(f"  Setting learning rate to {new_lr}")
-                for opt in self.optimizers:
-                    for param_group in opt.param_groups:
-                        param_group['lr'] = new_lr
+                # The learning rate is now managed automatically by the scheduler across both stages.
             # --- END of STAGE-SPECIFIC ADJUSTMENTS ---
 
             current_val_loader = val_loaders[stage_idx] if stage_idx < len(val_loaders) else None
