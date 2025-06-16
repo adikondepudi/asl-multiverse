@@ -62,11 +62,102 @@ class UncertaintyHead(nn.Module):
         log_var = self.log_var_min + (torch.tanh(raw_log_var) + 1.0) * 0.5 * log_var_range
         return mean, log_var
 
+def _torch_physical_kinetic_model(
+    pred_cbf: torch.Tensor, pred_att: torch.Tensor,
+    plds: torch.Tensor, model_params: Dict[str, Any]
+) -> Tuple[torch.Tensor, torch.Tensor]:
+    """
+    Differentiable PyTorch implementation of the ASL kinetic models returning PHYSICAL signals.
+    """
+    pred_cbf_cgs = pred_cbf / 6000.0
+    device = pred_cbf.device
+    
+    T1_artery = torch.tensor(model_params['T1_artery'], device=device, dtype=torch.float32)
+    T_tau = torch.tensor(model_params['T_tau'], device=device, dtype=torch.float32)
+    alpha_PCASL = torch.tensor(model_params['alpha_PCASL'], device=device, dtype=torch.float32)
+    alpha_VSASL = torch.tensor(model_params['alpha_VSASL'], device=device, dtype=torch.float32)
+    alpha_BS1 = torch.tensor(model_params.get('alpha_BS1', 1.0), device=device, dtype=torch.float32)
+    T2_factor = torch.tensor(model_params.get('T2_factor', 1.0), device=device, dtype=torch.float32)
+    lambda_blood = 0.90; M0_b = 1.0
+
+    B = pred_cbf_cgs.shape[0]
+    plds_b = plds.unsqueeze(0).expand(B, -1)
+
+    alpha1 = alpha_PCASL * (alpha_BS1**4)
+    pcasl_prefactor = (2 * M0_b * pred_cbf_cgs * alpha1 / lambda_blood * T1_artery / 1000) * T2_factor
+    
+    cond_full_bolus = plds_b >= pred_att
+    cond_trailing_edge = (plds_b < pred_att) & (plds_b >= (pred_att - T_tau))
+    
+    pcasl_sig = torch.zeros_like(plds_b)
+    pcasl_sig = torch.where(
+        cond_full_bolus,
+        pcasl_prefactor * torch.exp(-plds_b / T1_artery) * (1 - torch.exp(-T_tau / T1_artery)),
+        pcasl_sig)
+    pcasl_sig = torch.where(
+        cond_trailing_edge,
+        pcasl_prefactor * (torch.exp(-pred_att / T1_artery) - torch.exp(-(T_tau + plds_b) / T1_artery)),
+        pcasl_sig)
+
+    alpha2 = alpha_VSASL * (alpha_BS1**3)
+    vsasl_prefactor = (2 * M0_b * pred_cbf_cgs * alpha2 / lambda_blood) * T2_factor
+    cond_ti_le_att = plds_b <= pred_att
+    
+    vsasl_sig = torch.where(
+        cond_ti_le_att,
+        vsasl_prefactor * (plds_b / 1000) * torch.exp(-plds_b / T1_artery),
+        vsasl_prefactor * (pred_att / 1000) * torch.exp(-plds_b / T1_artery))
+
+    return pcasl_sig, vsasl_sig
+
+def _torch_analytic_gradients(
+    pred_cbf: torch.Tensor, pred_att: torch.Tensor,
+    plds: torch.Tensor, model_params: Dict[str, Any]
+) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
+    """
+    Computes analytical gradients of the physical ASL signals with respect to CBF and ATT.
+    This is the core of the Differentiable Physics-Encoder.
+    """
+    pcasl_sig, vsasl_sig = _torch_physical_kinetic_model(pred_cbf, pred_att, plds, model_params)
+    
+    # 1. dS/dCBF is simple due to linear relationship
+    # Add a small epsilon to avoid division by zero if cbf is zero
+    dSdC_pcasl = pcasl_sig / (pred_cbf + 1e-6)
+    dSdC_vsasl = vsasl_sig / (pred_cbf + 1e-6)
+    
+    # 2. dS/dATT requires evaluating the derivatives of the kinetic equations
+    device = pred_cbf.device
+    T1_artery = torch.tensor(model_params['T1_artery'], device=device, dtype=torch.float32)
+    T_tau = torch.tensor(model_params['T_tau'], device=device, dtype=torch.float32)
+    B = pred_cbf.shape[0]
+    plds_b = plds.unsqueeze(0).expand(B, -1)
+
+    # PCASL dS/dATT
+    dSdA_pcasl = torch.zeros_like(pcasl_sig)
+    cond_trailing_edge = (plds_b < pred_att) & (plds_b >= (pred_att - T_tau))
+    pcasl_prefactor_for_grad = (pcasl_sig / (pred_cbf + 1e-6)) * pred_cbf
+    dSdA_pcasl = torch.where(
+        cond_trailing_edge,
+        pcasl_prefactor_for_grad * (-1.0 / T1_artery) * torch.exp(-pred_att / T1_artery),
+        dSdA_pcasl
+    )
+
+    # VSASL dS/dATT
+    vsasl_prefactor_for_grad = (vsasl_sig / (pred_cbf + 1e-6)) * pred_cbf
+    cond_ti_gt_att = plds_b > pred_att
+    dSdA_vsasl = torch.where(
+        cond_ti_gt_att,
+        vsasl_prefactor_for_grad / (pred_att + 1e-6), # derivative of (K * ATT * exp(...)) wrt ATT is K*exp(...) = S/ATT
+        torch.zeros_like(vsasl_sig)
+    )
+
+    return dSdC_pcasl, dSdA_pcasl, dSdC_vsasl, dSdA_vsasl
+
 class EnhancedASLNet(nn.Module):
     """
     Disentangled two-stream architecture for ASL parameter estimation.
-    - ATT Stream: Processes signal *shape* using transformers to capture timing.
-    - CBF Stream: Processes signal *amplitude* and engineered features using a simple MLP.
+    - Differentiable Physics-Encoder: Enriches input features with signal sensitivities (dS/dCBF, dS/dATT).
+    - Multi-Scale Transformer: Processes temporal information at short and long scales for robust ATT estimation.
     - Cross-Attention: Fuses information between the PCASL and VSASL streams.
     """
     def __init__(self, 
@@ -76,13 +167,13 @@ class EnhancedASLNet(nn.Module):
                  dropout_rate: float = 0.1,
                  norm_type: str = 'batch',
                  
-                 use_transformer_temporal: bool = True, # Kept for signature compatibility, logic now fixed to transformer for ATT
-                 use_focused_transformer: bool = True,  # Kept for signature compatibility
+                 use_transformer_temporal: bool = True,
+                 use_focused_transformer: bool = True,
                  transformer_d_model_focused: int = 32,
                  transformer_nhead: int = 4,
                  transformer_nlayers: int = 2,
                  
-                 m0_input_feature: bool = False, # Handled by engineered features
+                 m0_input_feature: bool = False,
                  
                  log_var_cbf_min: float = -6.0,
                  log_var_cbf_max: float = 7.0,
@@ -93,37 +184,43 @@ class EnhancedASLNet(nn.Module):
         
         self.n_plds = n_plds
         self.num_raw_signal_features = n_plds * 2
-        # All other features (engineered, M0, etc.) are processed by the CBF stream
         self.num_engineered_features = input_size - self.num_raw_signal_features
+        self.model_params_for_physics = {}
 
-        # --- Buffers for normalization statistics ---
         self.register_buffer('pcasl_mean', torch.zeros(n_plds))
         self.register_buffer('pcasl_std', torch.ones(n_plds))
         self.register_buffer('vsasl_mean', torch.zeros(n_plds))
         self.register_buffer('vsasl_std', torch.ones(n_plds))
         self.register_buffer('amplitude_mean', torch.tensor(0.0))
         self.register_buffer('amplitude_std', torch.tensor(1.0))
+        self.register_buffer('plds_tensor', torch.zeros(n_plds))
 
-        # --- ATT Stream (Shape-based) ---
-        # This stream uses focused transformers on the shape-normalized signal.
+        self.pre_estimator = nn.Sequential(
+            nn.Linear(1 + self.num_engineered_features, 64),
+            nn.ReLU(),
+            nn.Linear(64, 2)
+        )
+        self.grad_norm_pcasl_cbf = nn.LayerNorm(n_plds)
+        self.grad_norm_pcasl_att = nn.LayerNorm(n_plds)
+        self.grad_norm_vsasl_cbf = nn.LayerNorm(n_plds)
+        self.grad_norm_vsasl_att = nn.LayerNorm(n_plds)
+
         self.att_d_model = transformer_d_model_focused
+        self.pcasl_input_proj_att = nn.Linear(3, self.att_d_model)
+        self.vsasl_input_proj_att = nn.Linear(3, self.att_d_model)
         
-        # PCASL branch for ATT stream
-        self.pcasl_input_proj_att = nn.Linear(1, self.att_d_model)
-        encoder_pcasl_att = nn.TransformerEncoderLayer(self.att_d_model, transformer_nhead, self.att_d_model * 2, dropout_rate, batch_first=True)
-        self.pcasl_transformer_att = nn.TransformerEncoder(encoder_pcasl_att, transformer_nlayers)
+        encoder_long = nn.TransformerEncoderLayer(self.att_d_model, transformer_nhead, self.att_d_model * 2, dropout_rate, batch_first=True)
+        self.pcasl_transformer_att_long = nn.TransformerEncoder(encoder_long, transformer_nlayers)
+        self.vsasl_transformer_att_long = nn.TransformerEncoder(encoder_long, transformer_nlayers)
         
-        # VSASL branch for ATT stream
-        self.vsasl_input_proj_att = nn.Linear(1, self.att_d_model)
-        encoder_vsasl_att = nn.TransformerEncoderLayer(self.att_d_model, transformer_nhead, self.att_d_model * 2, dropout_rate, batch_first=True)
-        self.vsasl_transformer_att = nn.TransformerEncoder(encoder_vsasl_att, transformer_nlayers)
+        encoder_short = nn.TransformerEncoderLayer(self.att_d_model, transformer_nhead, self.att_d_model * 2, dropout_rate, batch_first=True)
+        self.pcasl_transformer_att_short = nn.TransformerEncoder(encoder_short, max(1, transformer_nlayers // 2))
+        self.vsasl_transformer_att_short = nn.TransformerEncoder(encoder_short, max(1, transformer_nlayers // 2))
 
-        # NEW: Cross-Attention layers to fuse information between PCASL and VSASL streams
         self.pcasl_to_vsasl_cross_attn = CrossAttentionBlock(self.att_d_model, transformer_nhead, dropout_rate)
         self.vsasl_to_pcasl_cross_attn = CrossAttentionBlock(self.att_d_model, transformer_nhead, dropout_rate)
 
-        # MLP for ATT stream after transformer feature fusion
-        att_mlp_input_size = self.att_d_model * 2
+        att_mlp_input_size = self.att_d_model * 4
         self.att_mlp = nn.Sequential(
             nn.Linear(att_mlp_input_size, hidden_sizes[0]),
             self._get_norm_layer(hidden_sizes[0], norm_type),
@@ -135,9 +232,7 @@ class EnhancedASLNet(nn.Module):
         )
         self.att_uncertainty = UncertaintyHead(hidden_sizes[1], 1, log_var_min=log_var_att_min, log_var_max=log_var_att_max)
         
-        # --- CBF Stream (Amplitude-based) ---
-        # This stream uses a simple MLP on the signal amplitude and engineered features.
-        cbf_mlp_input_size = 1 + self.num_engineered_features # 1 for normalized amplitude
+        cbf_mlp_input_size = 1 + self.num_engineered_features
         self.cbf_mlp = nn.Sequential(
             nn.Linear(cbf_mlp_input_size, 64),
             nn.ReLU(),
@@ -148,67 +243,68 @@ class EnhancedASLNet(nn.Module):
         self.cbf_uncertainty = UncertaintyHead(32, 1, log_var_min=log_var_cbf_min, log_var_max=log_var_cbf_max)
 
     def set_norm_stats(self, norm_stats: Dict):
-        """A helper method to set the normalization statistics from a dictionary."""
-        if not norm_stats:
-            return
-        
-        def to_tensor(val):
-            return torch.tensor(val, device=self.pcasl_mean.device, dtype=torch.float32)
-
+        if not norm_stats: return
+        def to_tensor(val): return torch.tensor(val, device=self.pcasl_mean.device, dtype=torch.float32)
         self.pcasl_mean.data = to_tensor(norm_stats.get('pcasl_mean', 0.0))
         self.pcasl_std.data = to_tensor(norm_stats.get('pcasl_std', 1.0))
         self.vsasl_mean.data = to_tensor(norm_stats.get('vsasl_mean', 0.0))
         self.vsasl_std.data = to_tensor(norm_stats.get('vsasl_std', 1.0))
         self.amplitude_mean.data = to_tensor(norm_stats.get('amplitude_mean', 0.0))
         self.amplitude_std.data = to_tensor(norm_stats.get('amplitude_std', 1.0))
+        if 'pld_values' in self.model_params_for_physics:
+             self.plds_tensor.data = to_tensor(self.model_params_for_physics['pld_values'])
 
     def forward(self, x: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
-        # --- 1. Disentangle Input ---
-        # The input `x` contains the Z-scored signal and un-normalized engineered features.
         normalized_signal = x[:, :self.num_raw_signal_features]
         engineered_features = x[:, self.num_raw_signal_features:]
 
-        # --- 2. Un-normalize to get physical signal ---
         pcasl_norm = normalized_signal[:, :self.n_plds]
         vsasl_norm = normalized_signal[:, self.n_plds:self.num_raw_signal_features]
         pcasl_raw = pcasl_norm * self.pcasl_std + self.pcasl_mean
         vsasl_raw = vsasl_norm * self.vsasl_std + self.vsasl_mean
         raw_signal = torch.cat([pcasl_raw, vsasl_raw], dim=1)
 
-        # --- 3. Extract physical features & re-normalize for network input ---
-        # Extract physical amplitude for the CBF stream
         amplitude_physical = torch.linalg.norm(raw_signal, dim=1, keepdim=True)
-        # Normalize the physical amplitude before feeding to the network
         amplitude_norm = (amplitude_physical - self.amplitude_mean) / (self.amplitude_std + 1e-6)
         
-        # Use the original Z-scored signal as the shape input for the ATT stream
         pcasl_shape_seq = normalized_signal[:, :self.n_plds]
         vsasl_shape_seq = normalized_signal[:, self.n_plds:self.num_raw_signal_features]
 
-        # --- 4. CBF Stream Processing ---
         cbf_stream_input = torch.cat([amplitude_norm, engineered_features], dim=1)
         cbf_final_features = self.cbf_mlp(cbf_stream_input)
         cbf_mean, cbf_log_var = self.cbf_uncertainty(cbf_final_features)
 
-        # --- 5. ATT Stream Processing ---
-        # PCASL branch (self-attention)
-        pcasl_in_att = self.pcasl_input_proj_att(pcasl_shape_seq.unsqueeze(-1))
-        pcasl_self_attn_out = self.pcasl_transformer_att(pcasl_in_att)
+        pre_estimator_input = torch.cat([amplitude_physical.detach(), engineered_features], dim=1)
+        rough_params = F.softplus(self.pre_estimator(pre_estimator_input))
+        cbf_rough, att_rough = rough_params[:, 0:1], rough_params[:, 1:2]
+        cbf_rough = torch.clamp(cbf_rough, min=1.0)
+        att_rough = torch.clamp(att_rough, min=100.0)
 
-        # VSASL branch (self-attention)
-        vsasl_in_att = self.vsasl_input_proj_att(vsasl_shape_seq.unsqueeze(-1))
-        vsasl_self_attn_out = self.vsasl_transformer_att(vsasl_in_att)
+        dSdC_p, dSdA_p, dSdC_v, dSdA_v = _torch_analytic_gradients(
+            cbf_rough, att_rough, self.plds_tensor, self.model_params_for_physics
+        )
+        
+        pcasl_feature_seq = torch.stack([pcasl_shape_seq, self.grad_norm_pcasl_cbf(dSdC_p), self.grad_norm_pcasl_att(dSdA_p)], dim=-1)
+        vsasl_feature_seq = torch.stack([vsasl_shape_seq, self.grad_norm_vsasl_cbf(dSdC_v), self.grad_norm_vsasl_att(dSdA_v)], dim=-1)
 
-        # Cross-attention to allow streams to inform each other
-        pcasl_out_att = self.pcasl_to_vsasl_cross_attn(query=pcasl_self_attn_out, key_value=vsasl_self_attn_out)
-        vsasl_out_att = self.vsasl_to_pcasl_cross_attn(query=vsasl_self_attn_out, key_value=pcasl_self_attn_out)
+        pcasl_in_att = self.pcasl_input_proj_att(pcasl_feature_seq)
+        vsasl_in_att = self.vsasl_input_proj_att(vsasl_feature_seq)
+        
+        n_plds_short = self.n_plds // 2
+        pcasl_in_att_short, vsasl_in_att_short = pcasl_in_att[:, :n_plds_short, :], vsasl_in_att[:, :n_plds_short, :]
+        
+        pcasl_long_out = self.pcasl_transformer_att_long(pcasl_in_att)
+        vsasl_long_out = self.vsasl_transformer_att_long(vsasl_in_att)
+        pcasl_short_out = self.pcasl_transformer_att_short(pcasl_in_att_short)
+        vsasl_short_out = self.vsasl_transformer_att_short(vsasl_in_att_short)
+        
+        pcasl_fused_long = self.pcasl_to_vsasl_cross_attn(query=pcasl_long_out, key_value=vsasl_long_out)
+        vsasl_fused_long = self.vsasl_to_pcasl_cross_attn(query=vsasl_long_out, key_value=pcasl_long_out)
 
-        # Global average pooling on the cross-attended features
-        pcasl_features_att = torch.mean(pcasl_out_att, dim=1)
-        vsasl_features_att = torch.mean(vsasl_out_att, dim=1)
+        pcasl_feat_long, vsasl_feat_long = torch.mean(pcasl_fused_long, dim=1), torch.mean(vsasl_fused_long, dim=1)
+        pcasl_feat_short, vsasl_feat_short = torch.mean(pcasl_short_out, dim=1), torch.mean(vsasl_short_out, dim=1)
 
-        # Fuse ATT transformer features and process with MLP
-        att_stream_features = torch.cat([pcasl_features_att, vsasl_features_att], dim=1)
+        att_stream_features = torch.cat([pcasl_feat_long, vsasl_feat_long, pcasl_feat_short, vsasl_feat_short], dim=1)
         att_final_features = self.att_mlp(att_stream_features)
         att_mean, att_log_var = self.att_uncertainty(att_final_features)
         
@@ -227,73 +323,21 @@ def torch_kinetic_model(pred_cbf_norm: torch.Tensor, pred_att_norm: torch.Tensor
     Differentiable PyTorch implementation of the ASL kinetic models.
     This function acts as a "physics decoder" for the PINN loss.
     """
-    # 1. Denormalize predictions back to physical units
+    device = pred_cbf_norm.device
     pred_cbf = pred_cbf_norm * norm_stats['y_std_cbf'] + norm_stats['y_mean_cbf']
     pred_att = pred_att_norm * norm_stats['y_std_att'] + norm_stats['y_mean_att']
-    
-    # Convert CBF to ml/g/s
-    pred_cbf_cgs = pred_cbf / 6000.0
-
-    # 2. Get constants and PLDs as torch tensors on the correct device
-    device = pred_cbf.device
     plds = torch.tensor(model_params['pld_values'], device=device, dtype=torch.float32)
-    T1_artery = torch.tensor(model_params['T1_artery'], device=device, dtype=torch.float32)
-    T_tau = torch.tensor(model_params['T_tau'], device=device, dtype=torch.float32)
-    alpha_PCASL = torch.tensor(model_params['alpha_PCASL'], device=device, dtype=torch.float32)
-    alpha_VSASL = torch.tensor(model_params['alpha_VSASL'], device=device, dtype=torch.float32)
-    alpha_BS1 = torch.tensor(1.0, device=device, dtype=torch.float32) # Assuming 1.0 from config
-    T2_factor = torch.tensor(1.0, device=device, dtype=torch.float32) # Assuming 1.0 from config
-    lambda_blood = 0.90; M0_b = 1.0
 
-    # Ensure inputs are correctly broadcastable for batched operations
-    # pred_cbf_cgs and pred_att are (B, 1), plds is (N_plds)
-    # We want results of shape (B, N_plds)
-    B = pred_cbf_cgs.shape[0]
-    N = plds.shape[0]
-    plds_b = plds.unsqueeze(0).expand(B, -1) # (B, N_plds)
-    
-    # --- 3. PCASL Kinetic Model (PyTorch) ---
-    alpha1 = alpha_PCASL * (alpha_BS1**4)
-    pcasl_prefactor = (2 * M0_b * pred_cbf_cgs * alpha1 / lambda_blood * T1_artery / 1000) * T2_factor
-    
-    cond_full_bolus = plds_b >= pred_att
-    cond_trailing_edge = (plds_b < pred_att) & (plds_b >= (pred_att - T_tau))
-    
-    pcasl_sig = torch.zeros_like(plds_b)
-    
-    # Full bolus decay part
-    pcasl_sig = torch.where(
-        cond_full_bolus,
-        pcasl_prefactor * torch.exp(-plds_b / T1_artery) * (1 - torch.exp(-T_tau / T1_artery)),
-        pcasl_sig
-    )
-    # Trailing edge part
-    pcasl_sig = torch.where(
-        cond_trailing_edge,
-        pcasl_prefactor * (torch.exp(-pred_att / T1_artery) - torch.exp(-(T_tau + plds_b) / T1_artery)),
-        pcasl_sig
-    )
+    pcasl_sig, vsasl_sig = _torch_physical_kinetic_model(pred_cbf, pred_att, plds, model_params)
 
-    # --- 4. VSASL Kinetic Model (PyTorch) ---
-    alpha2 = alpha_VSASL * (alpha_BS1**3)
-    vsasl_prefactor = (2 * M0_b * pred_cbf_cgs * alpha2 / lambda_blood) * T2_factor
-
-    cond_ti_le_att = plds_b <= pred_att # TI is assumed equal to PLD here
-    
-    vsasl_sig = torch.where(
-        cond_ti_le_att,
-        vsasl_prefactor * (plds_b / 1000) * torch.exp(-plds_b / T1_artery),
-        vsasl_prefactor * (pred_att / 1000) * torch.exp(-plds_b / T1_artery)
-    )
-
-    # --- 5. Concatenate and re-normalize the signal ---
-    reconstructed_signal = torch.cat([pcasl_sig, vsasl_sig], dim=1) # (B, N_plds * 2)
+    reconstructed_signal = torch.cat([pcasl_sig, vsasl_sig], dim=1)
 
     pcasl_mean = torch.tensor(norm_stats['pcasl_mean'], device=device, dtype=torch.float32)
     pcasl_std = torch.tensor(norm_stats['pcasl_std'], device=device, dtype=torch.float32)
     vsasl_mean = torch.tensor(norm_stats['vsasl_mean'], device=device, dtype=torch.float32)
     vsasl_std = torch.tensor(norm_stats['vsasl_std'], device=device, dtype=torch.float32)
     
+    N = len(plds)
     pcasl_recon_norm = (reconstructed_signal[:, :N] - pcasl_mean) / (pcasl_std + 1e-6)
     vsasl_recon_norm = (reconstructed_signal[:, N:] - vsasl_mean) / (vsasl_std + 1e-6)
     
