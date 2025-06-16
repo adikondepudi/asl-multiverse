@@ -12,7 +12,7 @@ training:
   n_subjects_stage2: 10000
   n_epochs_stage1: 140
   n_epochs_stage2: 60
-  loss_pinn_weight_stage1: 10.0
+  loss_pinn_weight_stage1: 1.0
   loss_pinn_weight_stage2: 0.1
   learning_rate_stage2: 0.0002
   

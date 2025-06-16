@@ -8,3 +8,4 @@ __pycache__/
 /comparison_results/
 /wandb/
 .DS_Store
+/pinn*/
