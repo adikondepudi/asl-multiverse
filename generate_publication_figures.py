@@ -9,7 +9,7 @@ import torch
 
 # --- Configuration: SET THIS PATH ---
 # USE THE FOLDER FROM YOUR SUCCESSFUL RUN WITH THE STRONG PINN LOSS
-RESULTS_DIR = "./comprehensive_results/asl_research_20250612_210751/"  # <-- Edit this line!
+RESULTS_DIR = "./comprehensive_results/asl_research_20250616_130042/"  # <-- Edit this line!
 # --- End Configuration ---
 
 # Import your project's custom modules for the diagnostic plot

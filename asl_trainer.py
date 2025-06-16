@@ -419,7 +419,6 @@ class EnhancedASLTrainer:
             norm_stats['vsasl_std'] = np.std(vsasl_train_signals, axis=0)
             norm_stats['vsasl_std'][norm_stats['vsasl_std'] < 1e-6] = 1.0
             
-            # --- FIX: Calculate and add amplitude statistics ---
             amplitudes = np.linalg.norm(X_train_raw_signal_part, axis=1)
             norm_stats['amplitude_mean'] = np.mean(amplitudes)
             norm_stats['amplitude_std'] = np.std(amplitudes)
@@ -444,9 +443,8 @@ class EnhancedASLTrainer:
         y_all_normalized[:, 1] = (y_all_raw[:, 1] - norm_stats['y_mean_att']) / norm_stats['y_std_att']
 
         self.norm_stats = norm_stats
-        self.custom_loss_fn.norm_stats = norm_stats # NEW: Give loss function access to norm_stats
+        self.custom_loss_fn.norm_stats = norm_stats
 
-        # --- FIX: Set the normalization stats on each model in the ensemble ---
         for model in self.models:
             model.set_norm_stats(self.norm_stats)
         logger.info("Normalization stats buffers set on all ensemble models.")
@@ -518,7 +516,7 @@ class EnhancedASLTrainer:
         
         histories = defaultdict(lambda: defaultdict(list))
         self.global_step = 0
-        global_epoch_counter = 0  # <<< FIX: Initialize global epoch counter
+        global_epoch_counter = 0 
 
         if not train_loaders:
             logger.error("train_loaders is empty. Aborting training.")
@@ -566,12 +564,12 @@ class EnhancedASLTrainer:
                     train_loss_epoch = self._train_epoch(self.models[model_idx], train_loader, 
                                                        self.optimizers[model_idx], 
                                                        self.schedulers[model_idx] if self.schedulers else None, 
-                                                       global_epoch_counter) # <<< FIX: Pass global_epoch_counter
+                                                       global_epoch_counter)
                     epoch_train_losses_all_models.append(train_loss_epoch)
                     histories[model_idx][f'train_losses_stage_{stage_idx}'].append(train_loss_epoch)
                     
                     if current_val_loader:
-                        val_metrics_dict = self._validate(self.models[model_idx], current_val_loader, global_epoch_counter) # <<< FIX: Pass global_epoch_counter
+                        val_metrics_dict = self._validate(self.models[model_idx], current_val_loader, global_epoch_counter)
                         epoch_val_metrics_all_models.append(val_metrics_dict)
                         histories[model_idx][f'val_metrics_stage_{stage_idx}'].append(val_metrics_dict)
                         
@@ -593,7 +591,6 @@ class EnhancedASLTrainer:
 
                 if wandb.run:
                     mean_epoch_train_loss = np.nanmean(epoch_train_losses_all_models) if epoch_train_losses_all_models else float('nan')
-                    # <<< FIX: Use global_epoch_counter for 'epoch_global' logging
                     wandb.log({f'Epoch_Stage{stage_idx}/Mean_Train_Loss': mean_epoch_train_loss, 'epoch_global': global_epoch_counter, 'epoch_stage': epoch})
                     if current_val_loader and len(current_val_loader) > 0 and epoch_val_metrics_all_models:
                         epoch_val_metrics_agg = defaultdict(list)
@@ -617,7 +614,7 @@ class EnhancedASLTrainer:
                     mean_val_loss_console_stage = np.nanmean(active_val_losses_stage) if active_val_losses_stage else float('nan')
                     logger.info(f"Stage {stage_idx+1}, Epoch {epoch + 1}/{n_epochs_stage}: Mean Active Train Loss = {mean_train_loss_console:.6f}, Mean Active Val Loss (Stage) = {mean_val_loss_console_stage:.6f}")
                 
-                global_epoch_counter += 1 # <<< FIX: Increment global counter after each full epoch
+                global_epoch_counter += 1
 
         if not hasattr(self, 'overall_best_val_losses'):
             self.overall_best_val_losses = [float('inf')] * self.n_ensembles

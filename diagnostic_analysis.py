@@ -6,7 +6,7 @@ import matplotlib.pyplot as plt
 import inspect
 
 # --- Configuration: SET THIS PATH ---
-RESULTS_DIR = "./comprehensive_results/asl_research_20250612_210751/"  # <-- Edit this line!
+RESULTS_DIR = "./comprehensive_results/asl_research_20250616_130042/"  # <-- Edit this line!
 # --- End Configuration ---
 
 # Import your project's custom modules
@@ -35,8 +35,6 @@ def load_analysis_artifacts(results_dir: str):
     # Ensure the directory exists
     if not os.path.exists(results_dir):
         raise FileNotFoundError(f"Results directory not found: {results_dir}")
-
-    # --- FIX STARTS HERE ---
 
     # 1. Load the initial config file
     config_path = os.path.join(results_dir, 'research_config.json')
@@ -71,8 +69,6 @@ def load_analysis_artifacts(results_dir: str):
         elif 'config' in final_results:
              print("Loading config from final_research_results.json for accuracy.")
              config = final_results['config']
-
-    # --- FIX ENDS HERE ---
 
     # Load the normalization stats
     norm_stats_path = os.path.join(results_dir, 'norm_stats.json')

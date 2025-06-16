@@ -429,7 +429,7 @@ class PublicationGenerator:
 
 
 def run_comprehensive_asl_research(config: ResearchConfig, output_parent_dir: Optional[str] = None) -> Dict:
-    timestamp = datetime.now().strftime('%Y%m%d_%H%M%S') # <-- FIX: Define timestamp at the start
+    timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
 
     # If no output directory is provided, create a default one using the timestamp.
     # Otherwise, use the specified one.
