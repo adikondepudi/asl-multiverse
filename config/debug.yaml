@@ -1,46 +1,48 @@
-# config/debug.yaml
+# config/default.yaml
 
 training:
-  hidden_sizes: [64, 32]
-  n_ensembles: 1
-  learning_rate: 0.001 
-  weight_decay: 0.0001
+  batch_size: 256
+  learning_rate: 0.001
+  weight_decay: 0.00001
+  hidden_sizes: [256, 128, 64] 
+  n_ensembles: 5
   dropout_rate: 0.1
   norm_type: "batch"
   
-  # NEW: Two-stage curriculum params
-  n_subjects_stage1: 200
-  n_subjects_stage2: 300
-  n_epochs_stage1: 10
-  n_epochs_stage2: 10
-  loss_pinn_weight_stage1: 10.0
+  # NEW: Two-stage curriculum parameters
+  n_subjects_stage1: 5000
+  n_subjects_stage2: 10000
+  n_epochs_stage1: 2
+  n_epochs_stage2: 2
+  loss_pinn_weight_stage1: 1.0
   loss_pinn_weight_stage2: 0.1
   learning_rate_stage2: 0.0002
-
-  # Model-specific params
+  
+  # Model-specific params for EnhancedASLNet
   use_transformer_temporal_model: true
   m0_input_feature_model: false 
+
+  # Transformer settings
   use_focused_transformer_model: true 
   transformer_d_model_focused: 32     
   transformer_nhead_model: 4
   transformer_nlayers_model: 2
+  
+  # Uncertainty head settings for EnhancedASLNet
   log_var_cbf_min: -6.0
   log_var_cbf_max: 7.0
   log_var_att_min: -2.0
   log_var_att_max: 14.0
-  loss_log_var_reg_lambda: 0.0
 
-optuna:
-  optuna_n_trials: 0
-  optuna_timeout_hours: 0.1
-  optuna_n_subjects: 100
-  optuna_n_epochs: 5
-  optuna_study_name: "asl_multiverse_hpo_debug"
+  # CustomLoss settings
+  loss_weight_cbf: 1.0
+  loss_weight_att: 2.0
+  loss_log_var_reg_lambda: 0.0
 
 data:
   val_split: 0.2
   pld_values: [500, 1000, 1500, 2000, 2500, 3000]
-  att_ranges_config: 
+  att_ranges_config:
     - [500, 1500, "Short ATT"]
     - [1500, 2500, "Medium ATT"]
     - [2500, 4000, "Long ATT"]
@@ -55,18 +57,16 @@ simulation:
   T_tau: 1800.0
   reference_CBF: 60.0
 
-n_test_subjects_per_att_range: 50
-test_snr_levels: [5.0]
-test_conditions: ['healthy']
-
-n_clinical_scenario_subjects: 20
-
-target_cbf_cv_improvement_perc: 50.0
-target_att_cv_improvement_perc: 50.0
+optuna:
+  optuna_n_trials: 20
+  optuna_timeout_hours: 0.5
+  optuna_n_subjects: 500
+  optuna_n_epochs: 20
+  optuna_study_name: "asl_multiverse_hpo"
 
 logging:
   level: "INFO"
 
 wandb: 
-  wandb_project: "asl-multiverse-debug"
+  wandb_project: "asl-multiverse-project"
   wandb_entity: null
