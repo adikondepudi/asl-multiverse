@@ -53,15 +53,18 @@ def load_artifacts(results_dir: Path) -> tuple:
     ensemble_models = []
     num_plds = len(config.get('pld_values', []))
     base_input_size = num_plds * 2 + 4
-    model_param_keys = inspect.signature(EnhancedASLNet).parameters.keys()
-    filtered_kwargs = {k: v for k, v in config.items() if k in model_param_keys}
+    
+    # The original filtering of kwargs was too restrictive and removed physics parameters.
+    # Pass the full config dict instead; the model's __init__ will pick what it needs.
+    # model_param_keys = inspect.signature(EnhancedASLNet).parameters.keys()
+    # filtered_kwargs = {k: v for k, v in config.items() if k in model_param_keys}
     
     for i in range(config.get('n_ensembles', 5)):
         model_path = models_dir / f'ensemble_model_{i}.pt'
         if not model_path.exists():
             logging.warning(f"Model file not found: {model_path}. Skipping.")
             continue
-        model = EnhancedASLNet(input_size=base_input_size, **filtered_kwargs)
+        model = EnhancedASLNet(input_size=base_input_size, **config)
         model.load_state_dict(torch.load(model_path, map_location=torch.device('cpu')))
         model.eval()
         ensemble_models.append(model)
@@ -198,7 +201,8 @@ def predict_nn(models: list, signal_flat: np.ndarray, num_plds: int, norm_stats:
     cbf_preds_norm, att_preds_norm = [], []
     with torch.no_grad():
         for model in models:
-            cbf_m, att_m, _, _ = model(input_tensor)
+            # The model returns 6 values; we only need the first two mean predictions here.
+            cbf_m, att_m, _, _, _, _ = model(input_tensor)
             cbf_preds_norm.append(cbf_m.item())
             att_preds_norm.append(att_m.item())
             

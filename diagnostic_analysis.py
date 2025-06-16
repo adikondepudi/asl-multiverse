@@ -1,3 +1,5 @@
+# diagnostic_analysis.py
+
 import torch
 import numpy as np
 import json
@@ -6,7 +8,7 @@ import matplotlib.pyplot as plt
 import inspect
 
 # --- Configuration: SET THIS PATH ---
-RESULTS_DIR = "./comprehensive_results/asl_research_20250616_130042/"  # <-- Edit this line!
+RESULTS_DIR = "./comprehensive_results/asl_research_20250616_175302/"  # <-- Edit this line!
 # --- End Configuration ---
 
 # Import your project's custom modules
@@ -90,15 +92,9 @@ def load_analysis_artifacts(results_dir: str):
     # The input size is num_plds * 2 (raw signals) + 4 (engineered features)
     base_input_size_nn = num_plds * 2 + 4
 
-    # Filter kwargs to match EnhancedASLNet signature
-    model_param_keys = inspect.signature(EnhancedASLNet).parameters.keys()
-    filtered_kwargs = {k: v for k, v in config.items() if k in model_param_keys}
-    
-    # Add n_plds to the config for the model if it's missing
-    if 'n_plds' not in filtered_kwargs:
-        filtered_kwargs['n_plds'] = num_plds
-
-    model = EnhancedASLNet(input_size=base_input_size_nn, **filtered_kwargs)
+    # The original filtering of kwargs was too restrictive and removed physics parameters.
+    # Pass the full config dict instead. The model's __init__ will pick what it needs.
+    model = EnhancedASLNet(input_size=base_input_size_nn, **config)
     model.load_state_dict(torch.load(model_path, map_location=torch.device('cpu')))
     model.eval()
     print(f"Successfully loaded model from: {model_path}")
@@ -165,7 +161,8 @@ def analyze_healthy_adult_failure(model, config, norm_stats):
         # 3. Predict with the model
         input_tensor = torch.FloatTensor(full_input_vector).unsqueeze(0)
         with torch.no_grad():
-            pred_cbf_norm, pred_att_norm, _, _ = model(input_tensor)
+            # The model returns 6 values; we only need the first two (predicted means) for this analysis.
+            pred_cbf_norm, pred_att_norm, _, _, _, _ = model(input_tensor)
         
         # 4. Denormalize the prediction
         pred_cbf = pred_cbf_norm.item() * norm_stats['y_std_cbf'] + norm_stats['y_mean_cbf']
