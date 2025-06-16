@@ -1,40 +1,31 @@
-# config/default.yaml
+# config/debug.yaml
 
 training:
-  batch_size: 256
+  batch_size: 32
   learning_rate: 0.001
   weight_decay: 0.00001
-  hidden_sizes: [256, 128, 64] 
-  n_ensembles: 5
+  hidden_sizes: [64, 32, 16]      
+  n_ensembles: 1
   dropout_rate: 0.1
   norm_type: "batch"
   
-  # NEW: Two-stage curriculum parameters
-  n_subjects_stage1: 5000
-  n_subjects_stage2: 10000
-  n_epochs_stage1: 2
-  n_epochs_stage2: 2
+  n_subjects_stage1: 50
+  n_subjects_stage2: 50
+  n_epochs_stage1: 1              
+  n_epochs_stage2: 1              
   loss_pinn_weight_stage1: 1.0
   loss_pinn_weight_stage2: 0.1
   learning_rate_stage2: 0.0002
   
-  # Model-specific params for EnhancedASLNet
   use_transformer_temporal_model: true
   m0_input_feature_model: false 
-
-  # Transformer settings
-  use_focused_transformer_model: true 
   transformer_d_model_focused: 32     
   transformer_nhead_model: 4
   transformer_nlayers_model: 2
-  
-  # Uncertainty head settings for EnhancedASLNet
   log_var_cbf_min: -6.0
   log_var_cbf_max: 7.0
   log_var_att_min: -2.0
   log_var_att_max: 14.0
-
-  # CustomLoss settings
   loss_weight_cbf: 1.0
   loss_weight_att: 2.0
   loss_log_var_reg_lambda: 0.0
@@ -58,15 +49,19 @@ simulation:
   reference_CBF: 60.0
 
 optuna:
-  optuna_n_trials: 20
+  optuna_n_trials: 1
   optuna_timeout_hours: 0.5
-  optuna_n_subjects: 500
-  optuna_n_epochs: 20
-  optuna_study_name: "asl_multiverse_hpo"
+  optuna_n_subjects: 20
+  optuna_n_epochs: 1
+  optuna_study_name: "asl_multiverse_hpo_debug"
+
+evaluation:
+  n_test_subjects_per_att_range: 10
+  n_clinical_scenario_subjects: 10
 
 logging:
   level: "INFO"
 
 wandb: 
-  wandb_project: "asl-multiverse-project"
+  wandb_project: "asl-multiverse-project-debug"
   wandb_entity: null
