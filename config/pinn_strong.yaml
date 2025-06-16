@@ -34,7 +34,7 @@ training:
 
   # CustomLoss settings
   loss_weight_cbf: 1.0
-  loss_weight_att: 1.0
+  loss_weight_att: 2.0
   loss_log_var_reg_lambda: 0.0
 
 data:

@@ -279,7 +279,7 @@ class CustomLoss(nn.Module):
                  pinn_weight: float = 0.0,
                  model_params: Optional[Dict[str, Any]] = None,
                  att_epoch_weight_schedule: Optional[callable] = None,
-                 pinn_att_weighting_sigma: float = 500.0 # NEW: Sigma for PINN loss weighting
+                 pinn_att_weighting_sigma: float = 500.0
                 ):
         super().__init__()
         self.w_cbf = w_cbf
@@ -297,7 +297,7 @@ class CustomLoss(nn.Module):
                 cbf_pred_norm: torch.Tensor, att_pred_norm: torch.Tensor, 
                 cbf_true_norm: torch.Tensor, att_true_norm: torch.Tensor, 
                 cbf_log_var: torch.Tensor, att_log_var: torch.Tensor, 
-                epoch: int) -> torch.Tensor:
+                global_epoch: int) -> torch.Tensor:
         
         # --- Standard NLL calculation (Aleatoric Uncertainty Loss) ---
         cbf_nll_loss = 0.5 * (torch.exp(-cbf_log_var) * (cbf_pred_norm - cbf_true_norm)**2 + cbf_log_var)
@@ -313,7 +313,7 @@ class CustomLoss(nn.Module):
 
         # --- Apply weights and combine losses ---
         weighted_cbf_loss = self.w_cbf * cbf_nll_loss
-        att_epoch_weight_factor = self.att_epoch_weight_schedule(epoch) 
+        att_epoch_weight_factor = self.att_epoch_weight_schedule(global_epoch) 
         weighted_att_loss = self.w_att * att_nll_loss * focal_weight * att_epoch_weight_factor
         total_param_loss = torch.mean(weighted_cbf_loss + weighted_att_loss)
         
@@ -324,7 +324,7 @@ class CustomLoss(nn.Module):
             
         # --- Physics-Informed (PINN) Regularization with Physics-Guided Attention ---
         pinn_loss = 0.0
-        if self.pinn_weight > 0 and self.norm_stats and self.model_params and epoch > 10:
+        if self.pinn_weight > 0 and self.norm_stats and self.model_params and global_epoch > 10:
             reconstructed_signal_norm = torch_kinetic_model(
                 cbf_pred_norm, att_pred_norm, self.norm_stats, self.model_params
             )

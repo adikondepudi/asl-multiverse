@@ -227,7 +227,9 @@ class EnhancedASLDataset(Dataset):
                  dropout_range: Tuple[float, float] = (0.05, 0.15), # Dropout of PLD points
                  global_scale_range: Tuple[float, float] = (0.95, 1.05), # Simulates efficiency variations
                  baseline_shift_std_factor: float = 0.01, # Fraction of signal mean_abs for baseline shift
-                 reference_signal_max_for_noise: float = 3.0 # Approx max expected NORMALIZED ASL signal for noise scaling
+                 reference_signal_max_for_noise: float = 3.0, # Approx max expected NORMALIZED ASL signal for noise scaling
+                 spike_config: Optional[Dict] = None, # e.g., {'prob': 0.05, 'magnitude_factor': 3.0}
+                 drift_config: Optional[Dict] = None, # e.g., {'prob': 0.3, 'magnitude_factor': 0.05}
                 ):
         self.signals = torch.FloatTensor(signals)
         self.params = torch.FloatTensor(params)
@@ -237,6 +239,8 @@ class EnhancedASLDataset(Dataset):
         self.global_scale_range = global_scale_range
         self.baseline_shift_std_factor = baseline_shift_std_factor
         self.reference_signal_max_for_noise = reference_signal_max_for_noise
+        self.spike_config = spike_config if spike_config is not None else {}
+        self.drift_config = drift_config if drift_config is not None else {}
 
 
     def __len__(self) -> int:
@@ -284,6 +288,26 @@ class EnhancedASLDataset(Dataset):
             vsasl_scale = np.random.uniform(0.8, 1.2)
             signal[:num_plds] *= pcasl_scale
             signal[num_plds:] *= vsasl_scale
+
+        # 6. Spike Artifact (Tier 3)
+        if self.spike_config and np.random.rand() < self.spike_config.get('prob', 0.0):
+            noise_std = self.noise_config.get('std_fraction', 0.05) * self.reference_signal_max_for_noise
+            if noise_std > 1e-9:
+                spike_magnitude = self.spike_config.get('magnitude_factor', 3.0) * noise_std
+                spike_idx = np.random.randint(0, len(signal))
+                signal[spike_idx] += spike_magnitude * np.random.choice([-1, 1])
+        
+        # 7. Slow Baseline Drift (Tier 3)
+        if self.drift_config and np.random.rand() < self.drift_config.get('prob', 0.0):
+            signal_max = torch.max(torch.abs(signal)) if torch.any(torch.abs(signal) > 0) else 1.0
+            drift_amplitude = self.drift_config.get('magnitude_factor', 0.05) * signal_max
+            if drift_amplitude > 1e-9:
+                num_points = len(signal)
+                phase = np.random.uniform(0, 2 * np.pi)
+                frequency = np.random.uniform(0.1, 0.5)
+                t_axis = torch.linspace(0, 2 * np.pi * frequency, num_points)
+                drift = drift_amplitude * torch.sin(t_axis + phase)
+                signal += drift
 
         return signal, param
 
@@ -447,11 +471,13 @@ class EnhancedASLTrainer:
             'dropout_range': (0.05, 0.15),
             'global_scale_range': (0.95, 1.05),
             'baseline_shift_std_factor': 0.01,
-            'reference_signal_max_for_noise': 3.0
+            'reference_signal_max_for_noise': 3.0,
+            'spike_config': {'prob': 0.1, 'magnitude_factor': 4.0},
+            'drift_config': {'prob': 0.3, 'magnitude_factor': 0.05}
         }
         if dataset_aug_config: default_aug_config.update(dataset_aug_config)
 
-        val_aug_config_minimal = {**default_aug_config, 'noise_config': {}, 'dropout_range': None}
+        val_aug_config_minimal = {**default_aug_config, 'noise_config': {}, 'dropout_range': None, 'spike_config': None, 'drift_config': None}
 
         for i, (att_min, att_max) in enumerate(curriculum_stages_def):
             train_mask = (y_train_raw[:, 1] >= att_min) & (y_train_raw[:, 1] < att_max)
@@ -710,8 +736,13 @@ class EnhancedASLTrainer:
             all_cbf_aleatoric_vars_np = np.array(all_cbf_aleatoric_vars_list).squeeze() 
             all_att_aleatoric_vars_np = np.array(all_att_aleatoric_vars_list).squeeze() 
             
-            ensemble_cbf_mean_norm = np.mean(all_cbf_means_norm_np)
-            ensemble_att_mean_norm = np.mean(all_att_means_norm_np)
+            # --- Tier 1: Uncertainty-Weighted Averaging ---
+            cbf_weights = 1.0 / (all_cbf_aleatoric_vars_np + 1e-9)
+            ensemble_cbf_mean_norm = np.average(all_cbf_means_norm_np, weights=cbf_weights)
+            
+            att_weights = 1.0 / (all_att_aleatoric_vars_np + 1e-9)
+            ensemble_att_mean_norm = np.average(all_att_means_norm_np, weights=att_weights)
+            
             mean_aleatoric_cbf_var_norm = np.mean(all_cbf_aleatoric_vars_np)
             mean_aleatoric_att_var_norm = np.mean(all_att_aleatoric_vars_np)
             epistemic_cbf_var_norm = np.var(all_cbf_means_norm_np) if self.n_ensembles > 1 else 0.0
@@ -723,8 +754,13 @@ class EnhancedASLTrainer:
             all_cbf_aleatoric_vars_np = np.concatenate(all_cbf_aleatoric_vars_list, axis=1) 
             all_att_aleatoric_vars_np = np.concatenate(all_att_aleatoric_vars_list, axis=1) 
 
-            ensemble_cbf_mean_norm = np.mean(all_cbf_means_norm_np, axis=1)
-            ensemble_att_mean_norm = np.mean(all_att_means_norm_np, axis=1)
+            # --- Tier 1: Uncertainty-Weighted Averaging ---
+            cbf_weights = 1.0 / (all_cbf_aleatoric_vars_np + 1e-9)
+            ensemble_cbf_mean_norm = np.average(all_cbf_means_norm_np, axis=1, weights=cbf_weights)
+
+            att_weights = 1.0 / (all_att_aleatoric_vars_np + 1e-9)
+            ensemble_att_mean_norm = np.average(all_att_means_norm_np, axis=1, weights=att_weights)
+
             mean_aleatoric_cbf_var_norm = np.mean(all_cbf_aleatoric_vars_np, axis=1)
             mean_aleatoric_att_var_norm = np.mean(all_att_aleatoric_vars_np, axis=1)
             epistemic_cbf_var_norm = np.var(all_cbf_means_norm_np, axis=1) if self.n_ensembles > 1 else np.zeros_like(ensemble_cbf_mean_norm)
