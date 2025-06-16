@@ -178,22 +178,30 @@ class EnhancedASLNet(nn.Module):
                  log_var_cbf_min: float = -6.0,
                  log_var_cbf_max: float = 7.0,
                  log_var_att_min: float = -2.0,
-                 log_var_att_max: float = 14.0
+                 log_var_att_max: float = 14.0,
+                 **kwargs
                 ):
         super().__init__()
         
         self.n_plds = n_plds
         self.num_raw_signal_features = n_plds * 2
         self.num_engineered_features = input_size - self.num_raw_signal_features
-        self.model_params_for_physics = {}
+        
+        physics_keys = ['T1_artery', 'T_tau', 'alpha_PCASL', 'alpha_VSASL', 'alpha_BS1', 'T2_factor', 'pld_values']
+        self.model_params_for_physics = {key: kwargs[key] for key in physics_keys if key in kwargs}
 
+        # --- Buffers for normalization statistics ---
         self.register_buffer('pcasl_mean', torch.zeros(n_plds))
         self.register_buffer('pcasl_std', torch.ones(n_plds))
         self.register_buffer('vsasl_mean', torch.zeros(n_plds))
         self.register_buffer('vsasl_std', torch.ones(n_plds))
         self.register_buffer('amplitude_mean', torch.tensor(0.0))
         self.register_buffer('amplitude_std', torch.tensor(1.0))
-        self.register_buffer('plds_tensor', torch.zeros(n_plds))
+
+        if 'pld_values' in self.model_params_for_physics:
+            self.register_buffer('plds_tensor', torch.tensor(self.model_params_for_physics['pld_values'], dtype=torch.float32))
+        else:
+            self.register_buffer('plds_tensor', torch.zeros(n_plds))
 
         self.pre_estimator = nn.Sequential(
             nn.Linear(1 + self.num_engineered_features, 64),
@@ -243,37 +251,45 @@ class EnhancedASLNet(nn.Module):
         self.cbf_uncertainty = UncertaintyHead(32, 1, log_var_min=log_var_cbf_min, log_var_max=log_var_cbf_max)
 
     def set_norm_stats(self, norm_stats: Dict):
-        if not norm_stats: return
-        def to_tensor(val): return torch.tensor(val, device=self.pcasl_mean.device, dtype=torch.float32)
+        """A helper method to set the normalization statistics from a dictionary."""
+        if not norm_stats:
+            return
+        
+        def to_tensor(val):
+            return torch.tensor(val, device=self.pcasl_mean.device, dtype=torch.float32)
+
         self.pcasl_mean.data = to_tensor(norm_stats.get('pcasl_mean', 0.0))
         self.pcasl_std.data = to_tensor(norm_stats.get('pcasl_std', 1.0))
         self.vsasl_mean.data = to_tensor(norm_stats.get('vsasl_mean', 0.0))
         self.vsasl_std.data = to_tensor(norm_stats.get('vsasl_std', 1.0))
         self.amplitude_mean.data = to_tensor(norm_stats.get('amplitude_mean', 0.0))
         self.amplitude_std.data = to_tensor(norm_stats.get('amplitude_std', 1.0))
-        if 'pld_values' in self.model_params_for_physics:
-             self.plds_tensor.data = to_tensor(self.model_params_for_physics['pld_values'])
 
-    def forward(self, x: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
+    def forward(self, x: torch.Tensor) -> Tuple[torch.Tensor, ...]:
+        # --- 1. Disentangle Input ---
         normalized_signal = x[:, :self.num_raw_signal_features]
         engineered_features = x[:, self.num_raw_signal_features:]
 
+        # --- 2. Un-normalize to get physical signal ---
         pcasl_norm = normalized_signal[:, :self.n_plds]
         vsasl_norm = normalized_signal[:, self.n_plds:self.num_raw_signal_features]
         pcasl_raw = pcasl_norm * self.pcasl_std + self.pcasl_mean
         vsasl_raw = vsasl_norm * self.vsasl_std + self.vsasl_mean
         raw_signal = torch.cat([pcasl_raw, vsasl_raw], dim=1)
 
+        # --- 3. Extract physical features & re-normalize for network input ---
         amplitude_physical = torch.linalg.norm(raw_signal, dim=1, keepdim=True)
         amplitude_norm = (amplitude_physical - self.amplitude_mean) / (self.amplitude_std + 1e-6)
         
         pcasl_shape_seq = normalized_signal[:, :self.n_plds]
         vsasl_shape_seq = normalized_signal[:, self.n_plds:self.num_raw_signal_features]
 
+        # --- 4. CBF Stream Processing ---
         cbf_stream_input = torch.cat([amplitude_norm, engineered_features], dim=1)
         cbf_final_features = self.cbf_mlp(cbf_stream_input)
         cbf_mean, cbf_log_var = self.cbf_uncertainty(cbf_final_features)
 
+        # --- 5. ATT Stream Processing (with Differentiable Physics-Encoder) ---
         pre_estimator_input = torch.cat([amplitude_physical.detach(), engineered_features], dim=1)
         rough_params = F.softplus(self.pre_estimator(pre_estimator_input))
         cbf_rough, att_rough = rough_params[:, 0:1], rough_params[:, 1:2]
@@ -308,7 +324,8 @@ class EnhancedASLNet(nn.Module):
         att_final_features = self.att_mlp(att_stream_features)
         att_mean, att_log_var = self.att_uncertainty(att_final_features)
         
-        return cbf_mean, att_mean, cbf_log_var, att_log_var
+        # Return final predictions AND the rough estimates for the auxiliary loss
+        return cbf_mean, att_mean, cbf_log_var, att_log_var, cbf_rough, att_rough
 
     def _get_norm_layer(self, size: int, norm_type: str) -> nn.Module:
         if norm_type == 'batch': return nn.BatchNorm1d(size)
@@ -349,6 +366,7 @@ class CustomLoss(nn.Module):
     """
     Custom loss: NLL with regression-focal loss on ATT and optional log_var regularization
     and a physics-informed (PINN) reconstruction loss.
+    NEW: Includes an auxiliary loss to train the pre-estimator network.
     """
     
     def __init__(self, 
@@ -359,7 +377,8 @@ class CustomLoss(nn.Module):
                  pinn_weight: float = 0.0,
                  model_params: Optional[Dict[str, Any]] = None,
                  att_epoch_weight_schedule: Optional[callable] = None,
-                 pinn_att_weighting_sigma: float = 500.0
+                 pinn_att_weighting_sigma: float = 500.0,
+                 pre_estimator_loss_weight: float = 0.5 # New weight for auxiliary loss
                 ):
         super().__init__()
         self.w_cbf = w_cbf
@@ -367,16 +386,19 @@ class CustomLoss(nn.Module):
         self.log_var_reg_lambda = log_var_reg_lambda
         self.focal_gamma = focal_gamma
         self.pinn_weight = pinn_weight
+        self.pre_estimator_loss_weight = pre_estimator_loss_weight
         self.model_params = model_params if model_params is not None else {}
         self.norm_stats = None
         self.att_epoch_weight_schedule = att_epoch_weight_schedule or (lambda _: 1.0)
         self.pinn_att_weighting_sigma = pinn_att_weighting_sigma
+        self.mse_loss = nn.MSELoss()
 
     def forward(self,
                 normalized_input_signal: torch.Tensor,
                 cbf_pred_norm: torch.Tensor, att_pred_norm: torch.Tensor, 
                 cbf_true_norm: torch.Tensor, att_true_norm: torch.Tensor, 
                 cbf_log_var: torch.Tensor, att_log_var: torch.Tensor, 
+                cbf_rough_physical: torch.Tensor, att_rough_physical: torch.Tensor,
                 global_epoch: int) -> torch.Tensor:
         
         # --- Standard NLL calculation (Aleatoric Uncertainty Loss) ---
@@ -402,37 +424,25 @@ class CustomLoss(nn.Module):
         if self.log_var_reg_lambda > 0:
             log_var_regularization = self.log_var_reg_lambda * (torch.mean(cbf_log_var**2) + torch.mean(att_log_var**2))
             
-        # --- Physics-Informed (PINN) Regularization with Physics-Guided Attention ---
+        # --- Physics-Informed (PINN) Regularization ---
         pinn_loss = 0.0
         if self.pinn_weight > 0 and self.norm_stats and self.model_params and global_epoch > 10:
-            reconstructed_signal_norm = torch_kinetic_model(
-                cbf_pred_norm, att_pred_norm, self.norm_stats, self.model_params
-            )
-            
-            # Create physics-guided weights for the PINN loss
-            with torch.no_grad():
-                device = att_true_norm.device
-                plds = torch.tensor(self.model_params['pld_values'], device=device, dtype=torch.float32)
-                y_mean_att = self.norm_stats['y_mean_att']
-                y_std_att = self.norm_stats['y_std_att']
-                att_true_ms = att_true_norm * y_std_att + y_mean_att # De-normalize ATT to ms
-                
-                # Create Gaussian weights centered at the true ATT for each sample in the batch
-                plds_b = plds.unsqueeze(0).expand(att_true_ms.shape[0], -1) # (B, N_plds)
-                pinn_weights_pcasl = torch.exp(-((plds_b - att_true_ms)**2) / (2 * self.pinn_att_weighting_sigma**2))
-                
-                # Apply same weighting to both PCASL and VSASL parts of the signal vector
-                pinn_loss_weights = torch.cat([pinn_weights_pcasl, pinn_weights_pcasl], dim=1)
-                
-                # Normalize weights to keep loss magnitude consistent
-                pinn_loss_weights = pinn_loss_weights * pinn_loss_weights.numel() / (pinn_loss_weights.sum() + 1e-9)
-
-            # Calculate weighted MSE for PINN loss
+            reconstructed_signal_norm = torch_kinetic_model(cbf_pred_norm, att_pred_norm, self.norm_stats, self.model_params)
             num_raw_signal_feats = len(self.model_params.get('pld_values', [])) * 2
             input_signal_norm = normalized_input_signal[:, :num_raw_signal_feats]
-            
-            pinn_loss = torch.mean(pinn_loss_weights * (reconstructed_signal_norm - input_signal_norm)**2)
+            pinn_loss = self.mse_loss(reconstructed_signal_norm, input_signal_norm)
 
-        total_loss = total_param_loss + log_var_regularization + self.pinn_weight * pinn_loss
+        # --- Auxiliary Loss for Pre-Estimator (in NORMALIZED space) ---
+        pre_estimator_loss = 0.0
+        if self.pre_estimator_loss_weight > 0 and self.norm_stats:
+            # Normalize the pre-estimator's physical outputs to match the ground truth's scale
+            cbf_rough_norm = (cbf_rough_physical - self.norm_stats['y_mean_cbf']) / (self.norm_stats['y_std_cbf'] + 1e-6)
+            att_rough_norm = (att_rough_physical - self.norm_stats['y_mean_att']) / (self.norm_stats['y_std_att'] + 1e-6)
+            
+            loss_cbf_pre = self.mse_loss(cbf_rough_norm, cbf_true_norm)
+            loss_att_pre = self.mse_loss(att_rough_norm, att_true_norm)
+            pre_estimator_loss = loss_cbf_pre + loss_att_pre
+
+        total_loss = total_param_loss + log_var_regularization + self.pinn_weight * pinn_loss + self.pre_estimator_loss_weight * pre_estimator_loss
         
         return total_loss

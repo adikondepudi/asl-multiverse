@@ -106,15 +106,12 @@ class SingleRepeatValidator:
             logger.info("No trained model path provided. NN predictions will be NaN.")
 
     def _load_trained_model(self, model_path: str) -> Optional[EnhancedASLNet]:
-        model_param_keys = inspect.signature(EnhancedASLNet).parameters.keys()
-        filtered_arch_config = {
-            key: self.nn_model_arch_config[key]
-            for key in self.nn_model_arch_config if key in model_param_keys
-        }
-
+        # The nn_model_arch_config contains all necessary parameters, including
+        # those handled by **kwargs in the EnhancedASLNet constructor.
+        # The constructor is robust enough to pick what it needs.
         model = EnhancedASLNet(
             input_size=self.base_nn_input_size,
-            **filtered_arch_config
+            **self.nn_model_arch_config
         )
         try:
             model.load_state_dict(torch.load(model_path, map_location=torch.device('cpu')))
@@ -258,7 +255,7 @@ class SingleRepeatValidator:
 
         input_tensor = torch.FloatTensor(normalized_signal_input).unsqueeze(0).to(next(self.model.parameters()).device)
         with torch.no_grad():
-            cbf_pred_norm, att_pred_norm, cbf_log_var_norm, att_log_var_norm = self.model(input_tensor)
+            cbf_pred_norm, att_pred_norm, cbf_log_var_norm, att_log_var_norm, _, _ = self.model(input_tensor)
         
         # De-normalize predictions
         cbf_pred_denorm, att_pred_denorm, cbf_std_denorm, att_std_denorm = denormalize_predictions(

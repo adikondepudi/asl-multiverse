@@ -114,18 +114,11 @@ class ComprehensiveComparison:
         self.results_list = []
 
     def _load_nn_model(self, model_path: str) -> torch.nn.Module:
-        model_params_to_use = {}
-        if self.nn_model_arch_config:
-            model_param_keys = inspect.signature(EnhancedASLNet).parameters.keys()
-            filtered_arch_config = {
-                key: self.nn_model_arch_config[key]
-                for key in self.nn_model_arch_config if key in model_param_keys
-            }
-            model_params_to_use = filtered_arch_config
-        else: 
+        model_params_to_use = self.nn_model_arch_config if self.nn_model_arch_config else {}
+        if not self.nn_model_arch_config:
             logger.warning("Loading NN model using default parameters as nn_model_arch_config not provided.")
-            model_params_to_use = {}
-        
+
+        # The constructor is designed to handle extra kwargs, so we can pass the whole config.
         model = EnhancedASLNet(input_size=self.base_nn_input_size, **model_params_to_use)
         model.load_state_dict(torch.load(model_path, map_location=torch.device('cpu')))
         model.eval()
@@ -227,7 +220,8 @@ class ComprehensiveComparison:
 
         input_tensor = torch.FloatTensor(normalized_nn_input_arr_eval)
         start_time = time.time()
-        with torch.no_grad(): cbf_pred_norm, att_pred_norm, cbf_log_var_norm, att_log_var_norm = self.nn_model(input_tensor)
+        with torch.no_grad():
+            cbf_pred_norm, att_pred_norm, cbf_log_var_norm, att_log_var_norm, _, _ = self.nn_model(input_tensor)
         inference_time_total = time.time() - start_time
         
         cbf_est, att_est, cbf_unc_std, att_unc_std = denormalize_predictions(

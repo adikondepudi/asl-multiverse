@@ -346,7 +346,8 @@ class EnhancedASLTrainer:
             'log_var_reg_lambda': model_config.get('loss_log_var_reg_lambda', 0.0),
             'focal_gamma': model_config.get('focal_gamma', 1.5),
             'pinn_weight': model_config.get('loss_pinn_weight_stage1', model_config.get('loss_pinn_weight', 0.0)), # Use stage1 as default
-            'model_params': model_config # NEW: Pass all model params for physics constants
+            'model_params': model_config, # NEW: Pass all model params for physics constants
+            'pre_estimator_loss_weight': model_config.get('pre_estimator_loss_weight', 0.5) # Add new param
         }
         self.custom_loss_fn = CustomLoss(**loss_params)
 
@@ -452,7 +453,10 @@ class EnhancedASLTrainer:
         logger.info(f"Total processed samples for training/validation: {X_all_processed.shape[0]}")
         
         X_train, y_train_norm = X_all_processed[train_idx_raw], y_all_normalized[train_idx_raw]
+        y_train_raw_split = y_all_raw[train_idx_raw]
         X_val, y_val_norm = X_all_processed[val_idx_raw], y_all_normalized[val_idx_raw]
+        y_val_raw_split = y_all_raw[val_idx_raw]
+
 
         logger.info(f"Training samples: {X_train.shape[0]}, Validation samples: {X_val.shape[0]}")
         if X_train.shape[0] == 0: raise ValueError("Training set is empty after split and normalization.")
@@ -478,21 +482,21 @@ class EnhancedASLTrainer:
         val_aug_config_minimal = {**default_aug_config, 'noise_config': {}, 'dropout_range': None, 'spike_config': None, 'drift_config': None}
 
         for i, (att_min, att_max) in enumerate(curriculum_stages_def):
-            train_mask = (y_train_raw[:, 1] >= att_min) & (y_train_raw[:, 1] < att_max)
+            train_mask = (y_train_raw_split[:, 1] >= att_min) & (y_train_raw_split[:, 1] < att_max)
             stage_X_train, stage_y_train_norm = X_train[train_mask], y_train_norm[train_mask]
             
             if len(stage_X_train) == 0:
                 logger.warning(f"Curriculum train stage {i+1} has no samples. Skipping.")
                 train_loaders.append(DataLoader(EnhancedASLDataset(np.array([]), np.array([])), batch_size=self.batch_size))
             else:
-                att_weights = np.exp(-np.clip(y_train_raw[train_mask, 1], 100.0, None) / 2000.0)
+                att_weights = np.atleast_1d(np.exp(-np.clip(y_train_raw_split[train_mask, 1], 100.0, None) / 2000.0))
                 sampler = WeightedRandomSampler(att_weights, len(att_weights), replacement=True) if np.sum(att_weights) > 1e-9 else None
                 dataset = EnhancedASLDataset(stage_X_train, stage_y_train_norm, **default_aug_config)
                 loader = DataLoader(dataset, batch_size=self.batch_size, sampler=sampler, num_workers=max(0,num_workers-1), pin_memory=True, drop_last=(len(stage_X_train) > self.batch_size))
                 train_loaders.append(loader)
 
             if X_val.shape[0] > 0:
-                val_mask = (y_val_raw[:, 1] >= att_min) & (y_val_raw[:, 1] < att_max)
+                val_mask = (y_val_raw_split[:, 1] >= att_min) & (y_val_raw_split[:, 1] < att_max)
                 stage_X_val, stage_y_val_norm = X_val[val_mask], y_val_norm[val_mask]
                 val_dataset = EnhancedASLDataset(stage_X_val, stage_y_val_norm, **val_aug_config_minimal)
                 val_loaders.append(DataLoader(val_dataset, batch_size=self.batch_size, num_workers=max(0,num_workers-1), pin_memory=True))
@@ -652,9 +656,13 @@ class EnhancedASLTrainer:
         for signals, params_norm in train_loader:
             signals, params_norm = signals.to(self.device), params_norm.to(self.device)
             optimizer.zero_grad()
-            cbf_mean_norm, att_mean_norm, cbf_log_var, att_log_var = model(signals)
+            
+            # Unpack all model outputs, including the rough estimates
+            outputs = model(signals)
+            cbf_mean_norm, att_mean_norm, cbf_log_var, att_log_var, cbf_rough, att_rough = outputs
+
             loss = self.custom_loss_fn(signals, cbf_mean_norm, att_mean_norm, params_norm[:, 0:1], params_norm[:, 1:2], 
-                                       cbf_log_var, att_log_var, current_global_epoch)
+                                       cbf_log_var, att_log_var, cbf_rough, att_rough, current_global_epoch)
             loss.backward()
             torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
             optimizer.step()
@@ -672,9 +680,11 @@ class EnhancedASLTrainer:
         with torch.no_grad():
             for signals, params_norm in val_loader:
                 signals, params_norm = signals.to(self.device), params_norm.to(self.device)
-                cbf_mean_norm, att_mean_norm, cbf_log_var, att_log_var = model(signals)
+                outputs = model(signals)
+                cbf_mean_norm, att_mean_norm, cbf_log_var, att_log_var, cbf_rough, att_rough = outputs
+
                 loss = self.custom_loss_fn(signals, cbf_mean_norm, att_mean_norm, params_norm[:, 0:1], params_norm[:, 1:2], 
-                                           cbf_log_var, att_log_var, current_global_epoch)
+                                           cbf_log_var, att_log_var, cbf_rough, att_rough, current_global_epoch)
                 total_loss_val += loss.item()
                 all_cbf_preds_norm.append(cbf_mean_norm.cpu()); all_att_preds_norm.append(att_mean_norm.cpu())
                 all_cbf_trues_norm.append(params_norm[:, 0:1].cpu()); all_att_trues_norm.append(params_norm[:, 1:2].cpu())
@@ -721,7 +731,8 @@ class EnhancedASLTrainer:
         for model in self.models:
             model.eval()
             with torch.no_grad():
-                cbf_mean_norm, att_mean_norm, cbf_log_var, att_log_var = model(signals_tensor)
+                # We only need the final predictions here, so we slice the model output
+                cbf_mean_norm, att_mean_norm, cbf_log_var, att_log_var, _, _ = model(signals_tensor)
                 all_cbf_means_norm_list.append(cbf_mean_norm.cpu().numpy())
                 all_att_means_norm_list.append(att_mean_norm.cpu().numpy())
                 all_cbf_aleatoric_vars_list.append(torch.exp(cbf_log_var).cpu().numpy())

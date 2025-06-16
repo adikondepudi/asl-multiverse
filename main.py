@@ -45,14 +45,16 @@ class ResearchConfig:
     batch_size: int = 256
     val_split: float = 0.2
     
-    # NEW: Two-stage curriculum parameters
-    n_subjects_stage1: int = 5000
-    n_subjects_stage2: int = 10000
+    # Curriculum parameters
+    n_subjects_stage1: int = 10000 # Full-spectrum dataset now
+    n_subjects_stage2: int = 5000  # High-quality dataset now
     n_epochs_stage1: int = 140
     n_epochs_stage2: int = 60
     loss_pinn_weight_stage1: float = 1.0
     loss_pinn_weight_stage2: float = 0.1
     learning_rate_stage2: float = 0.0002
+    pre_estimator_loss_weight_stage1: float = 1.0 # Strong weight for foundation
+    pre_estimator_loss_weight_stage2: float = 0.0 # Turn off for fine-tuning
     
     n_ensembles: int = 5
     dropout_rate: float = 0.1
@@ -236,12 +238,11 @@ class HyperparameterOptimizer:
         precomputed_hpo_data['signals'] = np.concatenate([precomputed_hpo_data['signals'], engineered_features_hpo], axis=1)
         base_nn_input_size = precomputed_hpo_data['signals'].shape[1]
 
-        trial_model_config = {k: v for k, v in asdict(config_obj).items() if hasattr(EnhancedASLNet, k) or hasattr(CustomLoss, k) or k in ['pld_values', 'T1_artery', 'T_tau', 'alpha_PCASL', 'alpha_VSASL']}
-        
+        trial_model_config = asdict(config_obj)
+
         def create_hpo_model(**kwargs):
-            model_param_keys = inspect.signature(EnhancedASLNet).parameters.keys()
-            filtered_kwargs = {k: v for k, v in kwargs.items() if k in model_param_keys}
-            return EnhancedASLNet(input_size=base_nn_input_size, **filtered_kwargs)
+            # No filtering needed here. EnhancedASLNet will pick what it needs from kwargs.
+            return EnhancedASLNet(input_size=base_nn_input_size, **kwargs)
 
         trainer_obj = EnhancedASLTrainer(model_config=trial_model_config, model_class=create_hpo_model, input_size=base_nn_input_size, learning_rate=config_obj.learning_rate, weight_decay=config_obj.weight_decay, batch_size=config_obj.batch_size, n_ensembles=config_obj.n_ensembles, device=device, n_plds_for_model=num_plds, m0_input_feature_model=config_obj.m0_input_feature_model)
         train_loaders_list, val_loaders_list, _ = trainer_obj.prepare_curriculum_data(simulator_obj, plds=plds_numpy_arr, precomputed_dataset=precomputed_hpo_data, curriculum_att_ranges_config=config_obj.att_ranges_config, n_epochs_for_scheduler=config_obj.optuna_n_epochs)
@@ -356,7 +357,8 @@ class ClinicalValidator:
         for model_item in models:
             model_item.eval()
             with torch.no_grad():
-                cbf_m_norm, att_m_norm, cbf_lv_norm, att_lv_norm = model_item(input_tensor)
+                # Correctly unpack the 6 return values, ignoring the last two for prediction
+                cbf_m_norm, att_m_norm, cbf_lv_norm, att_lv_norm, _, _ = model_item(input_tensor)
                 cbf_means_norm_list.append(cbf_m_norm.item()); att_means_norm_list.append(att_m_norm.item())
                 cbf_aleatoric_vars_norm_list.append(torch.exp(cbf_lv_norm).item()); att_aleatoric_vars_norm_list.append(torch.exp(att_lv_norm).item())
         ensemble_cbf_m_norm = np.mean(cbf_means_norm_list) if cbf_means_norm_list else np.nan; ensemble_att_m_norm = np.mean(att_means_norm_list) if att_means_norm_list else np.nan
@@ -431,8 +433,6 @@ class PublicationGenerator:
 def run_comprehensive_asl_research(config: ResearchConfig, output_parent_dir: Optional[str] = None) -> Dict:
     timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
 
-    # If no output directory is provided, create a default one using the timestamp.
-    # Otherwise, use the specified one.
     if output_parent_dir is None:
         output_dir_base = 'comprehensive_results'
         output_path = Path(output_dir_base) / f'asl_research_{timestamp}'
@@ -441,13 +441,12 @@ def run_comprehensive_asl_research(config: ResearchConfig, output_parent_dir: Op
 
     output_path.mkdir(parents=True, exist_ok=True)
     
-    # The wandb run name will now always have a valid timestamp
     wandb_run = wandb.init(project=config.wandb_project, entity=config.wandb_entity, config=asdict(config), name=f"run_{timestamp}", job_type="research_pipeline")
     if wandb_run: script_logger.info(f"W&B Run URL: {wandb_run.url}")
 
     monitor = PerformanceMonitor(config, output_path) 
     monitor.log_progress("SETUP", f"Initializing. Output: {output_path}")
-    # ... rest of the function (no other changes needed)
+
     config_save_path = output_path / 'research_config.json'
     with open(config_save_path, 'w') as f: json.dump(asdict(config), f, indent=2)
     if wandb_run: wandb.save(str(config_save_path))
@@ -472,52 +471,6 @@ def run_comprehensive_asl_research(config: ResearchConfig, output_parent_dir: Op
     monitor.log_progress("PHASE2", "Starting two-stage ensemble training")
     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu'); monitor.log_progress("PHASE2", f"Using device: {device}")
     
-    # --- STAGE 1: Foundational Pre-training Dataset ---
-    monitor.log_progress("PHASE2", "Generating Dataset A (Foundational: healthy, high-SNR)")
-    dataset_A = simulator.generate_balanced_dataset(plds=plds_np, total_subjects=config.n_subjects_stage1, noise_levels=[10.0, 15.0])
-    
-    # --- STAGE 2: Full-Spectrum Fine-tuning Dataset ---
-    monitor.log_progress("PHASE2", "Generating Dataset B (Full-Spectrum: all conditions, all noises)")
-    dataset_B = simulator.generate_balanced_dataset(plds=plds_np, total_subjects=config.n_subjects_stage2, noise_levels=config.training_noise_levels)
-
-    # --- Feature Engineering for both datasets ---
-    monitor.log_progress("PHASE2", "Applying signal feature engineering")
-    engineered_features_A = engineer_signal_features(dataset_A['signals'], num_plds)
-    dataset_A['signals'] = np.concatenate([dataset_A['signals'], engineered_features_A], axis=1)
-    engineered_features_B = engineer_signal_features(dataset_B['signals'], num_plds)
-    dataset_B['signals'] = np.concatenate([dataset_B['signals'], engineered_features_B], axis=1)
-
-    # --- Normalization based on Full-Spectrum dataset ---
-    monitor.log_progress("PHASE2", "Calculating normalization statistics from full-spectrum data")
-    X_B_raw, y_B_raw = dataset_B['signals'], dataset_B['parameters']
-    n_val_B = int(X_B_raw.shape[0] * config.val_split)
-    perm_B = np.random.permutation(X_B_raw.shape[0])
-    train_idx_B, val_idx_B = perm_B[:-n_val_B], perm_B[-n_val_B:]
-    X_train_B_raw, y_train_B_raw = X_B_raw[train_idx_B], y_B_raw[train_idx_B]
-
-    num_raw_signal_features = num_plds * 2
-    pcasl_train_signals = X_train_B_raw[:, :num_plds]
-    vsasl_train_signals = X_train_B_raw[:, num_plds:num_raw_signal_features]
-    
-    # Calculate amplitude from the raw signal portion of the training data
-    raw_train_signals_for_amp = X_train_B_raw[:, :num_raw_signal_features]
-    amplitudes = np.linalg.norm(raw_train_signals_for_amp, axis=1)
-    
-    norm_stats_final = {
-        'pcasl_mean': np.mean(pcasl_train_signals, axis=0), 'pcasl_std': np.std(pcasl_train_signals, axis=0),
-        'vsasl_mean': np.mean(vsasl_train_signals, axis=0), 'vsasl_std': np.std(vsasl_train_signals, axis=0),
-        'y_mean_cbf': np.mean(y_train_B_raw[:, 0]), 'y_std_cbf': np.std(y_train_B_raw[:, 0]),
-        'y_mean_att': np.mean(y_train_B_raw[:, 1]), 'y_std_att': np.std(y_train_B_raw[:, 1]),
-        'amplitude_mean': np.mean(amplitudes), 'amplitude_std': np.std(amplitudes)
-    }
-    
-    # Defensively handle potential zero standard deviation
-    for key in ['pcasl_std', 'vsasl_std']:
-        norm_stats_final[key][norm_stats_final[key] < 1e-6] = 1.0
-    for key in ['y_std_cbf', 'y_std_att', 'amplitude_std']:
-        if norm_stats_final[key] < 1e-6:
-            norm_stats_final[key] = 1.0
-
     # --- Function to create dataloaders for a given dataset ---
     def create_dataloaders(dataset_dict, norm_stats, val_split, batch_size):
         X_all, y_all = dataset_dict['signals'], dataset_dict['parameters']
@@ -532,38 +485,78 @@ def run_comprehensive_asl_research(config: ResearchConfig, output_parent_dir: Op
         X_train, y_train_norm, y_train_raw = X_all_norm[train_idx], y_all_norm[train_idx], y_all[train_idx]
         X_val, y_val_norm = X_all_norm[val_idx], y_all_norm[val_idx]
         
-        train_att_weights = np.exp(-np.clip(y_train_raw[:, 1], 100.0, None) / 2000.0)
-        train_sampler = WeightedRandomSampler(train_att_weights, len(train_att_weights), replacement=True)
+        att_weights = np.atleast_1d(np.exp(-np.clip(y_train_raw[:, 1], 100.0, None) / 2000.0))
+        train_sampler = WeightedRandomSampler(att_weights, len(att_weights), replacement=True)
         
         train_dataset = EnhancedASLDataset(X_train, y_train_norm)
         drop_last_flag = len(X_train) > batch_size
         train_loader = DataLoader(train_dataset, batch_size=batch_size, sampler=train_sampler, drop_last=drop_last_flag)
         val_loader = DataLoader(EnhancedASLDataset(X_val, y_val_norm), batch_size=batch_size) if len(X_val) > 0 else None
         return train_loader, val_loader
+
+    # --- Re-imagined Curriculum ---
+    # Stage 1: Foundational Training on FULL dataset
+    monitor.log_progress("PHASE2", "Generating Dataset B (Full-Spectrum) for Foundational Training")
+    dataset_B = simulator.generate_balanced_dataset(plds=plds_np, total_subjects=config.n_subjects_stage1, noise_levels=config.training_noise_levels)
+
+    # Stage 2: Fine-tuning on HIGH-QUALITY dataset
+    monitor.log_progress("PHASE2", "Generating Dataset A (High-Quality) for Fine-Tuning")
+    dataset_A = simulator.generate_balanced_dataset(plds=plds_np, total_subjects=config.n_subjects_stage2, noise_levels=[10.0, 15.0])
+
+    # --- Feature Engineering for both datasets ---
+    monitor.log_progress("PHASE2", "Applying signal feature engineering")
+    engineered_features_B = engineer_signal_features(dataset_B['signals'], num_plds)
+    dataset_B['signals'] = np.concatenate([dataset_B['signals'], engineered_features_B], axis=1)
+    engineered_features_A = engineer_signal_features(dataset_A['signals'], num_plds)
+    dataset_A['signals'] = np.concatenate([dataset_A['signals'], engineered_features_A], axis=1)
     
+    # --- Normalization based on Full-Spectrum dataset ---
+    monitor.log_progress("PHASE2", "Calculating normalization statistics from full-spectrum data (Dataset B)")
+    X_B_raw, y_B_raw = dataset_B['signals'], dataset_B['parameters']
+    n_val_B = int(X_B_raw.shape[0] * config.val_split)
+    perm_B = np.random.permutation(X_B_raw.shape[0])
+    train_idx_B, _ = perm_B[:-n_val_B], perm_B[-n_val_B:] # Use only train split for norm stats
+    X_train_B_raw, y_train_B_raw = X_B_raw[train_idx_B], y_B_raw[train_idx_B]
+
+    num_raw_signal_features = num_plds * 2
+    pcasl_train_signals = X_train_B_raw[:, :num_plds]
+    vsasl_train_signals = X_train_B_raw[:, num_plds:num_raw_signal_features]
+    raw_train_signals_for_amp = X_train_B_raw[:, :num_raw_signal_features]
+    amplitudes = np.linalg.norm(raw_train_signals_for_amp, axis=1)
+    
+    norm_stats_final = {
+        'pcasl_mean': np.mean(pcasl_train_signals, axis=0), 'pcasl_std': np.std(pcasl_train_signals, axis=0),
+        'vsasl_mean': np.mean(vsasl_train_signals, axis=0), 'vsasl_std': np.std(vsasl_train_signals, axis=0),
+        'y_mean_cbf': np.mean(y_train_B_raw[:, 0]), 'y_std_cbf': np.std(y_train_B_raw[:, 0]),
+        'y_mean_att': np.mean(y_train_B_raw[:, 1]), 'y_std_att': np.std(y_train_B_raw[:, 1]),
+        'amplitude_mean': np.mean(amplitudes), 'amplitude_std': np.std(amplitudes)
+    }
+    
+    for key in ['pcasl_std', 'vsasl_std', 'y_std_cbf', 'y_std_att', 'amplitude_std']:
+        if isinstance(norm_stats_final[key], np.ndarray):
+            norm_stats_final[key][norm_stats_final[key] < 1e-6] = 1.0
+        elif norm_stats_final[key] < 1e-6:
+            norm_stats_final[key] = 1.0
+
+    # --- Create DataLoaders ---
     monitor.log_progress("PHASE2", "Creating DataLoaders for both training stages")
-    train_loader_A, val_loader_A = create_dataloaders(dataset_A, norm_stats_final, config.val_split, config.batch_size)
     train_loader_B, val_loader_B = create_dataloaders(dataset_B, norm_stats_final, config.val_split, config.batch_size)
+    train_loader_A, val_loader_A = create_dataloaders(dataset_A, norm_stats_final, config.val_split, config.batch_size)
     
-    base_input_size_nn = dataset_A['signals'].shape[1]
-    model_creation_config = {k: v for k, v in asdict(config).items()}
+    base_input_size_nn = dataset_B['signals'].shape[1]
+    model_creation_config = asdict(config)
 
     def create_main_model_closure(**kwargs):
-        model_param_keys = inspect.signature(EnhancedASLNet).parameters.keys()
-        filtered_kwargs = {k: v for k, v in kwargs.items() if k in model_param_keys}
-        return EnhancedASLNet(input_size=base_input_size_nn, **filtered_kwargs)
+        return EnhancedASLNet(input_size=base_input_size_nn, **kwargs)
 
     trainer = EnhancedASLTrainer(model_config=model_creation_config, model_class=create_main_model_closure, input_size=base_input_size_nn, learning_rate=config.learning_rate, weight_decay=config.weight_decay, batch_size=config.batch_size, n_ensembles=config.n_ensembles, device=device, n_plds_for_model=num_plds, m0_input_feature_model=False)
 
     trainer.norm_stats = norm_stats_final
     trainer.custom_loss_fn.norm_stats = norm_stats_final
-
-    # Set normalization statistics buffers on each model in the ensemble
-    for model in trainer.models:
-        model.set_norm_stats(norm_stats_final)
+    for model in trainer.models: model.set_norm_stats(norm_stats_final)
     monitor.log_progress("PHASE2", "Normalization stats buffers set on all ensemble models.")
     
-    total_steps = len(train_loader_A) * config.n_epochs_stage1 + len(train_loader_B) * config.n_epochs_stage2
+    total_steps = len(train_loader_B) * config.n_epochs_stage1 + len(train_loader_A) * config.n_epochs_stage2
     for opt in trainer.optimizers:
         trainer.schedulers.append(torch.optim.lr_scheduler.OneCycleLR(opt, max_lr=config.learning_rate, total_steps=total_steps))
     
@@ -572,19 +565,29 @@ def run_comprehensive_asl_research(config: ResearchConfig, output_parent_dir: Op
         serializable_norm_stats = {k: (v.tolist() if isinstance(v, np.ndarray) else v) for k, v in norm_stats_final.items()}
         with open(norm_stats_path, 'w') as f: json.dump(serializable_norm_stats, f, indent=2)
         if wandb_run: wandb.save(str(norm_stats_path))
-    else: monitor.log_progress("PHASE2", "No normalization stats generated.", logging.WARNING)
 
-    monitor.log_progress("PHASE2", f"Training {config.n_ensembles}-model ensemble using 2-stage curriculum...")
+    monitor.log_progress("PHASE2", f"Training {config.n_ensembles}-model ensemble using re-imagined 2-stage curriculum...")
     training_start_time = time.time()
+    # Execute new curriculum: Train on hard data (B), then fine-tune on easy data (A)
+    # Also update the loss config for each stage
+    config.pre_estimator_loss_weight = config.pre_estimator_loss_weight_stage1
     training_histories_dict = trainer.train_ensemble(
-        train_loaders=[train_loader_A, train_loader_B], 
-        val_loaders=[val_loader_A, val_loader_B], 
-        epoch_schedule=[config.n_epochs_stage1, config.n_epochs_stage2]
+        train_loaders=[train_loader_B], 
+        val_loaders=[val_loader_B], 
+        epoch_schedule=[config.n_epochs_stage1]
     )
+    config.pre_estimator_loss_weight = config.pre_estimator_loss_weight_stage2
+    training_histories_dict_2 = trainer.train_ensemble(
+        train_loaders=[train_loader_A], 
+        val_loaders=[val_loader_A], 
+        epoch_schedule=[config.n_epochs_stage2]
+    )
+    
     training_duration_hours = (time.time() - training_start_time) / 3600
     monitor.log_progress("PHASE2", f"Training completed in {training_duration_hours:.2f} hours.")
     if wandb_run: wandb.summary['training_duration_hours'] = training_duration_hours
 
+    # ... rest of the pipeline remains the same
     monitor.log_progress("PHASE3", "Starting clinical validation")
     clinical_validator = ClinicalValidator(config, monitor, norm_stats=norm_stats_final)
     clinical_validation_results = clinical_validator.validate_clinical_scenarios(trainer.models if trainer.models else [])
