@@ -20,6 +20,31 @@ class ResidualBlock(nn.Module):
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         return F.relu(x + self.layers(x))
 
+class CrossAttentionBlock(nn.Module):
+    """
+    A cross-attention block that allows a query sequence to attend to a key-value sequence.
+    Includes a residual connection and layer normalization.
+    """
+    def __init__(self, d_model: int, nhead: int, dropout: float = 0.1):
+        super().__init__()
+        self.cross_attn = nn.MultiheadAttention(d_model, nhead, dropout=dropout, batch_first=True)
+        self.norm = nn.LayerNorm(d_model)
+        self.dropout = nn.Dropout(dropout)
+
+    def forward(self, query: torch.Tensor, key_value: torch.Tensor) -> torch.Tensor:
+        """
+        Args:
+            query: The sequence to be updated (e.g., PCASL features).
+            key_value: The sequence to attend to (e.g., VSASL features).
+        Returns:
+            The updated query sequence after cross-attention.
+        """
+        attn_output, _ = self.cross_attn(query=query, key=key_value, value=key_value)
+        # Residual connection and normalization
+        out = query + self.dropout(attn_output)
+        out = self.norm(out)
+        return out
+
 class UncertaintyHead(nn.Module):
     """Uncertainty estimation head with bounded log_var output."""
     def __init__(self, input_dim: int, output_dim: int, log_var_min: float = -7.0, log_var_max: float = 7.0):
@@ -42,6 +67,7 @@ class EnhancedASLNet(nn.Module):
     Disentangled two-stream architecture for ASL parameter estimation.
     - ATT Stream: Processes signal *shape* using transformers to capture timing.
     - CBF Stream: Processes signal *amplitude* and engineered features using a simple MLP.
+    - Cross-Attention: Fuses information between the PCASL and VSASL streams.
     """
     def __init__(self, 
                  input_size: int,
@@ -91,6 +117,10 @@ class EnhancedASLNet(nn.Module):
         self.vsasl_input_proj_att = nn.Linear(1, self.att_d_model)
         encoder_vsasl_att = nn.TransformerEncoderLayer(self.att_d_model, transformer_nhead, self.att_d_model * 2, dropout_rate, batch_first=True)
         self.vsasl_transformer_att = nn.TransformerEncoder(encoder_vsasl_att, transformer_nlayers)
+
+        # NEW: Cross-Attention layers to fuse information between PCASL and VSASL streams
+        self.pcasl_to_vsasl_cross_attn = CrossAttentionBlock(self.att_d_model, transformer_nhead, dropout_rate)
+        self.vsasl_to_pcasl_cross_attn = CrossAttentionBlock(self.att_d_model, transformer_nhead, dropout_rate)
 
         # MLP for ATT stream after transformer feature fusion
         att_mlp_input_size = self.att_d_model * 2
@@ -161,14 +191,20 @@ class EnhancedASLNet(nn.Module):
         cbf_mean, cbf_log_var = self.cbf_uncertainty(cbf_final_features)
 
         # --- 5. ATT Stream Processing ---
-        # PCASL branch
+        # PCASL branch (self-attention)
         pcasl_in_att = self.pcasl_input_proj_att(pcasl_shape_seq.unsqueeze(-1))
-        pcasl_out_att = self.pcasl_transformer_att(pcasl_in_att)
-        pcasl_features_att = torch.mean(pcasl_out_att, dim=1) # Global average pooling
+        pcasl_self_attn_out = self.pcasl_transformer_att(pcasl_in_att)
 
-        # VSASL branch
+        # VSASL branch (self-attention)
         vsasl_in_att = self.vsasl_input_proj_att(vsasl_shape_seq.unsqueeze(-1))
-        vsasl_out_att = self.vsasl_transformer_att(vsasl_in_att)
+        vsasl_self_attn_out = self.vsasl_transformer_att(vsasl_in_att)
+
+        # Cross-attention to allow streams to inform each other
+        pcasl_out_att = self.pcasl_to_vsasl_cross_attn(query=pcasl_self_attn_out, key_value=vsasl_self_attn_out)
+        vsasl_out_att = self.vsasl_to_pcasl_cross_attn(query=vsasl_self_attn_out, key_value=pcasl_self_attn_out)
+
+        # Global average pooling on the cross-attended features
+        pcasl_features_att = torch.mean(pcasl_out_att, dim=1)
         vsasl_features_att = torch.mean(vsasl_out_att, dim=1)
 
         # Fuse ATT transformer features and process with MLP
