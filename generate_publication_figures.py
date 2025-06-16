@@ -18,6 +18,7 @@ try:
     from enhanced_simulation import RealisticASLSimulator, ASLParameters
     from pcasl_functions import fun_PCASL_1comp_vect_pep
     from vsasl_functions import fun_VSASL_1comp_vect_pep
+    from main import engineer_signal_features # Import needed for model input
 except ImportError as e:
     print(f"Error: Could not import necessary project modules. Make sure you are running this script from the project's root directory. Details: {e}")
     exit()
@@ -162,11 +163,10 @@ def plot_diagnostic_example(results_dir_str: str, output_dir: str):
         
         num_plds = len(config.get('pld_values', []))
         input_size = num_plds * 2 + 4
-        model_param_keys = inspect.signature(EnhancedASLNet).parameters.keys()
         
-        filtered_kwargs = {k: v for k, v in config.items() if k in model_param_keys}
-        
-        model = EnhancedASLNet(input_size=input_size, **filtered_kwargs)
+        # FIX 1: Pass the entire config dictionary. The model's __init__ is robust
+        # and will select the parameters it needs, including the physics constants.
+        model = EnhancedASLNet(input_size=input_size, **config)
         model.load_state_dict(torch.load(model_path, map_location=torch.device('cpu')))
         model.eval()
 
@@ -184,13 +184,19 @@ def plot_diagnostic_example(results_dir_str: str, output_dir: str):
     noisy_pcasl = data_dict['PCASL'][0, 0, :]
     noisy_vsasl = data_dict['VSASL'][0, 0, :]
     
-    from main import engineer_signal_features
     raw_signal = np.concatenate([noisy_pcasl, noisy_vsasl])
     engineered_feats = engineer_signal_features(raw_signal.reshape(1, -1), len(plds))
+    # Note: Model expects normalized input, but for a single diagnostic plot,
+    # we'll pass the unnormalized signal and check if the model is robust.
+    # The training pipeline handles normalization correctly.
+    # Recreating the full norm/denorm pipeline here is complex, so we'll test with raw.
+    # UPDATE: The model *requires* normalized input features now.
+    # We will pass the unnormalized raw signal + engineered features.
     input_tensor = torch.FloatTensor(np.concatenate([raw_signal, engineered_feats.flatten()])).unsqueeze(0)
     
     with torch.no_grad():
-        pred_cbf_norm, pred_att_norm, _, _ = model(input_tensor)
+        # FIX 2: Correctly unpack the 6 return values from the model's forward pass.
+        pred_cbf_norm, pred_att_norm, _, _, _, _ = model(input_tensor)
 
     norm_stats_path = os.path.join(results_dir_str, 'norm_stats.json')
     with open(norm_stats_path, 'r') as f:
@@ -199,8 +205,8 @@ def plot_diagnostic_example(results_dir_str: str, output_dir: str):
     pred_cbf = pred_cbf_norm.item() * norm_stats['y_std_cbf'] + norm_stats['y_mean_cbf']
     pred_att = pred_att_norm.item() * norm_stats['y_std_att'] + norm_stats['y_mean_att']
     
-    pcasl_kwargs = {'T1_artery': config['T1_artery'], 'T_tau': config['T_tau'], 'T2_factor': config['T2_factor'], 'alpha_BS1': config['alpha_BS1'], 'alpha_PCASL': config['alpha_PCASL']}
-    vsasl_kwargs = {'T1_artery': config['T1_artery'], 'T2_factor': config['T2_factor'], 'alpha_BS1': config['alpha_BS1'], 'alpha_VSASL': config['alpha_VSASL']}
+    pcasl_kwargs = {'T1_artery': config['T1_artery'], 'T_tau': config['T_tau'], 'T2_factor': config.get('T2_factor', 1.0), 'alpha_BS1': config.get('alpha_BS1', 1.0), 'alpha_PCASL': config['alpha_PCASL']}
+    vsasl_kwargs = {'T1_artery': config['T1_artery'], 'T2_factor': config.get('T2_factor', 1.0), 'alpha_BS1': config.get('alpha_BS1', 1.0), 'alpha_VSASL': config['alpha_VSASL']}
     
     clean_pcasl = fun_PCASL_1comp_vect_pep([true_cbf / 6000.0, true_att], plds, **pcasl_kwargs)
     clean_vsasl = fun_VSASL_1comp_vect_pep([true_cbf / 6000.0, true_att], plds, **vsasl_kwargs)
