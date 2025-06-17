@@ -7,18 +7,30 @@ set -e # Exit immediately if a command exits with a non-zero status.
 # 1. Define the PINN weight PAIRS for [Stage 1, Stage 2] you want to test.
 #    Use a "S1_WEIGHT,S2_WEIGHT" format.
 #    "0.0,0.0" is the crucial "no PINN" baseline.
+# In run_ablation.sh
+
+# This set provides a comprehensive exploration of the PINN loss parameter space.
 ABLATION_PAIRS=(
-    "10.0,1.0"      # Current
-    "1.0,0.1"       # Solid physics foundation followed by gentle fine-tuning
-    "0.1,0.01"      # Data-Centric Approach
-    "10.0,0.0"      # Decoupled Learning
-    "0.1,0.1"       # Consistent Gentle Nudge
-    "0.0,0.0"       # Essential Scientific Control
-    "0.1,1.0"       # Boundary/Sanity Check
+    # --- From the First Refined Search ---
+    "1.0,0.05"      # Refining the Winner (gentler S2)
+    "0.5,0.1"       # Splitting the Difference (interpolating S1)
+    "1.0,0.5"       # Stronger Fine-Tuning (stronger S2)
+    "0.1,0.0"       # Physics Foundation Only (no S2)
+    "2.0,0.1"       # Exploring the Upper Bound (stronger S1)
+
+    # --- From the Second, More Comprehensive Search ---
+    "5.0,0.1"       # Finding the Cliff (even stronger S1)
+    "1.0,1.0"       # Consistent Physics Nudge (no curriculum effect)
+    "0.1,2.0"       # Reverse Curriculum (sanity check)
+    "0.0,1.0"       # Data-First, Physics-Second (alternative philosophy)
+
+    # --- Don't forget to include the original champion and baseline in your final analysis ---
+    "1.0,0.1"       # The original champion from the first run
+    "0.0,0.0"       # The essential no-physics baseline
 )
 
 # 2. Choose your base configuration file. Use a debug config for faster testing.
-BASE_CONFIG="config/debug.yaml" # Use "config/pinn_strong.yaml" or "default.yaml" for the full run
+BASE_CONFIG="config/ablation_base.yaml" # Use "config/pinn_strong.yaml" or "default.yaml" for the full run
 
 # 3. Define a parent directory for all ablation results.
 STUDY_DIR="pinn_ablation_2D_$(date +%Y%m%d_%H%M%S)"
