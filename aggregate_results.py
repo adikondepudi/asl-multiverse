@@ -67,6 +67,9 @@ def generate_summary_heatmaps(df: pd.DataFrame, output_dir: Path):
         'att_nrmse_perc': 'ATT Accuracy (nRMSE %)'
     }
 
+    blue_cmap = sns.color_palette("light:b", as_cmap=True)
+    
+
     for metric_key, metric_title in metrics_to_plot.items():
         # Create a figure with a subplot for each ATT range
         fig, axes = plt.subplots(1, 3, figsize=(24, 7), sharey=True)
@@ -83,7 +86,7 @@ def generate_summary_heatmaps(df: pd.DataFrame, output_dir: Path):
                 values=metric_key
             )
             
-            sns.heatmap(pivot_df, ax=ax, annot=True, fmt=".1f", cmap="viridis_r", 
+            sns.heatmap(pivot_df, ax=ax, annot=True, fmt=".1f", cmap=blue_cmap, 
                         linewidths=.5, cbar_kws={'label': f'{metric_key}'})
             
             ax.set_title(f'{att_range}', fontsize=16)

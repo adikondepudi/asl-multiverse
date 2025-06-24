@@ -10,8 +10,8 @@ training:
   n_epochs_stage1: 200
   n_subjects_stage2: 10000
   n_epochs_stage2: 80
-  loss_pinn_weight_stage1: 1.0
-  loss_pinn_weight_stage2: 1.0
+  loss_pinn_weight_stage1: 2.0
+  loss_pinn_weight_stage2: 0.1
   learning_rate_stage2: 0.0002
   use_transformer_temporal_model: true
   m0_input_feature_model: false
