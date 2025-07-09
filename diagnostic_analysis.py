@@ -18,6 +18,7 @@ try:
     from main import engineer_signal_features  # We need the exact feature engineering
     from pcasl_functions import fun_PCASL_1comp_vect_pep
     from vsasl_functions import fun_VSASL_1comp_vect_pep
+    from multiverse_functions import fit_PCVSASL_misMatchPLD_vectInit_pep
 except ImportError as e:
     print(f"Error: Could not import necessary project modules. Make sure you are running this script from the project's root directory. Details: {e}")
     exit()
@@ -178,7 +179,7 @@ def analyze_healthy_adult_failure(model, config, norm_stats):
         })
 
     # Sort results to find the worst offenders
-    results.sort(key=lambda x: x['att_error'], reverse=True)
+    results.sort(key=lambda x: x['att_error'], reverse=True) # CHANGE to True to find WORST predictions
     
     print(f"\nPlotting the {min(10, len(results))} worst ATT predictions...")
     for i, res in enumerate(results[:10]):
@@ -192,17 +193,42 @@ def analyze_healthy_adult_failure(model, config, norm_stats):
         pred_pcasl = fun_PCASL_1comp_vect_pep([pred_cbf_cgs, res['pred_att']], plds, **pcasl_kwargs)
         pred_vsasl = fun_VSASL_1comp_vect_pep([pred_cbf_cgs, res['pred_att']], plds, **vsasl_kwargs)
 
+        noisy_multiverse = np.column_stack((res['noisy_pcasl'], res['noisy_vsasl']))
+        pldti = np.column_stack([plds, plds])
+        try:
+            # Fit the conventional model
+            beta_ls, _, _, _ = fit_PCVSASL_misMatchPLD_vectInit_pep(
+                pldti, noisy_multiverse, [50.0/6000.0, 1500.0], **asl_params_dict
+            )
+            ls_pred_cbf = beta_ls[0] * 6000.0
+            ls_pred_att = beta_ls[1]
+            
+            # Generate the corresponding signal curve
+            ls_pred_cbf_cgs = ls_pred_cbf / 6000.0
+            ls_pcasl = fun_PCASL_1comp_vect_pep([ls_pred_cbf_cgs, ls_pred_att], plds, **pcasl_kwargs)
+            ls_vsasl = fun_VSASL_1comp_vect_pep([ls_pred_cbf_cgs, ls_pred_att], plds, **vsasl_kwargs)
+            
+        except Exception as e:
+            # Handle cases where the conventional fit fails
+            print(f"  - Conventional LS fit failed for case #{i+1}: {e}")
+            ls_pred_cbf, ls_pred_att = np.nan, np.nan
+            ls_pcasl = np.full_like(plds, np.nan)
+            ls_vsasl = np.full_like(plds, np.nan)
+
+
         # Create the plots
-        fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(16, 6))
-        fig.suptitle(f"Case #{i+1} | ATT Error: {res['att_error']:.0f} ms\n"
-                     f"True: CBF={res['true_cbf']:.1f}, ATT={res['true_att']:.0f} | "
-                     f"Pred: CBF={res['pred_cbf']:.1f}, ATT={res['pred_att']:.0f}",
-                     fontsize=14)
+        fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(18, 7))
+        fig.suptitle(f"Case #{i+1} | ATT Error (NN vs True): {res['att_error']:.0f} ms\n"
+                     f"  True Params: CBF={res['true_cbf']:.1f}, ATT={res['true_att']:.0f}\n"
+                     f"  NN   Params: CBF={res['pred_cbf']:.1f}, ATT={res['pred_att']:.0f}\n"
+                     f"  LS   Params: CBF={ls_pred_cbf:.1f}, ATT={ls_pred_att:.0f}",
+                     fontsize=13)
         
         # PCASL Plot
         ax1.plot(plds, res['noisy_pcasl'], 'ko', label='Noisy Input')
         ax1.plot(plds, clean_pcasl, 'g-', lw=2, label='Ground Truth Signal')
         ax1.plot(plds, pred_pcasl, 'r--', lw=2, label='NN Predicted Signal')
+        ax1.plot(plds, ls_pcasl, 'm:', lw=2.5, label='LS Reconstructed Signal')
         ax1.set_title('PCASL Signal')
         ax1.set_xlabel('PLD (ms)')
         ax1.set_ylabel('Signal')
@@ -213,12 +239,13 @@ def analyze_healthy_adult_failure(model, config, norm_stats):
         ax2.plot(plds, res['noisy_vsasl'], 'ko', label='Noisy Input')
         ax2.plot(plds, clean_vsasl, 'g-', lw=2, label='Ground Truth Signal')
         ax2.plot(plds, pred_vsasl, 'r--', lw=2, label='NN Predicted Signal')
+        ax2.plot(plds, ls_vsasl, 'm:', lw=2.5, label='LS Reconstructed Signal')
         ax2.set_title('VSASL Signal')
         ax2.set_xlabel('PLD (ms)')
         ax2.legend()
         ax2.grid(True, alpha=0.5)
         
-        plt.tight_layout(rect=[0, 0, 1, 0.95])
+        plt.tight_layout(rect=[0, 0, 1, 0.88])
         plt.show()
 
 
