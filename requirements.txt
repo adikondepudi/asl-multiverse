@@ -12,3 +12,4 @@ seaborn>=0.11.2
 optuna>=2.10.0
 wandb>=0.12.0
 joblib>=1.0.0
+nibabel

@@ -9,3 +9,6 @@ __pycache__/
 /wandb/
 .DS_Store
 /pinn*/
+/Multiverse/
+/invivo_predictions/
+/invivo_preprocessed/
