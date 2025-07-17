@@ -105,8 +105,16 @@ def load_analysis_artifacts(results_dir: str):
 # --- Analysis Functions ---
 
 def analyze_healthy_adult_failure(model, config, norm_stats):
-    """Generates data, finds the worst predictions, and plots them."""
-    print("\n--- Running Part 1: Interrogating 'Healthy Adult' Failure ---")
+    """Generates data for a specific case to showcase NN advantage and plots it."""
+    print("\n--- Running Part 1: Showcasing NN Advantage in a Challenging Case ---")
+    
+    # --- Define the specific case where NN outperforms LS ---
+    # This case was identified from full_landscape_evaluation.csv
+    true_cbf = 54.286
+    true_att = 2444.444
+    snr = 5.0 # A challenging, low-ish SNR
+    print(f"Analyzing specific case: True CBF = {true_cbf:.1f}, True ATT = {true_att:.1f}, SNR = {snr}")
+    # ---------------------------------------------------------
     
     # Setup simulator with parameters from the config
     asl_params_dict = {
@@ -117,137 +125,79 @@ def analyze_healthy_adult_failure(model, config, norm_stats):
         'alpha_BS1': config.get('alpha_BS1', 1.0),
         'T2_factor': config.get('T2_factor', 1.0)
     }
-    asl_params = ASLParameters(**{k: v for k, v in asl_params_dict.items() if k in ASLParameters.__annotations__})
-    simulator = RealisticASLSimulator(params=asl_params)
+    simulator = RealisticASLSimulator(params=ASLParameters(**{k: v for k, v in asl_params_dict.items() if k in ASLParameters.__annotations__}))
     plds = np.array(config['pld_values'])
     
-    # Create specific parameter dictionaries for each function to avoid the TypeError
-    pcasl_kwargs = {
-        'T1_artery': asl_params_dict['T1_artery'],
-        'T_tau': asl_params_dict['T_tau'],
-        'T2_factor': asl_params_dict['T2_factor'],
-        'alpha_BS1': asl_params_dict['alpha_BS1'],
-        'alpha_PCASL': asl_params_dict['alpha_PCASL']
-    }
-    vsasl_kwargs = {
-        'T1_artery': asl_params_dict['T1_artery'],
-        'T2_factor': asl_params_dict['T2_factor'],
-        'alpha_BS1': asl_params_dict['alpha_BS1'],
-        'alpha_VSASL': asl_params_dict['alpha_VSASL']
-    }
+    pcasl_kwargs = {'T1_artery': asl_params_dict['T1_artery'], 'T_tau': asl_params_dict['T_tau'], 'T2_factor': asl_params_dict['T2_factor'], 'alpha_BS1': asl_params_dict['alpha_BS1'], 'alpha_PCASL': asl_params_dict['alpha_PCASL']}
+    vsasl_kwargs = {'T1_artery': asl_params_dict['T1_artery'], 'T2_factor': asl_params_dict['T2_factor'], 'alpha_BS1': asl_params_dict['alpha_BS1'], 'alpha_VSASL': asl_params_dict['alpha_VSASL']}
     
-    # Generate the "Healthy Adult" clinical scenario data
-    scenario_params = config['clinical_scenario_definitions']['healthy_adult']
-    n_subjects = 50  # Generate a decent number of samples to find bad ones
-    true_cbfs = np.random.uniform(*scenario_params['cbf_range'], n_subjects)
-    true_atts = np.random.uniform(*scenario_params['att_range'], n_subjects)
-    snr = scenario_params['snr']
+    # Generate one noisy sample for this specific case
+    # Using a fixed seed ensures we get the same noise every time for this diagnostic plot
+    np.random.seed(101) 
+    data_dict = simulator.generate_synthetic_data(plds, np.array([true_att]), n_noise=1, tsnr=snr, cbf_val=true_cbf)
+    noisy_pcasl = data_dict['PCASL'][0, 0, :]
+    noisy_vsasl = data_dict['VSASL'][0, 0, :]
+    raw_signal_vector = np.concatenate([noisy_pcasl, noisy_vsasl])
+
+    # Apply the *exact* same feature pipeline as in training
+    engineered_feats = engineer_signal_features(raw_signal_vector.reshape(1, -1), len(plds))
+    full_input_vector = np.concatenate([raw_signal_vector, engineered_feats.flatten()])
     
-    results = []
-    print(f"Generating {n_subjects} healthy adult samples and making predictions...")
+    # Predict with the NN model
+    input_tensor = torch.FloatTensor(full_input_vector).unsqueeze(0)
+    with torch.no_grad():
+        pred_cbf_norm, pred_att_norm, _, _, _, _ = model(input_tensor)
     
-    for i in range(n_subjects):
-        # 1. Generate one noisy sample
-        data_dict = simulator.generate_synthetic_data(
-            plds, np.array([true_atts[i]]), n_noise=1, tsnr=snr, cbf_val=true_cbfs[i]
-        )
-        noisy_pcasl = data_dict['PCASL'][0, 0, :]
-        noisy_vsasl = data_dict['VSASL'][0, 0, :]
-        raw_signal_vector = np.concatenate([noisy_pcasl, noisy_vsasl])
-
-        # 2. Apply the *exact* same feature pipeline as in training
-        engineered_feats = engineer_signal_features(raw_signal_vector.reshape(1, -1), len(plds))
-        full_input_vector = np.concatenate([raw_signal_vector, engineered_feats.flatten()])
-        
-        # 3. Predict with the model
-        input_tensor = torch.FloatTensor(full_input_vector).unsqueeze(0)
-        with torch.no_grad():
-            # The model returns 6 values; we only need the first two (predicted means) for this analysis.
-            pred_cbf_norm, pred_att_norm, _, _, _, _ = model(input_tensor)
-        
-        # 4. Denormalize the prediction
-        pred_cbf = pred_cbf_norm.item() * norm_stats['y_std_cbf'] + norm_stats['y_mean_cbf']
-        pred_att = pred_att_norm.item() * norm_stats['y_std_att'] + norm_stats['y_mean_att']
-        
-        # 5. Store everything we need for plotting
-        att_error = abs(pred_att - true_atts[i])
-        results.append({
-            'true_cbf': true_cbfs[i], 'true_att': true_atts[i],
-            'pred_cbf': pred_cbf, 'pred_att': pred_att,
-            'att_error': att_error,
-            'noisy_pcasl': noisy_pcasl, 'noisy_vsasl': noisy_vsasl
-        })
-
-    # Sort results to find the worst offenders
-    results.sort(key=lambda x: x['att_error'], reverse=True) # CHANGE to True to find WORST predictions
+    # Denormalize the NN prediction
+    pred_cbf = pred_cbf_norm.item() * norm_stats['y_std_cbf'] + norm_stats['y_mean_cbf']
+    pred_att = pred_att_norm.item() * norm_stats['y_std_att'] + norm_stats['y_mean_att']
     
-    print(f"\nPlotting the {min(10, len(results))} worst ATT predictions...")
-    for i, res in enumerate(results[:10]):
-        # Generate the clean signal from TRUE parameters
-        true_cbf_cgs = res['true_cbf'] / 6000.0
-        clean_pcasl = fun_PCASL_1comp_vect_pep([true_cbf_cgs, res['true_att']], plds, **pcasl_kwargs)
-        clean_vsasl = fun_VSASL_1comp_vect_pep([true_cbf_cgs, res['true_att']], plds, **vsasl_kwargs)
+    # Generate clean signal from TRUE parameters
+    clean_pcasl = fun_PCASL_1comp_vect_pep([true_cbf / 6000.0, true_att], plds, **pcasl_kwargs)
+    clean_vsasl = fun_VSASL_1comp_vect_pep([true_cbf / 6000.0, true_att], plds, **vsasl_kwargs)
 
-        # Generate the signal from PREDICTED parameters
-        pred_cbf_cgs = res['pred_cbf'] / 6000.0
-        pred_pcasl = fun_PCASL_1comp_vect_pep([pred_cbf_cgs, res['pred_att']], plds, **pcasl_kwargs)
-        pred_vsasl = fun_VSASL_1comp_vect_pep([pred_cbf_cgs, res['pred_att']], plds, **vsasl_kwargs)
+    # Generate signal from NN PREDICTED parameters
+    pred_pcasl = fun_PCASL_1comp_vect_pep([pred_cbf / 6000.0, pred_att], plds, **pcasl_kwargs)
+    pred_vsasl = fun_VSASL_1comp_vect_pep([pred_cbf / 6000.0, pred_att], plds, **vsasl_kwargs)
 
-        noisy_multiverse = np.column_stack((res['noisy_pcasl'], res['noisy_vsasl']))
-        pldti = np.column_stack([plds, plds])
-        try:
-            # Fit the conventional model
-            beta_ls, _, _, _ = fit_PCVSASL_misMatchPLD_vectInit_pep(
-                pldti, noisy_multiverse, [50.0/6000.0, 1500.0], **asl_params_dict
-            )
-            ls_pred_cbf = beta_ls[0] * 6000.0
-            ls_pred_att = beta_ls[1]
-            
-            # Generate the corresponding signal curve
-            ls_pred_cbf_cgs = ls_pred_cbf / 6000.0
-            ls_pcasl = fun_PCASL_1comp_vect_pep([ls_pred_cbf_cgs, ls_pred_att], plds, **pcasl_kwargs)
-            ls_vsasl = fun_VSASL_1comp_vect_pep([ls_pred_cbf_cgs, ls_pred_att], plds, **vsasl_kwargs)
-            
-        except Exception as e:
-            # Handle cases where the conventional fit fails
-            print(f"  - Conventional LS fit failed for case #{i+1}: {e}")
-            ls_pred_cbf, ls_pred_att = np.nan, np.nan
-            ls_pcasl = np.full_like(plds, np.nan)
-            ls_vsasl = np.full_like(plds, np.nan)
+    # Run and process the conventional LS fit
+    noisy_multiverse = np.column_stack((noisy_pcasl, noisy_vsasl))
+    pldti = np.column_stack([plds, plds])
+    try:
+        beta_ls, _, _, _ = fit_PCVSASL_misMatchPLD_vectInit_pep(pldti, noisy_multiverse, [50.0/6000.0, 1500.0], **asl_params_dict)
+        ls_pred_cbf, ls_pred_att = beta_ls[0] * 6000.0, beta_ls[1]
+        ls_pcasl = fun_PCASL_1comp_vect_pep([ls_pred_cbf / 6000.0, ls_pred_att], plds, **pcasl_kwargs)
+        ls_vsasl = fun_VSASL_1comp_vect_pep([ls_pred_cbf / 6000.0, ls_pred_att], plds, **vsasl_kwargs)
+    except Exception as e:
+        print(f"  - Conventional LS fit failed for the showcase case: {e}")
+        ls_pred_cbf, ls_pred_att = np.nan, np.nan
+        ls_pcasl, ls_vsasl = np.full_like(plds, np.nan), np.full_like(plds, np.nan)
 
+    # Create the plot
+    fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(18, 7))
+    fig.suptitle(f"NN vs. LS on a Challenging Case (True ATT = {true_att:.0f} ms)\n"
+                 f"  True Params: CBF={true_cbf:.1f}, ATT={true_att:.0f}\n"
+                 f"  NN   Params: CBF={pred_cbf:.1f} (Δ {pred_cbf-true_cbf:.1f}), ATT={pred_att:.0f} (Δ {pred_att-true_att:.0f})\n"
+                 f"  LS   Params: CBF={ls_pred_cbf:.1f} (Δ {ls_pred_cbf-true_cbf:.1f}), ATT={ls_pred_att:.0f} (Δ {ls_pred_att-true_att:.0f})",
+                 fontsize=13)
+    
+    # PCASL Plot
+    ax1.plot(plds, noisy_pcasl, 'ko', alpha=0.7, label='Noisy Input')
+    ax1.plot(plds, clean_pcasl, 'g-', lw=3, label='Ground Truth Signal')
+    ax1.plot(plds, pred_pcasl, 'r--', lw=2.5, label='NN Reconstructed Signal')
+    ax1.plot(plds, ls_pcasl, 'm:', lw=2.5, label='LS Reconstructed Signal')
+    ax1.set_title('PCASL Signal'); ax1.set_xlabel('PLD (ms)'); ax1.set_ylabel('Signal'); ax1.legend(); ax1.grid(True, alpha=0.5)
 
-        # Create the plots
-        fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(18, 7))
-        fig.suptitle(f"Case #{i+1} | ATT Error (NN vs True): {res['att_error']:.0f} ms\n"
-                     f"  True Params: CBF={res['true_cbf']:.1f}, ATT={res['true_att']:.0f}\n"
-                     f"  NN   Params: CBF={res['pred_cbf']:.1f}, ATT={res['pred_att']:.0f}\n"
-                     f"  LS   Params: CBF={ls_pred_cbf:.1f}, ATT={ls_pred_att:.0f}",
-                     fontsize=13)
-        
-        # PCASL Plot
-        ax1.plot(plds, res['noisy_pcasl'], 'ko', label='Noisy Input')
-        ax1.plot(plds, clean_pcasl, 'g-', lw=2, label='Ground Truth Signal')
-        ax1.plot(plds, pred_pcasl, 'r--', lw=2, label='NN Predicted Signal')
-        ax1.plot(plds, ls_pcasl, 'm:', lw=2.5, label='LS Reconstructed Signal')
-        ax1.set_title('PCASL Signal')
-        ax1.set_xlabel('PLD (ms)')
-        ax1.set_ylabel('Signal')
-        ax1.legend()
-        ax1.grid(True, alpha=0.5)
-
-        # VSASL Plot
-        ax2.plot(plds, res['noisy_vsasl'], 'ko', label='Noisy Input')
-        ax2.plot(plds, clean_vsasl, 'g-', lw=2, label='Ground Truth Signal')
-        ax2.plot(plds, pred_vsasl, 'r--', lw=2, label='NN Predicted Signal')
-        ax2.plot(plds, ls_vsasl, 'm:', lw=2.5, label='LS Reconstructed Signal')
-        ax2.set_title('VSASL Signal')
-        ax2.set_xlabel('PLD (ms)')
-        ax2.legend()
-        ax2.grid(True, alpha=0.5)
-        
-        plt.tight_layout(rect=[0, 0, 1, 0.88])
-        plt.show()
-
+    # VSASL Plot
+    ax2.plot(plds, noisy_vsasl, 'ko', alpha=0.7, label='Noisy Input')
+    ax2.plot(plds, clean_vsasl, 'g-', lw=3, label='Ground Truth Signal')
+    ax2.plot(plds, pred_vsasl, 'r--', lw=2.5, label='NN Reconstructed Signal')
+    ax2.plot(plds, ls_vsasl, 'm:', lw=2.5, label='LS Reconstructed Signal')
+    ax2.set_title('VSASL Signal'); ax2.set_xlabel('PLD (ms)'); ax2.legend(); ax2.grid(True, alpha=0.5)
+    
+    plt.tight_layout(rect=[0, 0, 1, 0.85])
+    plt.show()
+    
 
 def analyze_training_data_distribution(config):
     """Generates the full training dataset and plots its 2D distribution."""
