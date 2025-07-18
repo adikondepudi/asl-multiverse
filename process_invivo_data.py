@@ -8,7 +8,10 @@ from tqdm import tqdm
 from typing import List
 
 def find_and_sort_files_robustly(subject_dir: Path, patterns: list) -> List[Path]:
-    """Finds files matching a list of patterns and sorts them by PLD."""
+    """
+    Finds files matching a list of patterns and sorts them by the numeric
+    Post-Labeling Delay (PLD) value found in their filenames.
+    """
     def get_pld_from_path(path: Path) -> int:
         match = re.search(r'_(\d+)', path.name)
         return int(match.groups()[0]) if match else -1
@@ -24,10 +27,10 @@ def load_and_scale_nifti(file_path: Path) -> np.ndarray:
     """
     Loads NIfTI data, applies scaling factors, and cleans non-finite values.
 
-    This function now performs two critical data cleaning steps:
+    This function performs two critical data cleaning steps:
     1.  Applies `scl_slope` and `scl_inter` to convert raw integer data to
         its true physical floating-point values.
-    2.  (NEW) Replaces any NaN or infinity values in the data with 0.0,
+    2.  Replaces any NaN or infinity values in the data with 0.0,
         ensuring the data is numerically stable for downstream processing.
     """
     img = nib.load(file_path)
@@ -39,16 +42,12 @@ def load_and_scale_nifti(file_path: Path) -> np.ndarray:
     if scl_slope != 0:
         data = data * scl_slope + scl_inter
         
-    # === ELEGANT FIX: Clean non-finite values ===
-    # This is the single most important change to fix the "black image" issue.
-    data = np.nan_to_num(data, nan=0.0, posinf=0.0, neginf=0.0)
-    # === END OF FIX ===
-        
-    return data
+    return np.nan_to_num(data, nan=0.0, posinf=0.0, neginf=0.0)
 
 def preprocess_subject(subject_dir: Path, output_root: Path):
     """
-    Processes a single subject's data from raw NIfTI files to NumPy arrays.
+    Processes a single subject's data from NIfTI to NumPy arrays, 
+    now including a robustly generated brain mask.
     """
     subject_id = subject_dir.name
     subject_output_dir = output_root / subject_id
@@ -60,13 +59,8 @@ def preprocess_subject(subject_dir: Path, output_root: Path):
         pcasl_files = find_and_sort_files_robustly(subject_dir, pcasl_patterns)
         vsasl_files = find_and_sort_files_robustly(subject_dir, vsasl_patterns)
 
-        if not pcasl_files or not vsasl_files:
-            print(f"Warning: Could not find EITHER PCASL or VSASL files for {subject_id}. Skipping.")
-            return
-            
-        if len(pcasl_files) != len(vsasl_files):
-            print(f"Warning: Mismatched PLD counts for {subject_id} "
-                  f"({len(pcasl_files)} PCASL, {len(vsasl_files)} VSASL). Skipping.")
+        if not pcasl_files or not vsasl_files or len(pcasl_files) != len(vsasl_files):
+            print(f"Warning: Inconsistent or missing files for {subject_id}. Skipping.")
             return
 
         subject_output_dir.mkdir(parents=True, exist_ok=True)
@@ -78,32 +72,38 @@ def preprocess_subject(subject_dir: Path, output_root: Path):
         vsasl_full_data = np.stack(vsasl_data_list, axis=-2)
         
         first_img = nib.load(pcasl_files[0])
-        affine = first_img.affine
-        header = first_img.header
-        # Robustly determine dimensions, handling both 3D and 4D cases per file
-        base_shape = pcasl_full_data.shape[:3]
+        affine, header = first_img.affine, first_img.header
+        x_dim, y_dim, z_dim = pcasl_full_data.shape[:3]
         num_repeats = pcasl_full_data.shape[-1] if pcasl_full_data.ndim == 5 else 1
-        x_dim, y_dim, z_dim = base_shape
         
-        num_repeats_for_avg = min(4, num_repeats)
-        # Squeeze to handle cases where there is no repeat dimension
+        # Prepare low-SNR (single repeat) and high-SNR (averaged) data
         pcasl_low_snr = np.squeeze(pcasl_full_data[..., 0])
         vsasl_low_snr = np.squeeze(vsasl_full_data[..., 0])
-        pcasl_high_snr = np.mean(pcasl_full_data[..., :num_repeats_for_avg], axis=-1)
-        vsasl_high_snr = np.mean(vsasl_full_data[..., :num_repeats_for_avg], axis=-1)
+        pcasl_high_snr = np.mean(pcasl_full_data[..., :min(4, num_repeats)], axis=-1)
+        vsasl_high_snr = np.mean(vsasl_full_data[..., :min(4, num_repeats)], axis=-1)
 
-        low_snr_signals, high_snr_signals = [], []
-        for z in range(z_dim):
-            for y in range(y_dim):
-                for x in range(x_dim):
-                    low_snr_signals.append(np.concatenate([pcasl_low_snr[x, y, z, :], vsasl_low_snr[x, y, z, :]]))
-                    high_snr_signals.append(np.concatenate([pcasl_high_snr[x, y, z, :], vsasl_high_snr[x, y, z, :]]))
+        # --- Generate and save a brain mask ---
+        mean_signal_vol = np.mean(pcasl_high_snr, axis=-1)
+        threshold = np.percentile(mean_signal_vol[mean_signal_vol > 0], 98) * 0.15
+        brain_mask = mean_signal_vol > threshold
+        np.save(subject_output_dir / 'brain_mask.npy', brain_mask)
+
+        # Flatten the 4D/5D data into a 2D (voxel, time) array using C-style ordering
+        low_snr_signals = np.concatenate([
+            pcasl_low_snr.reshape(-1, len(pcasl_files)),
+            vsasl_low_snr.reshape(-1, len(vsasl_files))
+        ], axis=1)
+        high_snr_signals = np.concatenate([
+            pcasl_high_snr.reshape(-1, len(pcasl_files)),
+            vsasl_high_snr.reshape(-1, len(vsasl_files))
+        ], axis=1)
         
         subject_plds = [int(re.search(r'_(\d+)', p.name).group(1)) for p in pcasl_files]
 
+        # Save all processed artifacts
         np.save(subject_output_dir / 'plds.npy', np.array(subject_plds))
-        np.save(subject_output_dir / 'low_snr_signals.npy', np.array(low_snr_signals))
-        np.save(subject_output_dir / 'high_snr_signals.npy', np.array(high_snr_signals))
+        np.save(subject_output_dir / 'low_snr_signals.npy', low_snr_signals)
+        np.save(subject_output_dir / 'high_snr_signals.npy', high_snr_signals)
         np.save(subject_output_dir / 'image_affine.npy', affine)
         np.save(subject_output_dir / 'image_header.npy', header)
         np.save(subject_output_dir / 'image_dims.npy', np.array([x_dim, y_dim, z_dim]))
@@ -115,7 +115,7 @@ def preprocess_subject(subject_dir: Path, output_root: Path):
 
 if __name__ == '__main__':
     if len(sys.argv) != 3:
-        print("Usage: python process_invivo_data.py <path_to_multiverse_folder> <output_preprocessed_folder>")
+        print("Usage: python process_invivo_data.py <path_to_raw_data_folder> <output_preprocessed_folder>")
         sys.exit(1)
     
     root_data_dir = Path(sys.argv[1])
