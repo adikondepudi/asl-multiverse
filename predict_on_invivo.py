@@ -33,7 +33,7 @@ def denormalize_predictions(cbf_norm: np.ndarray, att_norm: np.ndarray, norm_sta
 
 def apply_normalization_vectorized(batch: np.ndarray, norm_stats: Dict, num_plds: int) -> np.ndarray:
     """Applies normalization to a batch of input signals for the NN."""
-    pcasl_raw, vsasl_raw, features = batch[:, :num_plds], batch[:, num_plds*2:num_plds*2], batch[:, num_plds*2:]
+    pcasl_raw, vsasl_raw, features = batch[:, :num_plds], batch[:, num_plds:num_plds*2], batch[:, num_plds*2:]
     pcasl_norm = (pcasl_raw - norm_stats['pcasl_mean']) / (np.array(norm_stats['pcasl_std']) + 1e-6)
     vsasl_norm = (vsasl_raw - norm_stats['vsasl_mean']) / (np.array(norm_stats['vsasl_std']) + 1e-6)
     return np.concatenate([pcasl_norm, vsasl_norm, features], axis=1)
@@ -97,10 +97,12 @@ def predict_subject(subject_dir: Path, models: List, config: Dict, model_dir: Pa
         
         mask_3d = np.load(subject_dir / 'brain_mask.npy')
         
-        # === THE DEFINITIVE FIX: Flatten the mask in C-style order ===
-        # This ensures the mask indices align perfectly with the signal array's order.
         mask_flat = mask_3d.flatten(order='C')
         
+        if np.sum(mask_flat) == 0:
+            print(f"  --> Brain mask is empty for subject {subject_id}. Skipping prediction.")
+            return
+
         low_snr_masked = low_snr[mask_flat]
         high_snr_masked = high_snr[mask_flat]
         print(f"  --> Applied brain mask. Processing {np.sum(mask_flat)} voxels out of {len(mask_flat)} total.")
