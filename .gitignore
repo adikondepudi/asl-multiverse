@@ -12,3 +12,5 @@ __pycache__/
 /Multiverse/
 /invivo_predictions/
 /invivo_preprocessed/
+/prediction_maps/
+/preprocessed_data/
