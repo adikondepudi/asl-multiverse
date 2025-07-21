@@ -14,3 +14,6 @@ __pycache__/
 /invivo_preprocessed/
 /prediction_maps/
 /preprocessed_data/
+/raw_invivo_data_validated/
+/final_maps/
+/evaluation_results/

@@ -5,129 +5,148 @@ from pathlib import Path
 import sys
 import re
 from tqdm import tqdm
-from typing import List
+from typing import List, Dict
 
-def find_and_sort_files_robustly(subject_dir: Path, patterns: list) -> List[Path]:
+# ... (all the functions from the previous script remain exactly the same) ...
+def find_and_sort_files_by_pld(subject_dir: Path, patterns: list) -> List[Path]:
     """
     Finds files matching a list of patterns and sorts them by the numeric
     Post-Labeling Delay (PLD) value found in their filenames.
     """
     def get_pld_from_path(path: Path) -> int:
+        # Regex to find numbers following an underscore, e.g., _500
         match = re.search(r'_(\d+)', path.name)
         return int(match.groups()[0]) if match else -1
 
     for pattern in patterns:
-        files = list(subject_dir.glob(pattern))
+        # Use rglob to search in subdirectories as well, which can be helpful
+        files = list(subject_dir.rglob(pattern))
         if files:
             print(f"  --> Found files for '{subject_dir.name}' using pattern: '{pattern}'")
             return sorted(files, key=get_pld_from_path)
     return []
 
-def load_and_scale_nifti(file_path: Path) -> np.ndarray:
-    """
-    Loads NIfTI data, applies scaling factors from the header, and cleans
-    non-finite values to ensure numerical stability.
-    """
+def load_nifti_data(file_path: Path) -> np.ndarray:
+    """Loads NIfTI data and cleans non-finite values."""
     img = nib.load(file_path)
+    # Load as float64 for precision during averaging
     data = img.get_fdata(dtype=np.float64)
-    
-    scl_slope = img.header.get('scl_slope', 0)
-    scl_inter = img.header.get('scl_inter', 0)
-
-    if scl_slope != 0:
-        data = data * scl_slope + scl_inter
-        
+    # Replace any NaNs or Infs with 0 to prevent issues
     return np.nan_to_num(data, nan=0.0, posinf=0.0, neginf=0.0)
 
 def preprocess_subject(subject_dir: Path, output_root: Path):
     """
-    Processes a single subject's data from NIfTI to NumPy arrays, 
-    using the M0 scan for robust brain masking.
+    Processes a single subject's 'normdiff' data into NumPy arrays suitable for NN and LS methods.
     """
     subject_id = subject_dir.name
     subject_output_dir = output_root / subject_id
-    
-    try:
-        pcasl_patterns = ['rPCASL_*_aslrawimages.nii*', 'r_normdiff_alldyn_PCASL_*.nii*', 'r_PCASL_*.nii*']
-        vsasl_patterns = ['rVSASL_*_aslrawimages.nii*', 'r_normdiff_alldyn_VSASL_*.nii*', 'r_VSASL_*.nii*']
-        m0_patterns = ['r_M0.nii*', 'M0.nii*'] # Patterns to find the M0 scan
-        
-        pcasl_files = find_and_sort_files_robustly(subject_dir, pcasl_patterns)
-        vsasl_files = find_and_sort_files_robustly(subject_dir, vsasl_patterns)
-        m0_file_list = find_and_sort_files_robustly(subject_dir, m0_patterns)
+    print(f"\n--- Processing Subject: {subject_id} ---")
 
+    try:
+        # Define the exact file patterns to search for, as advised by your PI
+        pcasl_patterns = ['r_normdiff_alldyn_PCASL_*.nii*']
+        vsasl_patterns = ['r_normdiff_alldyn_VSASL_*.nii*']
+        m0_patterns = ['r_M0.nii*', 'M0.nii*']
+
+        pcasl_files = find_and_sort_files_by_pld(subject_dir, pcasl_patterns)
+        vsasl_files = find_and_sort_files_by_pld(subject_dir, vsasl_patterns)
+        m0_file_list = find_and_sort_files_by_pld(subject_dir, m0_patterns)
+
+        # Basic validation
         if not pcasl_files or not vsasl_files or len(pcasl_files) != len(vsasl_files):
-            print(f"Warning: Inconsistent or missing ASL files for {subject_id}. Skipping.")
+            print(f"  [WARNING] Inconsistent or missing ASL files for {subject_id}. Skipping.")
             return
 
         subject_output_dir.mkdir(parents=True, exist_ok=True)
 
-        # === THE DEFINITIVE FIX: Use M0 Scan for Brain Masking ===
-        brain_mask: np.ndarray
+        # --- Create Brain Mask from M0 Scan ---
         if m0_file_list:
-            print(f"  --> Found M0 scan for robust masking.")
-            m0_img_scaled = load_and_scale_nifti(m0_file_list[0])
-            # A simple threshold on the high-SNR M0 image is very effective.
-            threshold = np.percentile(m0_img_scaled[m0_img_scaled > 0], 50) * 0.5
-            brain_mask = m0_img_scaled > threshold
+            print("  --> Found M0 scan, creating robust brain mask.")
+            m0_data = load_nifti_data(m0_file_list[0])
+            # A simple threshold on the M0 image is very effective.
+            threshold = np.percentile(m0_data[m0_data > 0], 50) * 0.5
+            brain_mask = m0_data > threshold
         else:
-            # Fallback if no M0 is found (less reliable, but won't crash)
-            print(f"Warning: No M0 scan found for {subject_id}. Creating fallback mask from ASL data.")
-            pcasl_data_list_for_mask = [load_and_scale_nifti(f) for f in pcasl_files]
-            pcasl_full_data_for_mask = np.stack(pcasl_data_list_for_mask, axis=-2)
-            mean_abs_signal = np.mean(np.abs(pcasl_full_data_for_mask), axis=(-1, -2))
-            threshold = np.percentile(mean_abs_signal[mean_abs_signal > 0], 95) * 0.2
-            brain_mask = mean_abs_signal > threshold
+            print("  [WARNING] No M0 scan found. Masking quality may be reduced.")
+            # Fallback: create mask from the first PCASL scan's average signal
+            first_pcasl_data = load_nifti_data(pcasl_files[0])
+            mean_signal = np.mean(np.abs(first_pcasl_data), axis=-1)
+            threshold = np.percentile(mean_signal[mean_signal > 0], 95) * 0.2
+            brain_mask = mean_signal > threshold
         
+        if np.sum(brain_mask) == 0:
+            print(f"  [ERROR] Brain mask for {subject_id} is empty. Skipping.")
+            return
+            
         np.save(subject_output_dir / 'brain_mask.npy', brain_mask)
-        # === END OF FIX ===
-        
-        pcasl_data_list = [load_and_scale_nifti(f) for f in pcasl_files]
-        pcasl_full_data = np.stack(pcasl_data_list, axis=-2)
-        vsasl_data_list = [load_and_scale_nifti(f) for f in vsasl_files]
-        vsasl_full_data = np.stack(vsasl_data_list, axis=-2)
+        print(f"  --> Brain mask created with {np.sum(brain_mask)} voxels.")
 
+        # --- Load, Process, and Stack Data ---
+        pcasl_1_repeat, pcasl_4_repeat_avg = [], []
+        vsasl_1_repeat, vsasl_4_repeat_avg = [], []
+
+        for f in pcasl_files:
+            data = load_nifti_data(f) # Shape: (X, Y, Z, num_repeats)
+            pcasl_1_repeat.append(data[..., 0])
+            pcasl_4_repeat_avg.append(np.mean(data, axis=-1))
+
+        for f in vsasl_files:
+            data = load_nifti_data(f)
+            vsasl_1_repeat.append(data[..., 0])
+            vsasl_4_repeat_avg.append(np.mean(data, axis=-1))
+
+        # Stack along a new dimension to get (X, Y, Z, num_PLDs)
+        pcasl_low_snr_4d = np.stack(pcasl_1_repeat, axis=-1)
+        pcasl_high_snr_4d = np.stack(pcasl_4_repeat_avg, axis=-1)
+        vsasl_low_snr_4d = np.stack(vsasl_1_repeat, axis=-1)
+        vsasl_high_snr_4d = np.stack(vsasl_4_repeat_avg, axis=-1)
+        
+        # --- Flatten and Concatenate Voxel-wise Signals ---
+        pcasl_low_flat = pcasl_low_snr_4d.reshape(-1, len(pcasl_files))
+        vsasl_low_flat = vsasl_low_snr_4d.reshape(-1, len(vsasl_files))
+        pcasl_high_flat = pcasl_high_snr_4d.reshape(-1, len(pcasl_files))
+        vsasl_high_flat = vsasl_high_snr_4d.reshape(-1, len(vsasl_files))
+        
+        low_snr_signals = np.concatenate([pcasl_low_flat, vsasl_low_flat], axis=1)
+        high_snr_signals = np.concatenate([pcasl_high_flat, vsasl_high_flat], axis=1)
+
+        # --- Save Processed Data and Metadata ---
         first_img = nib.load(pcasl_files[0])
-        affine, header = first_img.affine, first_img.header
-        x_dim, y_dim, z_dim = pcasl_full_data.shape[:3]
-        num_repeats = pcasl_full_data.shape[-1] if pcasl_full_data.ndim == 5 else 1
-
-        pcasl_low_snr = np.squeeze(pcasl_full_data[..., 0])
-        vsasl_low_snr = np.squeeze(vsasl_full_data[..., 0])
-        pcasl_high_snr = np.mean(pcasl_full_data[..., :min(4, num_repeats)], axis=-1)
-        vsasl_high_snr = np.mean(vsasl_full_data[..., :min(4, num_repeats)], axis=-1)
-
-        low_snr_signals = np.concatenate([pcasl_low_snr.reshape(-1, len(pcasl_files)), vsasl_low_snr.reshape(-1, len(vsasl_files))], axis=1)
-        high_snr_signals = np.concatenate([pcasl_high_snr.reshape(-1, len(pcasl_files)), vsasl_high_snr.reshape(-1, len(vsasl_files))], axis=1)
-        
         subject_plds = [int(re.search(r'_(\d+)', p.name).group(1)) for p in pcasl_files]
 
-        np.save(subject_output_dir / 'plds.npy', np.array(subject_plds))
         np.save(subject_output_dir / 'low_snr_signals.npy', low_snr_signals)
         np.save(subject_output_dir / 'high_snr_signals.npy', high_snr_signals)
-        np.save(subject_output_dir / 'image_affine.npy', affine)
-        np.save(subject_output_dir / 'image_header.npy', header)
-        np.save(subject_output_dir / 'image_dims.npy', np.array([x_dim, y_dim, z_dim]))
+        np.save(subject_output_dir / 'plds.npy', np.array(subject_plds))
+        np.save(subject_output_dir / 'image_affine.npy', first_img.affine)
+        np.save(subject_output_dir / 'image_header.npy', first_img.header)
+        np.save(subject_output_dir / 'image_dims.npy', np.array(first_img.shape[:3]))
+        print(f"  --> Saved processed NumPy arrays to {subject_output_dir}")
 
     except Exception as e:
-        print(f"FATAL ERROR processing subject {subject_id}: {e}")
+        print(f"  [FATAL ERROR] processing subject {subject_id}: {e}")
         import traceback
         traceback.print_exc()
 
 if __name__ == '__main__':
     if len(sys.argv) != 3:
-        print("Usage: python process_invivo_data.py <path_to_raw_data_folder> <output_preprocessed_folder>")
+        print("Usage: python process_invivo_data.py <path_to_validated_data_folder> <output_preprocessed_folder>")
         sys.exit(1)
-    
+
     root_data_dir = Path(sys.argv[1])
     output_dir = Path(sys.argv[2])
-    
+
+    # =========== FIX IS HERE ===========
+    # Instead of a hardcoded list, find all subdirectories in the input folder.
     subject_dirs = [d for d in root_data_dir.iterdir() if d.is_dir()]
+    # ===================================
     
-    print(f"Found {len(subject_dirs)} potential subject folders in {root_data_dir}.")
-    print("Starting preprocessing...")
+    if not subject_dirs:
+         print(f"[ERROR] No subject folders found in '{root_data_dir}'. Did the prepare script run correctly?")
+         sys.exit(1)
+
+    print(f"Found {len(subject_dirs)} valid subject folders to process.")
     
-    for sub_dir in tqdm(subject_dirs, desc="Processing Subjects"):
+    for sub_dir in subject_dirs:
         preprocess_subject(sub_dir, output_dir)
         
     print("\n--- In-vivo data preprocessing complete! ---")
