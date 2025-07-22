@@ -1,5 +1,4 @@
-# adikondepudi-asl-multiverse/prepare_invivo_data.py
-
+# prepare_invivo_data.py
 import nibabel as nib
 import numpy as np
 from pathlib import Path
@@ -27,14 +26,14 @@ def find_and_sort_files_by_pld(subject_dir: Path, patterns: list) -> List[Path]:
 
 def main(source_dir: Path, dest_dir: Path):
     """
-    Scans a source directory of subject data, validates each subject based on
-    date and file integrity (including new masks), and copies only the valid
-    ones to a clean destination directory.
+    Scans a source directory of subject data, validates each subject, and copies
+    only the valid ones to a clean destination directory.
     """
     if not source_dir.is_dir():
         print(f"[ERROR] Source directory not found: {source_dir}")
         sys.exit(1)
 
+    # Create the destination directory, clearing it first if it exists
     if dest_dir.exists():
         print(f"[WARNING] Destination directory {dest_dir} already exists. It will be removed and recreated.")
         shutil.rmtree(dest_dir)
@@ -52,24 +51,9 @@ def main(source_dir: Path, dest_dir: Path):
         is_valid = True
         fail_reason = ""
 
-        # --- CHECK 1: Filter by Date (as per PI's instruction) ---
-        match = re.search(r'^(\d{8})', subject_id)
-        if match:
-            subject_date = int(match.group(1))
-            if subject_date < 20231001:
-                is_valid = False
-                fail_reason = "Data is from before October 2023."
-        
-        if not is_valid:
-            tqdm.write(f"  - [SKIP] {subject_id}: {fail_reason}")
-            failed_count += 1
-            continue
-            
-        # --- CHECK 2: Ensure all required files exist, including new masks ---
+        # --- CHECK 1: Ensure all required normdiff files exist and are consistent ---
         pcasl_files = find_and_sort_files_by_pld(subject_dir, ['r_normdiff_alldyn_PCASL_*.nii*'])
         vsasl_files = find_and_sort_files_by_pld(subject_dir, ['r_normdiff_alldyn_VSASL_*.nii*'])
-        gm_mask_file = next(subject_dir.rglob('*GM_axial_philiport.nii*'), None)
-        wb_mask_file = next(subject_dir.rglob('*M0_WBmask_by_mprage_tight.nii*'), None)
 
         if not pcasl_files or not vsasl_files:
             is_valid = False
@@ -77,9 +61,27 @@ def main(source_dir: Path, dest_dir: Path):
         elif len(pcasl_files) != len(vsasl_files):
             is_valid = False
             fail_reason = f"Mismatched file counts: {len(pcasl_files)} PCASL vs {len(vsasl_files)} VSASL."
-        elif not gm_mask_file or not wb_mask_file:
-            is_valid = False
-            fail_reason = "Missing required gold-standard GM or WB mask files provided by PI."
+        
+        if not is_valid:
+            tqdm.write(f"  - [FAIL] {subject_id}: {fail_reason}")
+            failed_count += 1
+            continue
+
+        # --- CHECK 2: Validate the M0 scan (if it exists) ---
+        m0_files = find_and_sort_files_by_pld(subject_dir, ['r_M0.nii*', 'M0.nii*'])
+        if m0_files:
+            try:
+                m0_img = nib.load(m0_files[0])
+                m0_data = m0_img.get_fdata(dtype=np.float32)
+                # A standard deviation near zero means the image is blank or constant-valued
+                if np.std(m0_data) < 1e-6:
+                    is_valid = False
+                    fail_reason = "M0 scan exists but appears to be empty or zero-filled (std dev is ~0)."
+            except Exception as e:
+                is_valid = False
+                fail_reason = f"Could not load or read M0 scan. Error: {e}"
+        else:
+            tqdm.write(f"  - [WARN] {subject_id}: No M0 scan found. Will rely on ASL data for masking.")
 
         if not is_valid:
             tqdm.write(f"  - [FAIL] {subject_id}: {fail_reason}")
@@ -96,19 +98,27 @@ def main(source_dir: Path, dest_dir: Path):
             failed_count += 1
 
     print("\n" + "="*50)
-    print("      DATA PRE-VALIDATION SUMMARY")
+    print("      PRE-VALIDATION SUMMARY")
     print("="*50)
     print(f"✅ Copied {passed_count} valid subjects to: {dest_dir.resolve()}")
-    print(f"❌ Skipped {failed_count} invalid or outdated subjects.")
+    print(f"❌ Skipped {failed_count} invalid subjects.")
     print("You can now safely use the destination folder as input for 'process_invivo_data.py'.")
     print("="*50)
 
 if __name__ == '__main__':
     parser = argparse.ArgumentParser(
-        description="Validates raw subject data folders based on date and file integrity (including new masks) and copies valid subjects to a clean directory for processing.",
+        description="Scans a source data directory, validates each subject, and copies only the valid subjects to a new clean directory for processing.",
         formatter_class=argparse.RawTextHelpFormatter
     )
-    parser.add_argument("source_dir", type=str, help="The path to the source directory containing all raw subject folders.")
-    parser.add_argument("destination_dir", type=str, help="The path to the new, clean output directory where valid subjects will be copied (e.g., 'data/raw_invivo_validated').")
+    parser.add_argument(
+        "source_dir",
+        type=str,
+        help="The path to the source directory containing all raw subject folders (e.g., the original 18)."
+    )
+    parser.add_argument(
+        "destination_dir",
+        type=str,
+        help="The path to the new, clean output directory where valid subjects will be copied (e.g., 'raw_invivo_data')."
+    )
     args = parser.parse_args()
     main(Path(args.source_dir), Path(args.destination_dir))
