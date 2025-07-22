@@ -41,7 +41,6 @@ def load_artifacts(model_results_root: Path) -> Tuple[List[EnhancedASLNet], Dict
                 best_params.get('hidden_size_1'), best_params.get('hidden_size_2'), best_params.get('hidden_size_3')
             ]
             config['dropout_rate'] = best_params.get('dropout_rate')
-            # Add any other optimized params that affect model architecture here
 
     # Load normalization stats
     with open(model_results_root / 'norm_stats.json', 'r') as f:
@@ -129,38 +128,33 @@ def evaluate_single_subject(
         gm_mask = np.load(preprocessed_dir / subject_id / 'gm_mask.npy')
         wm_mask = np.load(preprocessed_dir / subject_id / 'wm_mask.npy')
 
-        # Load final CBF maps
+        # Load final CBF maps - NOW LOADING ALL FOUR
         map_files = {
             "nn_1r": maps_dir / 'nn_from_1_repeat_cbf.nii.gz',
+            "nn_4r": maps_dir / 'nn_from_4_repeats_cbf.nii.gz', # <-- ADDED
             "ls_1r": maps_dir / 'ls_from_1_repeat_cbf.nii.gz',
             "ls_4r": maps_dir / 'ls_from_4_repeats_cbf.nii.gz'
         }
         maps_data = {key: load_nifti_data(path) for key, path in map_files.items()}
 
-        # --- Calculate Metrics ---
-        # Spatial CoV in GM (your original metric)
-        results["nn_1r_spatial_cov_gm"] = calculate_spatial_cov(maps_data["nn_1r"], gm_mask)
-        results["ls_1r_spatial_cov_gm"] = calculate_spatial_cov(maps_data["ls_1r"], gm_mask)
-        results["ls_4r_spatial_cov_gm"] = calculate_spatial_cov(maps_data["ls_4r"], gm_mask)
+        # --- Calculate Metrics for all four maps ---
+        for key, cbf_data in maps_data.items():
+            results[f"{key}_spatial_cov_gm"] = calculate_spatial_cov(cbf_data, gm_mask)
+            results[f"{key}_gm_wm_ratio"] = calculate_gm_wm_ratio(cbf_data, gm_mask, wm_mask)
+            results[f"{key}_fit_success_rate"] = calculate_fit_success_rate(cbf_data, brain_mask)
 
-        # GM/WM Ratio
-        results["nn_1r_gm_wm_ratio"] = calculate_gm_wm_ratio(maps_data["nn_1r"], gm_mask, wm_mask)
-        results["ls_1r_gm_wm_ratio"] = calculate_gm_wm_ratio(maps_data["ls_1r"], gm_mask, wm_mask)
-        results["ls_4r_gm_wm_ratio"] = calculate_gm_wm_ratio(maps_data["ls_4r"], gm_mask, wm_mask)
-
-        # Fit Success Rate
-        results["nn_1r_fit_success_rate"] = calculate_fit_success_rate(maps_data["nn_1r"], brain_mask)
-        results["ls_1r_fit_success_rate"] = calculate_fit_success_rate(maps_data["ls_1r"], brain_mask)
-        results["ls_4r_fit_success_rate"] = calculate_fit_success_rate(maps_data["ls_4r"], brain_mask)
-
-        # NEW: Test-Retest CoV for NN
+        # NEW: Test-Retest CoV for NN (this is a property of the single-repeat model)
         results["nn_test_retest_cov_gm"] = calculate_nn_test_retest_cov(
             raw_validated_dir / subject_id, brain_mask, gm_mask, models, config, norm_stats, device
         )
         
         # Correlation vs Benchmark (LS 4-repeat)
-        corr, _ = pearsonr(maps_data["nn_1r"][brain_mask], maps_data["ls_4r"][brain_mask])
-        results["correlation_vs_benchmark"] = corr
+        corr_1r, _ = pearsonr(maps_data["nn_1r"][brain_mask], maps_data["ls_4r"][brain_mask])
+        results["correlation_nn1r_vs_ls4r"] = corr_1r
+        
+        corr_4r, _ = pearsonr(maps_data["nn_4r"][brain_mask], maps_data["ls_4r"][brain_mask])
+        results["correlation_nn4r_vs_ls4r"] = corr_4r
+
 
     except Exception as e:
         results["error"] = str(e)
@@ -198,6 +192,18 @@ def main():
     output_path = Path(args.output_dir)
     output_path.mkdir(parents=True, exist_ok=True)
     summary_path = output_path / "comprehensive_invivo_evaluation_summary.csv"
+    
+    # Reorder columns for better readability in the final CSV
+    cols_order = [
+        'subject_id',
+        'nn_1r_spatial_cov_gm', 'nn_4r_spatial_cov_gm', 'ls_1r_spatial_cov_gm', 'ls_4r_spatial_cov_gm',
+        'nn_test_retest_cov_gm',
+        'nn_1r_gm_wm_ratio', 'nn_4r_gm_wm_ratio', 'ls_1r_gm_wm_ratio', 'ls_4r_gm_wm_ratio',
+        'nn_1r_fit_success_rate', 'nn_4r_fit_success_rate', 'ls_1r_fit_success_rate', 'ls_4r_fit_success_rate',
+        'correlation_nn1r_vs_ls4r', 'correlation_nn4r_vs_ls4r',
+        'error'
+    ]
+    df = df[[col for col in cols_order if col in df.columns]]
     df.to_csv(summary_path, index=False, float_format='%.4f')
 
     print("\n" + "="*80)
