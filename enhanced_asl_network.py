@@ -349,7 +349,6 @@ def torch_kinetic_model(pred_cbf_norm: torch.Tensor, pred_att_norm: torch.Tensor
     pred_att = pred_att_norm * norm_stats['y_std_att'] + norm_stats['y_mean_att']
     plds = torch.tensor(model_params['pld_values'], device=device, dtype=torch.float32)
 
-    # --- FIX: CALL THE COMPILED PHYSICS MODEL ---
     pcasl_sig, vsasl_sig = _compiled_torch_physical_kinetic_model(pred_cbf, pred_att, plds, model_params)
 
     reconstructed_signal = torch.cat([pcasl_sig, vsasl_sig], dim=1)

@@ -10,6 +10,9 @@ from dataclasses import dataclass, asdict
 import wandb
 import inspect
 
+from joblib import Parallel, delayed
+import multiprocessing
+
 from multiverse_functions import fit_PCVSASL_misMatchPLD_vectInit_pep
 from enhanced_asl_network import EnhancedASLNet
 
@@ -188,22 +191,46 @@ class ComprehensiveComparison:
         ls_res = self._fit_ls(data_signals, true_params, plds, range_name)
         return [ls_res] if ls_res else []
 
+    # Helper function for a single voxel fit
+    def _fit_single_ls_voxel(signal_reshaped, pldti, asl_params):
+        try:
+            beta, conintval, _, _ = fit_PCVSASL_misMatchPLD_vectInit_pep(pldti, signal_reshaped, [50.0/6000.0, 1500.0], **asl_params)
+            cbf_est = beta[0] * 6000
+            att_est = beta[1]
+            cbf_ci = (conintval[0,1]-conintval[0,0])*6000
+            att_ci = conintval[1,1]-conintval[1,0]
+            return cbf_est, att_est, cbf_ci, att_ci, True
+        except Exception:
+            return np.nan, np.nan, np.nan, np.nan, False
+
+    # Replace the existing _fit_ls method with this parallel version
     def _fit_ls(self, signals_arr: np.ndarray, true_params_arr: np.ndarray, plds_arr: np.ndarray, range_name_str: str) -> Optional[ComparisonResult]:
-        n_samples = signals_arr.shape[0]; successes = 0
+        n_samples = signals_arr.shape[0]
         if n_samples == 0: return None
-        cbf_estimates, att_estimates, ci_widths_cbf, ci_widths_att, fit_times = [], [], [], [], []
+        
         pldti = np.column_stack([plds_arr, plds_arr])
-        for i in range(n_samples):
-            start_time = time.time()
-            try:
-                beta, conintval, _, _ = fit_PCVSASL_misMatchPLD_vectInit_pep(pldti, signals_arr[i], [50.0/6000.0, 1500.0], **self.asl_params)
-                fit_times.append(time.time() - start_time); cbf_estimates.append(beta[0]*6000); att_estimates.append(beta[1])
-                ci_widths_cbf.append((conintval[0,1]-conintval[0,0])*6000); ci_widths_att.append(conintval[1,1]-conintval[1,0]); successes += 1
-            except Exception: fit_times.append(time.time()-start_time); cbf_estimates.append(np.nan); att_estimates.append(np.nan); ci_widths_cbf.append(np.nan); ci_widths_att.append(np.nan)
+        num_cores = multiprocessing.cpu_count()
+        
+        start_time = time.time()
+        
+        # Use joblib to parallelize the loop
+        results = Parallel(n_jobs=num_cores)(
+            delayed(_fit_single_ls_voxel)(signals_arr[i], pldti, self.asl_params)
+            for i in range(n_samples)
+        )
+        
+        total_time = time.time() - start_time
+        
+        # Unpack the results
+        cbf_estimates, att_estimates, ci_widths_cbf, ci_widths_att, success_flags = zip(*results)
+        successes = sum(success_flags)
+
         metrics = self._calculate_detailed_metrics(cbf_estimates, true_params_arr[:,0], att_estimates, true_params_arr[:,1])
+        
         return ComparisonResult(method="LS", att_range_name=range_name_str, **metrics,
                                 cbf_ci_width=np.nanmean(ci_widths_cbf), att_ci_width=np.nanmean(ci_widths_att),
-                                computation_time=np.nanmean(fit_times) if fit_times else np.nan, success_rate=(successes/n_samples*100) if n_samples > 0 else 0)
+                                computation_time=total_time / n_samples if n_samples > 0 else np.nan, 
+                                success_rate=(successes/n_samples*100) if n_samples > 0 else 0)
 
     def _evaluate_neural_network(self, nn_input_arr: np.ndarray, true_params_arr: np.ndarray, plds_arr: np.ndarray, range_name_str: str) -> List[ComparisonResult]:
         if self.nn_model is None or nn_input_arr.shape[0] == 0: return []
