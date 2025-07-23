@@ -232,17 +232,32 @@ def run_comprehensive_asl_research(config: ResearchConfig, output_dir: Path) -> 
     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
     script_logger.info(f"Using device: {device}")
 
-    script_logger.info("Generating a fixed dataset for normalization stats...")
-    norm_dataset = simulator.generate_diverse_dataset(plds=plds_np, n_subjects=5000, conditions=['healthy'], noise_levels=config.training_noise_levels_stage1)
-    
-    raw_signals_norm, raw_params_norm = norm_dataset['signals'], norm_dataset['parameters']
-    norm_stats_final = {
-        'pcasl_mean': np.mean(raw_signals_norm[:, :num_plds], axis=0).tolist(), 'pcasl_std': np.clip(np.std(raw_signals_norm[:, :num_plds], axis=0), 1e-6, None).tolist(),
-        'vsasl_mean': np.mean(raw_signals_norm[:, num_plds:], axis=0).tolist(), 'vsasl_std': np.clip(np.std(raw_signals_norm[:, num_plds:], axis=0), 1e-6, None).tolist(),
-        'y_mean_cbf': np.mean(raw_params_norm[:, 0]), 'y_std_cbf': max(np.std(raw_params_norm[:, 0]), 1e-6),
-        'y_mean_att': np.mean(raw_params_norm[:, 1]), 'y_std_att': max(np.std(raw_params_norm[:, 1]), 1e-6),
-        'amplitude_mean': np.mean(np.linalg.norm(raw_signals_norm, axis=1)), 'amplitude_std': max(np.std(np.linalg.norm(raw_signals_norm, axis=1)), 1e-6)
-    }
+    norm_stats_path = output_dir / 'norm_stats.json'
+
+    if norm_stats_path.exists():
+        script_logger.info(f"Loading cached normalization stats from {norm_stats_path}")
+        with open(norm_stats_path, 'r') as f:
+            norm_stats_final = json.load(f)
+    else:
+        script_logger.info("Generating a fixed dataset for normalization stats...")
+        norm_dataset = simulator.generate_diverse_dataset(plds=plds_np, n_subjects=5000, conditions=['healthy'], noise_levels=config.training_noise_levels_stage1)
+        
+        raw_signals_norm, raw_params_norm = norm_dataset['signals'], norm_dataset['parameters']
+        norm_stats_final = {
+            'pcasl_mean': np.mean(raw_signals_norm[:, :num_plds], axis=0).tolist(),
+            'pcasl_std': np.clip(np.std(raw_signals_norm[:, :num_plds], axis=0), 1e-6, None).tolist(),
+            'vsasl_mean': np.mean(raw_signals_norm[:, num_plds:], axis=0).tolist(),
+            'vsasl_std': np.clip(np.std(raw_signals_norm[:, num_plds:], axis=0), 1e-6, None).tolist(),
+            'y_mean_cbf': np.mean(raw_params_norm[:, 0]),
+            'y_std_cbf': max(np.std(raw_params_norm[:, 0]), 1e-6),
+            'y_mean_att': np.mean(raw_params_norm[:, 1]),
+            'y_std_att': max(np.std(raw_params_norm[:, 1]), 1e-6),
+            'amplitude_mean': np.mean(np.linalg.norm(raw_signals_norm, axis=1)),
+            'amplitude_std': max(np.std(np.linalg.norm(raw_signals_norm, axis=1)), 1e-6)
+        }
+        script_logger.info(f"Saving normalization stats to {norm_stats_path}")
+        with open(norm_stats_path, 'w') as f:
+            json.dump(norm_stats_final, f, indent=2)
     
     train_dataset_s1 = ASLIterableDataset(simulator, plds_np, config.training_noise_levels_stage1, norm_stats=norm_stats_final)
     train_dataset_s2 = ASLIterableDataset(simulator, plds_np, config.training_noise_levels_stage2, norm_stats=norm_stats_final)
@@ -322,4 +337,4 @@ if __name__ == "__main__":
     if args.optimize:
         run_hyperparameter_optimization(config=config_obj, output_dir=output_path)
     else:
-        pipeline_results_dict = run_comprehensive_asl_research(config=config_obj, output_parent_dir=str(output_path))
+        pipeline_results_dict = run_comprehensive_asl_research(config=config_obj, output_dir=output_path)
