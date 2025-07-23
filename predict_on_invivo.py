@@ -1,3 +1,5 @@
+# predict_on_invivo.py
+
 import torch
 import numpy as np
 import nibabel as nib
@@ -8,6 +10,8 @@ import time
 import sys
 from tqdm import tqdm
 from typing import Dict, List, Tuple
+from joblib import Parallel, delayed
+import multiprocessing
 
 # --- Import/Include Necessary Functions from Your Project ---
 from enhanced_asl_network import EnhancedASLNet
@@ -18,8 +22,10 @@ def apply_normalization_vectorized(batch: np.ndarray, norm_stats: Dict, num_plds
     """Applies normalization to a batch of input signals for the NN."""
     pcasl_raw, vsasl_raw = batch[:, :num_plds], batch[:, num_plds:num_plds*2]
     features = batch[:, num_plds*2:]
+    
     pcasl_norm = (pcasl_raw - norm_stats['pcasl_mean']) / (np.array(norm_stats['pcasl_std']) + 1e-6)
     vsasl_norm = (vsasl_raw - norm_stats['vsasl_mean']) / (np.array(norm_stats['vsasl_std']) + 1e-6)
+    
     return np.concatenate([pcasl_norm, vsasl_norm, features], axis=1)
 
 def denormalize_predictions(cbf_norm: np.ndarray, att_norm: np.ndarray, norm_stats: Dict) -> Tuple[np.ndarray, np.ndarray]:
@@ -36,7 +42,7 @@ def batch_predict_nn(signals_masked: np.ndarray, subject_plds: np.ndarray, model
     This function now pads/resamples the input signal to match the PLD structure
     the neural network was trained on.
     """
-    # =========== FIX START: Resample subject signal to match model's expected PLDs ===========
+    # --- FIX: Resample subject signal to match model's expected PLDs for robustness ---
     model_plds_list = config['pld_values']
     num_model_plds = len(model_plds_list)
     num_subject_plds = len(subject_plds)
@@ -48,7 +54,7 @@ def batch_predict_nn(signals_masked: np.ndarray, subject_plds: np.ndarray, model
     target_indices, source_indices = [], []
     for i, pld in enumerate(subject_plds):
         try:
-            target_idx = model_plds_list.index(pld)
+            target_idx = model_plds_list.index(int(pld)) # Ensure pld is int for list.index
             target_indices.append(target_idx)
             source_indices.append(i)
         except ValueError:
@@ -64,8 +70,7 @@ def batch_predict_nn(signals_masked: np.ndarray, subject_plds: np.ndarray, model
         resampled_signals[:, target_indices] = signals_masked[:, source_indices]
         # Use index lists to place VSASL data correctly (offset by total PLD count)
         resampled_signals[:, target_indices + num_model_plds] = signals_masked[:, source_indices + num_subject_plds]
-    # =========== FIX END ===========
-
+    
     # Continue with the original logic, but using the correctly shaped, resampled signal
     num_plds_train = num_model_plds # The number of PLDs is now fixed to the model's requirement
     eng_feats = engineer_signal_features(resampled_signals, num_plds_train)
@@ -73,27 +78,41 @@ def batch_predict_nn(signals_masked: np.ndarray, subject_plds: np.ndarray, model
     
     norm_input = apply_normalization_vectorized(nn_input, norm_stats, num_plds_train)
     input_tensor = torch.FloatTensor(norm_input).to(device)
+    
     with torch.no_grad():
-        cbf_preds = [model(input_tensor)[0].cpu().numpy() for model in models]
-        att_preds = [model(input_tensor)[1].cpu().numpy() for model in models]
-    cbf_norm, att_norm = np.mean(cbf_preds, axis=0), np.mean(att_preds, axis=0)
-    return denormalize_predictions(cbf_norm.squeeze(), att_norm.squeeze(), norm_stats)
+        cbf_preds_norm = [model(input_tensor)[0].cpu().numpy() for model in models]
+        att_preds_norm = [model(input_tensor)[1].cpu().numpy() for model in models]
+    
+    cbf_norm_ensemble, att_norm_ensemble = np.mean(cbf_preds_norm, axis=0), np.mean(att_preds_norm, axis=0)
+    return denormalize_predictions(cbf_norm_ensemble.squeeze(), att_norm_ensemble.squeeze(), norm_stats)
 
+# --- OPTIMIZATION: Helper function for parallel LS fitting ---
+def _fit_single_voxel_ls(signal_reshaped, pldti, ls_params, init_guess):
+    """Helper function to fit a single voxel, designed for use with joblib."""
+    try:
+        beta, _, _, _ = fit_PCVSASL_misMatchPLD_vectInit_pep(pldti, signal_reshaped, init_guess, **ls_params)
+        return beta[0] * 6000.0, beta[1]
+    except Exception:
+        return np.nan, np.nan
+
+# --- OPTIMIZATION: Rewritten to use joblib for parallel processing ---
 def fit_ls_robust(signals_masked: np.ndarray, plds: np.ndarray, config: Dict) -> Tuple[np.ndarray, np.ndarray]:
-    """Runs a robust LS fit for each voxel in the masked data."""
+    """Runs a robust, parallelized LS fit for each voxel in the masked data."""
     pldti = np.column_stack([plds, plds])
     ls_params = {k:v for k,v in config.items() if k in ['T1_artery','T_tau','T2_factor','alpha_BS1','alpha_PCASL','alpha_VSASL']}
     num_voxels = signals_masked.shape[0]
-    cbf_results, att_results = np.full(num_voxels, np.nan), np.full(num_voxels, np.nan)
     signals_reshaped = signals_masked.reshape((num_voxels, len(plds), 2), order='F')
     init_guess = [50.0 / 6000.0, 1500.0]
-    for i in tqdm(range(num_voxels), desc="  Fitting LS", leave=False, ncols=100):
-        try:
-            beta, _, _, _ = fit_PCVSASL_misMatchPLD_vectInit_pep(pldti, signals_reshaped[i], init_guess, **ls_params)
-            cbf_results[i], att_results[i] = beta[0] * 6000.0, beta[1]
-        except Exception:
-            continue
-    return cbf_results, att_results
+    
+    num_cores = multiprocessing.cpu_count()
+    
+    results = Parallel(n_jobs=num_cores)(
+        delayed(_fit_single_voxel_ls)(signals_reshaped[i], pldti, ls_params, init_guess)
+        for i in tqdm(range(num_voxels), desc="  Fitting LS (Parallel)", leave=False, ncols=100)
+    )
+    
+    results_arr = np.array(results)
+    return results_arr[:, 0], results_arr[:, 1]
 
 def predict_subject(subject_dir: Path, models: List, config: Dict, norm_stats: Dict, device: torch.device, output_root: Path):
     """Main processing function for a single subject."""
@@ -109,6 +128,7 @@ def predict_subject(subject_dir: Path, models: List, config: Dict, norm_stats: D
         dims = tuple(np.load(subject_dir / 'image_dims.npy'))
         affine = np.load(subject_dir / 'image_affine.npy')
         header = np.load(subject_dir / 'image_header.npy', allow_pickle=True).item()
+        
         low_snr_masked = low_snr_signals[brain_mask_flat]
         high_snr_masked = high_snr_signals[brain_mask_flat]
         print(f"  --> Applied brain mask. Processing {np.sum(brain_mask_flat)} voxels.")
@@ -137,6 +157,8 @@ def predict_subject(subject_dir: Path, models: List, config: Dict, norm_stats: D
 
     except Exception as e:
         print(f"  [FATAL ERROR] predicting on subject {subject_id}: {e}")
+        import traceback
+        traceback.print_exc()
 
 if __name__ == '__main__':
     parser = argparse.ArgumentParser(description="Run NN and LS fitting on preprocessed in-vivo ASL data.")
@@ -151,26 +173,21 @@ if __name__ == '__main__':
 
     print("--- Loading Model Artifacts ---")
     try:
-        # =========== FIX START: Load config robustly for Optuna-tuned models ===========
-        # Load the base config first
+        # --- FIX: Robustly load config for potentially Optuna-tuned models ---
         with open(model_results_root / 'research_config.json', 'r') as f:
             config = json.load(f)
         
-        # Check for final results to see if Optuna updated the params
         final_results_path = model_results_root / 'final_research_results.json'
         if final_results_path.exists():
             with open(final_results_path, 'r') as f:
                 final_results = json.load(f)
-            # If Optuna results exist, update the config with the best hyperparameters
             if 'optuna_best_params' in final_results and final_results['optuna_best_params']:
-                print("  --> Optuna parameters found. Updating config for model loading.")
+                print("  --> Optuna parameters found. Updating config for model instantiation.")
                 best_params = final_results['optuna_best_params']
                 config['hidden_sizes'] = [
                     best_params.get('hidden_size_1'), best_params.get('hidden_size_2'), best_params.get('hidden_size_3')
                 ]
                 config['dropout_rate'] = best_params.get('dropout_rate')
-                # Add any other optimized params here if they affect model architecture
-        # =========== FIX END ===========
 
         with open(model_results_root / 'norm_stats.json', 'r') as f:
             norm_stats = json.load(f)
@@ -183,7 +200,6 @@ if __name__ == '__main__':
         base_input_size = num_plds * 2 + 4
 
         for model_path in model_files:
-            # The model is now created with the potentially updated config, ensuring correct architecture
             model = EnhancedASLNet(input_size=base_input_size, **config)
             model.load_state_dict(torch.load(model_path, map_location=torch.device('cpu')))
             model.eval()
@@ -193,6 +209,8 @@ if __name__ == '__main__':
         
     except Exception as e:
         print(f"Error loading artifacts: {e}. Make sure paths are correct and JSON files are valid.")
+        import traceback
+        traceback.print_exc()
         sys.exit(1)
 
     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')

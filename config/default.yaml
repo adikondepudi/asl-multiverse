@@ -13,8 +13,12 @@ training:
   steps_per_epoch_stage2: 40
   n_epochs_stage1: 140
   n_epochs_stage2: 60
-  validation_steps_per_epoch: 50 # <-- MODIFIED: Added for iterable validation
+  validation_steps_per_epoch: 50
   
+  # --- FIX: Added pre_estimator_loss_weight curriculum parameters for clarity and to match code ---
+  pre_estimator_loss_weight_stage1: 1.0 
+  pre_estimator_loss_weight_stage2: 0.0
+
   loss_pinn_weight_stage1: 1.0
   loss_pinn_weight_stage2: 0.1
   learning_rate_stage2: 0.0002
@@ -55,10 +59,9 @@ simulation:
   reference_CBF: 60.0
 
 optuna:
+  # --- FIX: Removed n_subjects/n_epochs as they are not used by the optimizer ---
   optuna_n_trials: 20
   optuna_timeout_hours: 0.5
-  optuna_n_subjects: 500
-  optuna_n_epochs: 20
   optuna_study_name: "asl_multiverse_hpo"
 
 logging:
