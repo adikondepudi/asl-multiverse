@@ -9,13 +9,13 @@ training:
   dropout_rate: 0.1
   norm_type: "batch"
   
+  # Training length is determined by steps * epochs, as an IterableDataset is used.
   steps_per_epoch_stage1: 1000
   steps_per_epoch_stage2: 500
   n_epochs_stage1: 80
   n_epochs_stage2: 40
   validation_steps_per_epoch: 50
   
-  # --- FIX: Added pre-estimator_loss_weight curriculum parameters for clarity and to match code ---
   pre_estimator_loss_weight_stage1: 1.0 
   pre_estimator_loss_weight_stage2: 0.0
 
@@ -54,7 +54,6 @@ simulation:
   reference_CBF: 60.0
 
 optuna:
-  # --- FIX: Removed n_subjects/n_epochs as they are not used by the optimizer ---
   optuna_n_trials: 100
   optuna_timeout_hours: 4.0
   optuna_study_name: "asl_multiverse_hpo_production"

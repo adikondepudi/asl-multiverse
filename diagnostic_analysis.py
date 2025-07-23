@@ -6,6 +6,7 @@ import json
 import os
 import matplotlib.pyplot as plt
 import inspect
+from pathlib import Path
 
 # --- Configuration: SET THIS PATH ---
 RESULTS_DIR = "./comprehensive_results/asl_research_20250616_175302/"  # <-- Edit this line!
@@ -154,10 +155,11 @@ def analyze_training_data_distribution(config):
     simulator = RealisticASLSimulator(params=asl_params)
     plds = np.array(config['pld_values'])
     
-    num_subjects_for_dist_plot = 10000 
-    print(f"Generating balanced dataset with {num_subjects_for_dist_plot} subjects... (This may take a minute or two)")
+    # --- FIX: Reduced subject count from 10,000 to a safer 2,000 to prevent OOM crash ---
+    # This is still more than enough to get a representative distribution plot.
+    num_subjects_for_dist_plot = 2000 
+    print(f"Generating a representative dataset with {num_subjects_for_dist_plot} subjects for visualization... (This may take a moment)")
     
-    # --- FIX: Use generate_diverse_dataset as generate_balanced_dataset was removed ---
     training_data = simulator.generate_diverse_dataset(
         plds=plds, 
         n_subjects=num_subjects_for_dist_plot,

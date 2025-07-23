@@ -9,11 +9,12 @@ training:
   dropout_rate: 0.1
   norm_type: "batch"
   
-  # --- MODIFIED: Switched from n_subjects to explicit steps for IterableDataset ---
+  # Training length is determined by steps * epochs, as an IterableDataset is used.
   steps_per_epoch_stage1: 20
   steps_per_epoch_stage2: 40
   n_epochs_stage1: 140
   n_epochs_stage2: 60
+  validation_steps_per_epoch: 50
   
   loss_pinn_weight_stage1: 10.0 # High PINN weight for pre-training
   loss_pinn_weight_stage2: 1.0  # Reduced, but still present, for fine-tuning
@@ -41,7 +42,6 @@ training:
   loss_log_var_reg_lambda: 0.0
 
 data:
-  val_split: 0.2
   pld_values: [500, 1000, 1500, 2000, 2500, 3000]
   att_ranges_config:
     - [500, 1500, "Short ATT"]
@@ -50,7 +50,6 @@ data:
   include_m0_in_training_data: false
 
 evaluation:
-  n_validation_subjects: 2000
   n_test_subjects_per_att_range: 200
   n_clinical_scenario_subjects: 100
 
@@ -66,8 +65,6 @@ simulation:
 optuna:
   optuna_n_trials: 20
   optuna_timeout_hours: 0.5
-  optuna_n_subjects: 500
-  optuna_n_epochs: 20
   optuna_study_name: "asl_multiverse_hpo"
 
 logging:
