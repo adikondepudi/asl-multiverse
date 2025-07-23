@@ -12,6 +12,7 @@ import multiprocessing as mp
 from pathlib import Path
 import wandb 
 from sklearn.metrics import mean_absolute_error, mean_squared_error 
+from torch.cuda.amp import GradScaler, autocast
 
 
 num_workers = mp.cpu_count()
@@ -322,7 +323,7 @@ class EnhancedASLTrainer:
                  n_ensembles: int = 5,
                  device: str = 'cuda' if torch.cuda.is_available() else 'cpu',
                  n_plds_for_model: Optional[int] = None, # Used for splitting PCASL/VSASL if needed
-                 m0_input_feature_model: bool = False
+                 m0_input_feature_model: bool = False,
                 ):
         self.device = device
         self.batch_size = batch_size
@@ -333,8 +334,14 @@ class EnhancedASLTrainer:
         self.learning_rate = learning_rate
         self.weight_decay = weight_decay # Store weight decay
         self.model_config = model_config # Store the full config for model and loss
+        # --- OPTIMIZATION 3b: Add a GradScaler for each model ---
+        self.scalers = [GradScaler() for _ in range(self.n_ensembles)]
 
-        self.models = [model_class(**model_config).to(device) for _ in range(n_ensembles)]
+        # self.models = [model_class(**model_config).to(device) for _ in range(n_ensembles)]
+        self.models = [
+            torch.compile(model_class(**model_config).to(device), mode="max-autotune")
+            for _ in range(n_ensembles)
+        ]
         self.best_states = [None] * self.n_ensembles
         self.optimizers = [torch.optim.Adam(model.parameters(), lr=learning_rate, weight_decay=self.weight_decay) for model in self.models] # Added weight_decay
         self.schedulers = [] # To be initialized in prepare_curriculum_data
@@ -571,7 +578,8 @@ class EnhancedASLTrainer:
                 
                 for model_idx in range(self.n_ensembles):
                     train_loss_epoch = self._train_epoch(self.models[model_idx], train_loader, 
-                                                       self.optimizers[model_idx], 
+                                                       self.optimizers[model_idx],
+                                                       self.scalers[model_idx], # GradScaler for mixed precision
                                                        self.schedulers[model_idx] if self.schedulers else None, 
                                                        global_epoch_counter)
                     epoch_train_losses_all_models.append(train_loss_epoch)
@@ -656,22 +664,32 @@ class EnhancedASLTrainer:
 
         return {'final_mean_train_loss': final_mean_train_loss_overall, 'final_mean_val_loss': final_mean_val_loss_overall, 'all_histories': histories}
 
-    def _train_epoch(self, model, train_loader, optimizer, scheduler, current_global_epoch: int) -> float:
-        model.train(); total_loss = 0.0
+    def _train_epoch(self, model, train_loader, optimizer, scaler, scheduler, current_global_epoch: int) -> float:
+        model.train()
+        total_loss = 0.0
         for signals, params_norm in train_loader:
             signals, params_norm = signals.to(self.device), params_norm.to(self.device)
             optimizer.zero_grad()
-            
-            # Unpack all model outputs, including the rough estimates
-            outputs = model(signals)
-            cbf_mean_norm, att_mean_norm, cbf_log_var, att_log_var, cbf_rough, att_rough = outputs
 
-            loss = self.custom_loss_fn(signals, cbf_mean_norm, att_mean_norm, params_norm[:, 0:1], params_norm[:, 1:2], 
-                                       cbf_log_var, att_log_var, cbf_rough, att_rough, current_global_epoch)
-            loss.backward()
-            torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
-            optimizer.step()
-            if scheduler: scheduler.step() 
+            # Use autocast to run the forward pass in mixed precision (BF16 on H100)
+            with autocast(dtype=torch.bfloat16):
+                outputs = model(signals)
+                cbf_mean_norm, att_mean_norm, cbf_log_var, att_log_var, cbf_rough, att_rough = outputs
+                loss = self.custom_loss_fn(signals, cbf_mean_norm, att_mean_norm, params_norm[:, 0:1], params_norm[:, 1:2], 
+                                           cbf_log_var, att_log_var, cbf_rough, att_rough, current_global_epoch)
+
+            # scaler.scale(loss) creates scaled gradients to prevent underflow
+            scaler.scale(loss).backward()
+            
+            # scaler.step() first un-scales the gradients, then calls optimizer.step()
+            scaler.step(optimizer)
+            
+            # scaler.update() prepares the scaler for the next iteration
+            scaler.update()
+
+            if scheduler:
+                scheduler.step()
+                
             total_loss += loss.item()
             self.global_step += 1
         return total_loss / len(train_loader) if len(train_loader) > 0 else 0.0
@@ -685,12 +703,20 @@ class EnhancedASLTrainer:
         with torch.no_grad():
             for signals, params_norm in val_loader:
                 signals, params_norm = signals.to(self.device), params_norm.to(self.device)
-                outputs = model(signals)
-                cbf_mean_norm, att_mean_norm, cbf_log_var, att_log_var, cbf_rough, att_rough = outputs
-
-                loss = self.custom_loss_fn(signals, cbf_mean_norm, att_mean_norm, params_norm[:, 0:1], params_norm[:, 1:2], 
-                                           cbf_log_var, att_log_var, cbf_rough, att_rough, current_global_epoch)
+                with autocast(dtype=torch.bfloat16):
+                    outputs = model(signals)
+                    # The rest of the code inside the loop remains indented under autocast
+                    cbf_mean_norm, att_mean_norm, cbf_log_var, att_log_var, cbf_rough, att_rough = outputs
+                    loss = self.custom_loss_fn(signals, cbf_mean_norm, att_mean_norm, params_norm[:, 0:1], params_norm[:, 1:2], 
+                                               cbf_log_var, att_log_var, cbf_rough, att_rough, current_global_epoch)
+                
                 total_loss_val += loss.item()
+                # outputs = model(signals)
+                # cbf_mean_norm, att_mean_norm, cbf_log_var, att_log_var, cbf_rough, att_rough = outputs
+
+                # loss = self.custom_loss_fn(signals, cbf_mean_norm, att_mean_norm, params_norm[:, 0:1], params_norm[:, 1:2], 
+                #                            cbf_log_var, att_log_var, cbf_rough, att_rough, current_global_epoch)
+                # total_loss_val += loss.item()
                 all_cbf_preds_norm.append(cbf_mean_norm.cpu()); all_att_preds_norm.append(att_mean_norm.cpu())
                 all_cbf_trues_norm.append(params_norm[:, 0:1].cpu()); all_att_trues_norm.append(params_norm[:, 1:2].cpu())
                 all_cbf_log_vars.append(cbf_log_var.cpu()); all_att_log_vars.append(att_log_var.cpu())

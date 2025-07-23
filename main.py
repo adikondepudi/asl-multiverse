@@ -441,6 +441,9 @@ def run_comprehensive_asl_research(config: ResearchConfig, output_parent_dir: Op
 
     output_path.mkdir(parents=True, exist_ok=True)
     
+    # Enable cuDNN auto-tuner to find the best algorithm for your hardware
+    torch.backends.cudnn.benchmark = True
+
     wandb_run = wandb.init(project=config.wandb_project, entity=config.wandb_entity, config=asdict(config), name=f"run_{timestamp}", job_type="research_pipeline")
     if wandb_run: script_logger.info(f"W&B Run URL: {wandb_run.url}")
 
@@ -490,8 +493,9 @@ def run_comprehensive_asl_research(config: ResearchConfig, output_parent_dir: Op
         
         train_dataset = EnhancedASLDataset(X_train, y_train_norm)
         drop_last_flag = len(X_train) > batch_size
-        train_loader = DataLoader(train_dataset, batch_size=batch_size, sampler=train_sampler, drop_last=drop_last_flag)
-        val_loader = DataLoader(EnhancedASLDataset(X_val, y_val_norm), batch_size=batch_size) if len(X_val) > 0 else None
+
+        train_loader = DataLoader(train_dataset, batch_size=batch_size, sampler=train_sampler, drop_last=drop_last_flag, num_workers=8, pin_memory=True)
+        val_loader = DataLoader(EnhancedASLDataset(X_val, y_val_norm), batch_size=batch_size, num_workers=8, pin_memory=True) if len(X_val) > 0 else None
         return train_loader, val_loader
 
     # --- Re-imagined Curriculum ---
