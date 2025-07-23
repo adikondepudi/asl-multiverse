@@ -17,6 +17,7 @@ import wandb
 import joblib 
 import math
 import inspect
+import os
 
 warnings.filterwarnings('ignore', category=UserWarning)
 
@@ -151,6 +152,50 @@ def apply_normalization_to_input_flat(flat_signal: np.ndarray,
 
     return np.concatenate([pcasl_norm, vsasl_norm, other_features_part])
 
+def create_dataloaders(dataset_dict: Dict, norm_stats: Dict, val_split: float, batch_size: int, num_plds: int) -> Tuple[DataLoader, Optional[DataLoader]]:
+    """Standalone helper to create train/val dataloaders from a dataset dictionary."""
+    X_all, y_all = dataset_dict['signals'], dataset_dict['parameters']
+    
+    # Apply normalization to all data
+    X_all_norm = np.array([apply_normalization_to_input_flat(s, norm_stats, num_plds, False) for s in X_all])
+    y_all_norm = np.column_stack([
+        (y_all[:, 0] - norm_stats['y_mean_cbf']) / norm_stats['y_std_cbf'],
+        (y_all[:, 1] - norm_stats['y_std_att']) / norm_stats['y_std_att']
+    ])
+    
+    # Split data
+    perm = np.random.permutation(len(X_all))
+    n_val = int(len(X_all) * val_split)
+    train_idx, val_idx = perm[:-n_val], perm[-n_val:]
+    X_train, y_train_norm, y_train_raw = X_all_norm[train_idx], y_all_norm[train_idx], y_all[train_idx]
+    X_val, y_val_norm = X_all_norm[val_idx], y_all_norm[val_idx]
+    
+    # Weighted sampler for training to focus on challenging (long ATT) cases
+    att_weights = np.atleast_1d(np.exp(-np.clip(y_train_raw[:, 1], 100.0, None) / 2000.0))
+    train_sampler = WeightedRandomSampler(att_weights, len(att_weights), replacement=True)
+    
+    train_dataset = EnhancedASLDataset(X_train, y_train_norm)
+    
+    # Ensure consistent tensor shapes for torch.compile
+    train_loader = DataLoader(
+        train_dataset,
+        batch_size=batch_size,
+        sampler=train_sampler,
+        drop_last=True,  # Set to True unconditionally for training performance
+        num_workers=min(8, os.cpu_count()),
+        pin_memory=True
+    )
+    
+    val_loader = None
+    if len(X_val) > 0:
+        val_dataset = EnhancedASLDataset(X_val, y_val_norm)
+        val_loader = DataLoader(
+            val_dataset,
+            batch_size=batch_size,
+            num_workers=min(8, os.cpu_count()),
+            pin_memory=True
+        )
+    return train_loader, val_loader
 
 class PerformanceMonitor:
     def __init__(self, config: ResearchConfig, output_dir: Path):
@@ -233,22 +278,46 @@ class HyperparameterOptimizer:
         asl_params_for_sim = ASLParameters(T1_artery=config_obj.T1_artery, T_tau=config_obj.T_tau, alpha_PCASL=config_obj.alpha_PCASL, alpha_VSASL=config_obj.alpha_VSASL)
         simulator_obj = RealisticASLSimulator(params=asl_params_for_sim)
         plds_numpy_arr = np.array(config_obj.pld_values); num_plds = len(plds_numpy_arr)
-        precomputed_hpo_data = simulator_obj.generate_balanced_dataset(plds=plds_numpy_arr, total_subjects=config_obj.optuna_n_subjects, noise_levels=config_obj.training_noise_levels[:1])
-        engineered_features_hpo = engineer_signal_features(precomputed_hpo_data['signals'], num_plds)
-        precomputed_hpo_data['signals'] = np.concatenate([precomputed_hpo_data['signals'], engineered_features_hpo], axis=1)
-        base_nn_input_size = precomputed_hpo_data['signals'].shape[1]
+        
+        # 1. Generate a smaller dataset for this HPO trial
+        hpo_dataset = simulator_obj.generate_balanced_dataset(plds=plds_numpy_arr, total_subjects=config_obj.optuna_n_subjects, noise_levels=config_obj.training_noise_levels[:1])
+        
+        # 2. Engineer features, same as the main pipeline
+        engineered_features_hpo = engineer_signal_features(hpo_dataset['signals'], num_plds)
+        hpo_dataset['signals'] = np.concatenate([hpo_dataset['signals'], engineered_features_hpo], axis=1)
+        base_nn_input_size = hpo_dataset['signals'].shape[1]
 
+        # 3. Calculate normalization stats *specifically for this HPO dataset*
+        X_hpo_raw, y_hpo_raw = hpo_dataset['signals'], hpo_dataset['parameters']
+        norm_stats_hpo = {
+            'pcasl_mean': np.mean(X_hpo_raw[:, :num_plds], axis=0),
+            'pcasl_std': np.std(X_hpo_raw[:, :num_plds], axis=0),
+            'vsasl_mean': np.mean(X_hpo_raw[:, num_plds:num_plds*2], axis=0),
+            'vsasl_std': np.std(X_hpo_raw[:, num_plds:num_plds*2], axis=0),
+            'y_mean_cbf': np.mean(y_hpo_raw[:, 0]), 'y_std_cbf': np.std(y_hpo_raw[:, 0]),
+            'y_mean_att': np.mean(y_hpo_raw[:, 1]), 'y_std_att': np.std(y_hpo_raw[:, 1])
+        }
+        for key in ['pcasl_std', 'vsasl_std', 'y_std_cbf', 'y_std_att']:
+             if isinstance(norm_stats_hpo[key], np.ndarray): norm_stats_hpo[key][norm_stats_hpo[key] < 1e-6] = 1.0
+             elif norm_stats_hpo[key] < 1e-6: norm_stats_hpo[key] = 1.0
+
+        # 4. Create DataLoaders using the standardized helper function
+        train_loader_hpo, val_loader_hpo = create_dataloaders(hpo_dataset, norm_stats_hpo, config_obj.val_split, config_obj.batch_size, num_plds)
+        if not train_loader_hpo: self.monitor.log_progress("OPTUNA_RUN", "No training data for HPO trial.", logging.ERROR); return None, None, {'val_loss': float('inf')}
+
+        # 5. Create and configure the trainer instance
         trial_model_config = asdict(config_obj)
-
-        def create_hpo_model(**kwargs):
-            # No filtering needed here. EnhancedASLNet will pick what it needs from kwargs.
-            return EnhancedASLNet(input_size=base_nn_input_size, **kwargs)
+        def create_hpo_model(**kwargs): return EnhancedASLNet(input_size=base_nn_input_size, **kwargs)
 
         trainer_obj = EnhancedASLTrainer(model_config=trial_model_config, model_class=create_hpo_model, input_size=base_nn_input_size, learning_rate=config_obj.learning_rate, weight_decay=config_obj.weight_decay, batch_size=config_obj.batch_size, n_ensembles=config_obj.n_ensembles, device=device, n_plds_for_model=num_plds, m0_input_feature_model=config_obj.m0_input_feature_model)
-        train_loaders_list, val_loaders_list, _ = trainer_obj.prepare_curriculum_data(simulator_obj, plds=plds_numpy_arr, precomputed_dataset=precomputed_hpo_data, curriculum_att_ranges_config=config_obj.att_ranges_config, n_epochs_for_scheduler=config_obj.optuna_n_epochs)
-        if not train_loaders_list: self.monitor.log_progress("OPTUNA_RUN", "No training data for HPO trial.", logging.ERROR); return None, None, {'val_loss': float('inf')}
-        first_val_loader_for_hpo = next((vl for vl in val_loaders_list if vl and len(vl) > 0), val_loaders_list[0] if val_loaders_list else None)
-        history = trainer_obj.train_ensemble([train_loaders_list[0]] if train_loaders_list else [], [first_val_loader_for_hpo] if first_val_loader_for_hpo else [], epoch_schedule=[config_obj.optuna_n_epochs], early_stopping_patience=5)
+        
+        # 6. Set normalization stats on the trainer and models
+        trainer_obj.norm_stats = norm_stats_hpo
+        trainer_obj.custom_loss_fn.norm_stats = norm_stats_hpo
+        for model in trainer_obj.models: model.set_norm_stats(norm_stats_hpo)
+
+        # 7. Run the training and return the final validation loss
+        history = trainer_obj.train_ensemble([train_loader_hpo], [val_loader_hpo], epoch_schedule=[config_obj.optuna_n_epochs], early_stopping_patience=5)
         final_val_loss = history.get('final_mean_val_loss', float('inf'))
         if np.isnan(final_val_loss): final_val_loss = float('inf')
         return trainer_obj, simulator_obj, {'val_loss': final_val_loss}
@@ -474,30 +543,6 @@ def run_comprehensive_asl_research(config: ResearchConfig, output_parent_dir: Op
     monitor.log_progress("PHASE2", "Starting two-stage ensemble training")
     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu'); monitor.log_progress("PHASE2", f"Using device: {device}")
     
-    # --- Function to create dataloaders for a given dataset ---
-    def create_dataloaders(dataset_dict, norm_stats, val_split, batch_size):
-        X_all, y_all = dataset_dict['signals'], dataset_dict['parameters']
-        X_all_norm = np.array([apply_normalization_to_input_flat(s, norm_stats, num_plds, False) for s in X_all])
-        y_all_norm = np.column_stack([
-            (y_all[:, 0] - norm_stats['y_mean_cbf']) / norm_stats['y_std_cbf'],
-            (y_all[:, 1] - norm_stats['y_mean_att']) / norm_stats['y_std_att']
-        ])
-        perm = np.random.permutation(len(X_all))
-        n_val = int(len(X_all) * val_split)
-        train_idx, val_idx = perm[:-n_val], perm[-n_val:]
-        X_train, y_train_norm, y_train_raw = X_all_norm[train_idx], y_all_norm[train_idx], y_all[train_idx]
-        X_val, y_val_norm = X_all_norm[val_idx], y_all_norm[val_idx]
-        
-        att_weights = np.atleast_1d(np.exp(-np.clip(y_train_raw[:, 1], 100.0, None) / 2000.0))
-        train_sampler = WeightedRandomSampler(att_weights, len(att_weights), replacement=True)
-        
-        train_dataset = EnhancedASLDataset(X_train, y_train_norm)
-        drop_last_flag = len(X_train) > batch_size
-
-        train_loader = DataLoader(train_dataset, batch_size=batch_size, sampler=train_sampler, drop_last=drop_last_flag, num_workers=8, pin_memory=True)
-        val_loader = DataLoader(EnhancedASLDataset(X_val, y_val_norm), batch_size=batch_size, num_workers=8, pin_memory=True) if len(X_val) > 0 else None
-        return train_loader, val_loader
-
     # --- Re-imagined Curriculum ---
     # Stage 1: Foundational Training on FULL dataset
     monitor.log_progress("PHASE2", "Generating Dataset B (Full-Spectrum) for Foundational Training")
@@ -544,8 +589,8 @@ def run_comprehensive_asl_research(config: ResearchConfig, output_parent_dir: Op
 
     # --- Create DataLoaders ---
     monitor.log_progress("PHASE2", "Creating DataLoaders for both training stages")
-    train_loader_B, val_loader_B = create_dataloaders(dataset_B, norm_stats_final, config.val_split, config.batch_size)
-    train_loader_A, val_loader_A = create_dataloaders(dataset_A, norm_stats_final, config.val_split, config.batch_size)
+    train_loader_B, val_loader_B = create_dataloaders(dataset_B, norm_stats_final, config.val_split, config.batch_size, num_plds)
+    train_loader_A, val_loader_A = create_dataloaders(dataset_A, norm_stats_final, config.val_split, config.batch_size, num_plds)
     
     base_input_size_nn = dataset_B['signals'].shape[1]
     model_creation_config = asdict(config)

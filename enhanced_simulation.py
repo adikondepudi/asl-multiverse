@@ -1,3 +1,4 @@
+# enhanced_simulation.py
 import numpy as np
 from typing import Dict, List, Tuple, Optional, Union
 from dataclasses import dataclass
@@ -26,6 +27,51 @@ class PhysiologicalVariation:
     t_tau_perturb_range: Tuple[float, float] = (-0.05, 0.05)
     alpha_perturb_range: Tuple[float, float] = (-0.10, 0.10)
 
+def _generate_single_balanced_subject(args: Tuple) -> Tuple[np.ndarray, List[float], Dict]:
+    """Worker function for parallel generation of a single subject."""
+    att_min_bin, att_max_bin, cbf_full_range, t1_artery_full_range, base_params, plds, noise_levels, physio_var, seed = args
+    
+    np.random.seed(seed)
+    
+    # a) Sample ATT strictly from within its designated bin.
+    true_att = np.random.uniform(att_min_bin, att_max_bin)
+    
+    # b) Sample all other parameters independently from their FULL plausible ranges.
+    true_cbf = np.random.uniform(*cbf_full_range)
+    true_t1_artery = np.random.uniform(*t1_artery_full_range)
+    
+    # c) Randomly select a noise level for this specific sample.
+    current_snr = np.random.choice(noise_levels)
+    
+    # d) Apply sequence parameter perturbations.
+    perturbed_t_tau = base_params.T_tau * (1 + np.random.uniform(*physio_var.t_tau_perturb_range))
+    perturbed_alpha_pcasl = np.clip(base_params.alpha_PCASL * (1 + np.random.uniform(*physio_var.alpha_perturb_range)), 0.1, 1.1)
+    perturbed_alpha_vsasl = np.clip(base_params.alpha_VSASL * (1 + np.random.uniform(*physio_var.alpha_perturb_range)), 0.1, 1.0)
+    
+    simulator = RealisticASLSimulator(base_params)
+
+    # e) Use the efficient generate_synthetic_data to create one noisy instance.
+    data_dict = simulator.generate_synthetic_data(
+        plds,
+        att_values=np.array([true_att]),
+        n_noise=1,
+        tsnr=current_snr,
+        cbf_val=true_cbf,
+        t1_artery_val=true_t1_artery,
+        t_tau_val=perturbed_t_tau,
+        alpha_pcasl_val=perturbed_alpha_pcasl,
+        alpha_vsasl_val=perturbed_alpha_vsasl
+    )
+    
+    pcasl_noisy = data_dict['MULTIVERSE'][0, 0, :, 0]
+    vsasl_noisy = data_dict['MULTIVERSE'][0, 0, :, 1]
+    multiverse_signal_flat = np.concatenate([pcasl_noisy, vsasl_noisy])
+    
+    params = [true_cbf, true_att]
+    perturbed_params_dict = {'t1_artery': true_t1_artery, 't_tau': perturbed_t_tau, 'alpha_pcasl': perturbed_alpha_pcasl, 'alpha_vsasl': perturbed_alpha_vsasl}
+
+    return multiverse_signal_flat, params, perturbed_params_dict
+
 class RealisticASLSimulator(ASLSimulator):
     def __init__(self, params: ASLParameters = ASLParameters()):
         super().__init__(params)
@@ -42,75 +88,47 @@ class RealisticASLSimulator(ASLSimulator):
         Generates a dataset with a near-uniform ATT distribution by decoupling parameters.
         This uses stratified sampling on ATT to ensure the model is trained on an unbiased
         distribution, preventing it from developing a preference for mean ATT values.
+        This version is parallelized for high performance.
         """
-        logger.info("--- Starting Balanced (Uniform ATT) Data Generation ---")
+        logger.info("--- Starting Parallel Balanced (Uniform ATT) Data Generation ---")
         
-        # 1. Setup Bins and Allocation
         att_range = self.physio_var.att_range
         att_bins = np.linspace(att_range[0], att_range[1], num_att_bins + 1)
-        
         subjects_per_bin = total_subjects // num_att_bins
         if subjects_per_bin == 0:
             raise ValueError(f"total_subjects ({total_subjects}) is too low for ATT bins ({num_att_bins}).")
 
         logger.info(f"Stratifying ATT range [{att_range[0]}, {att_range[1]}] into {num_att_bins} bins.")
-        logger.info(f"Allocating {subjects_per_bin} subjects per bin.")
+        logger.info(f"Allocating {subjects_per_bin} subjects per bin using parallel workers.")
 
-        # 2. Initialize Data Structures
-        dataset = {'signals': [], 'parameters': [], 'perturbed_params': []}
-        
-        # Get full physiological ranges for decoupling
         cbf_full_range = self.physio_var.cbf_range
         t1_artery_full_range = self.physio_var.t1_artery_range
         base_params = self.params
+        
+        worker_args = []
+        master_seed = np.random.randint(2**32 - 1)
+        for i in range(num_att_bins):
+            att_min_bin, att_max_bin = att_bins[i], att_bins[i+1]
+            for j in range(subjects_per_bin):
+                worker_seed = master_seed + i * subjects_per_bin + j
+                worker_args.append((
+                    att_min_bin, att_max_bin, cbf_full_range, t1_artery_full_range,
+                    base_params, plds, noise_levels, self.physio_var, worker_seed
+                ))
+        
+        dataset = {'signals': [], 'parameters': [], 'perturbed_params': []}
+        num_workers = max(1, mp.cpu_count() - 2)
+        logger.info(f"Using {num_workers} worker processes.")
 
-        # 3. The Decoupled Generation Loop
-        with tqdm(total=subjects_per_bin * num_att_bins, desc="Balanced Data Generation") as pbar:
-            for i in range(num_att_bins):
-                att_min_bin, att_max_bin = att_bins[i], att_bins[i+1]
-                
-                for _ in range(subjects_per_bin):
-                    # a) Sample ATT strictly from within its designated bin.
-                    true_att = np.random.uniform(att_min_bin, att_max_bin)
-                    
-                    # b) Sample all other parameters independently from their FULL plausible ranges.
-                    true_cbf = np.random.uniform(*cbf_full_range)
-                    true_t1_artery = np.random.uniform(*t1_artery_full_range)
-                    
-                    # c) Randomly select a noise level for this specific sample.
-                    current_snr = np.random.choice(noise_levels)
-                    
-                    # d) Apply sequence parameter perturbations.
-                    perturbed_t_tau = base_params.T_tau * (1 + np.random.uniform(*self.physio_var.t_tau_perturb_range))
-                    perturbed_alpha_pcasl = np.clip(base_params.alpha_PCASL * (1 + np.random.uniform(*self.physio_var.alpha_perturb_range)), 0.1, 1.1)
-                    perturbed_alpha_vsasl = np.clip(base_params.alpha_VSASL * (1 + np.random.uniform(*self.physio_var.alpha_perturb_range)), 0.1, 1.0)
+        with mp.Pool(processes=num_workers) as pool:
+            results = list(tqdm(pool.imap_unordered(_generate_single_balanced_subject, worker_args), 
+                                total=len(worker_args), desc="Parallel Balanced Data Generation"))
+        
+        for signal, params, perturbed_params in results:
+            dataset['signals'].append(signal)
+            dataset['parameters'].append(params)
+            dataset['perturbed_params'].append(perturbed_params)
 
-                    # e) Use the efficient generate_synthetic_data to create one noisy instance.
-                    data_dict = self.generate_synthetic_data(
-                        plds,
-                        att_values=np.array([true_att]),
-                        n_noise=1,
-                        tsnr=current_snr,
-                        cbf_val=true_cbf,
-                        t1_artery_val=true_t1_artery,
-                        t_tau_val=perturbed_t_tau,
-                        alpha_pcasl_val=perturbed_alpha_pcasl,
-                        alpha_vsasl_val=perturbed_alpha_vsasl
-                    )
-                    
-                    # Slicing gets the single noisy sample's PCASL and VSASL parts
-                    pcasl_noisy = data_dict['MULTIVERSE'][0, 0, :, 0]
-                    vsasl_noisy = data_dict['MULTIVERSE'][0, 0, :, 1]
-                    multiverse_signal_flat = np.concatenate([pcasl_noisy, vsasl_noisy])
-                    
-                    # f) Store the result.
-                    dataset['signals'].append(multiverse_signal_flat)
-                    dataset['parameters'].append([true_cbf, true_att])
-                    dataset['perturbed_params'].append({'t1_artery': true_t1_artery, 't_tau': perturbed_t_tau, 'alpha_pcasl': perturbed_alpha_pcasl, 'alpha_vsasl': perturbed_alpha_vsasl})
-
-                    pbar.update(1)
-
-        # 4. Finalize and Return
         for key in ['signals', 'parameters']:
             dataset[key] = np.array(dataset[key])
         
