@@ -1,4 +1,11 @@
 # enhanced_data_generation.py
+# --- WARNING ---
+# This script is DEPRECATED for production training. It generates a full dataset in memory,
+# which is not scalable. It is kept for reference or for generating small, fixed test sets.
+# For scalable training, please use the ASLIterableDataset class in asl_trainer.py,
+# which generates data on-the-fly.
+# --- END WARNING ---
+
 import numpy as np
 from enhanced_simulation import RealisticASLSimulator
 from pathlib import Path

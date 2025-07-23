@@ -13,9 +13,10 @@ import logging
 # --- Import your project's modules ---
 from enhanced_asl_network import EnhancedASLNet
 from enhanced_simulation import RealisticASLSimulator, ASLParameters
-from main import engineer_signal_features
+from utils import engineer_signal_features
 from multiverse_functions import fit_PCVSASL_misMatchPLD_vectInit_pep
 from comparison_framework import apply_normalization_to_input_flat, denormalize_predictions
+from utils import engineer_signal_features
 
 # --- Setup Logging ---
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')

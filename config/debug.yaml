@@ -9,11 +9,11 @@ training:
   dropout_rate: 0.1
   norm_type: "batch"
   
-  # --- MODIFIED: Switched from n_subjects to explicit steps for IterableDataset ---
   steps_per_epoch_stage1: 2
   steps_per_epoch_stage2: 2
   n_epochs_stage1: 1              
-  n_epochs_stage2: 1              
+  n_epochs_stage2: 1
+  validation_steps_per_epoch: 2 # <-- MODIFIED: Added for iterable validation
   
   loss_pinn_weight_stage1: 1.0
   loss_pinn_weight_stage2: 0.1
@@ -33,7 +33,6 @@ training:
   loss_log_var_reg_lambda: 0.0
 
 data:
-  val_split: 0.2
   pld_values: [500, 1000, 1500, 2000, 2500, 3000]
   att_ranges_config:
     - [500, 1500, "Short ATT"]
@@ -42,7 +41,6 @@ data:
   include_m0_in_training_data: false
   
 evaluation:
-  n_validation_subjects: 20
   n_test_subjects_per_att_range: 10
   n_clinical_scenario_subjects: 10
 

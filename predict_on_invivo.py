@@ -12,22 +12,7 @@ from typing import Dict, List, Tuple
 # --- Import/Include Necessary Functions from Your Project ---
 from enhanced_asl_network import EnhancedASLNet
 from multiverse_functions import fit_PCVSASL_misMatchPLD_vectInit_pep
-
-def engineer_signal_features(raw_signal: np.ndarray, num_plds: int) -> np.ndarray:
-    """Engineers explicit shape-based features from raw ASL signal curves."""
-    if raw_signal.ndim == 1: raw_signal = raw_signal.reshape(1, -1)
-    num_samples = raw_signal.shape[0]
-    engineered_features = np.zeros((num_samples, 4))
-    plds_indices = np.arange(num_plds)
-    for i in range(num_samples):
-        pcasl_curve, vsasl_curve = raw_signal[i, :num_plds], raw_signal[i, num_plds:]
-        engineered_features[i, 0] = np.argmax(pcasl_curve)
-        engineered_features[i, 1] = np.argmax(vsasl_curve)
-        pcasl_sum = np.sum(pcasl_curve) + 1e-6
-        vsasl_sum = np.sum(vsasl_curve) + 1e-6
-        engineered_features[i, 2] = np.sum(pcasl_curve * plds_indices) / pcasl_sum
-        engineered_features[i, 3] = np.sum(vsasl_curve * plds_indices) / vsasl_sum
-    return engineered_features
+from utils import engineer_signal_features
 
 def apply_normalization_vectorized(batch: np.ndarray, norm_stats: Dict, num_plds: int) -> np.ndarray:
     """Applies normalization to a batch of input signals for the NN."""

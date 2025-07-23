@@ -15,7 +15,7 @@ RESULTS_DIR = "./comprehensive_results/asl_research_20250616_175302/"  # <-- Edi
 try:
     from enhanced_asl_network import EnhancedASLNet
     from enhanced_simulation import RealisticASLSimulator, ASLParameters
-    from main import engineer_signal_features  # We need the exact feature engineering
+    from utils import engineer_signal_features
     from pcasl_functions import fun_PCASL_1comp_vect_pep
     from vsasl_functions import fun_VSASL_1comp_vect_pep
     from multiverse_functions import fit_PCVSASL_misMatchPLD_vectInit_pep

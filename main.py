@@ -26,28 +26,30 @@ warnings.filterwarnings('ignore', category=UserWarning)
 from enhanced_asl_network import EnhancedASLNet
 from asl_simulation import ASLParameters
 from enhanced_simulation import RealisticASLSimulator
-from asl_trainer import EnhancedASLTrainer, ASLIterableDataset, EnhancedASLDataset
+from asl_trainer import EnhancedASLTrainer, ASLIterableDataset
 from torch.utils.data import DataLoader
 from comparison_framework import ComprehensiveComparison
 from performance_metrics import ProposalEvaluator
 from single_repeat_validation import SingleRepeatValidator, run_single_repeat_validation_main
+from utils import engineer_signal_features  # <-- MODIFIED: Centralized import
 
 script_logger = logging.getLogger(__name__)
 
 @dataclass
 class ResearchConfig:
+    # --- MODIFIED: Configuration now reflects the iterable dataset paradigm ---
     # Training parameters
     hidden_sizes: List[int] = field(default_factory=lambda: [256, 128, 64])
     learning_rate: float = 0.001
     weight_decay: float = 1e-5
     batch_size: int = 256
-    val_split: float = 0.2
     
-    # --- MODIFIED: Switched from n_subjects to explicit steps for IterableDataset ---
+    # Explicit steps for iterable datasets
     steps_per_epoch_stage1: int = 20
     steps_per_epoch_stage2: int = 40
     n_epochs_stage1: int = 140
     n_epochs_stage2: int = 60
+    validation_steps_per_epoch: int = 50 # Number of batches to use for validation
     
     loss_pinn_weight_stage1: float = 1.0
     loss_pinn_weight_stage2: float = 0.1
@@ -94,9 +96,6 @@ class ResearchConfig:
     training_noise_levels_stage1: List[float] = field(default_factory=lambda: [3.0, 5.0, 10.0, 15.0])
     training_noise_levels_stage2: List[float] = field(default_factory=lambda: [10.0, 15.0, 20.0])
     
-    # --- MODIFIED: Increased validation subjects for robustness ---
-    n_validation_subjects: int = 10000
-
     n_test_subjects_per_att_range: int = 200 
     test_snr_levels: List[float] = field(default_factory=lambda: [5.0, 10.0])
     test_conditions: List[str] = field(default_factory=lambda: ['healthy', 'stroke'])
@@ -110,52 +109,9 @@ class ResearchConfig:
     })
 
     wandb_project: str = "asl-multiverse-project"
-    wandb_entity: Optional[str] = None 
+    wandb_entity: Optional[str] = None
 
-def engineer_signal_features(raw_signal: np.ndarray, num_plds: int) -> np.ndarray:
-    if raw_signal.ndim == 1: raw_signal = raw_signal[np.newaxis, :]
-    num_samples = raw_signal.shape[0]
-    engineered_features = np.zeros((num_samples, 4))
-    plds_indices = np.arange(num_plds)
-    for i in range(num_samples):
-        pcasl_curve, vsasl_curve = raw_signal[i, :num_plds], raw_signal[i, num_plds:]
-        engineered_features[i, 0] = np.argmax(pcasl_curve)
-        engineered_features[i, 1] = np.argmax(vsasl_curve)
-        pcasl_sum = np.sum(pcasl_curve) + 1e-6
-        vsasl_sum = np.sum(vsasl_curve) + 1e-6
-        engineered_features[i, 2] = np.sum(pcasl_curve * plds_indices) / pcasl_sum
-        engineered_features[i, 3] = np.sum(vsasl_curve * plds_indices) / vsasl_sum
-    return engineered_features.astype(np.float32)
-
-class CollateFn:
-    """A collate function to process batches from the IterableDataset."""
-    def __init__(self, norm_stats, num_plds):
-        self.norm_stats = norm_stats
-        self.num_plds = num_plds
-        self.num_raw_signal_features = num_plds * 2
-
-    def __call__(self, batch):
-        raw_signals, raw_params = zip(*batch)
-        raw_signals = np.array(raw_signals)
-        raw_params = np.array(raw_params)
-
-        # 1. Engineer features from raw signals
-        eng_features = engineer_signal_features(raw_signals, self.num_plds)
-        
-        # 2. Normalize raw signals
-        pcasl_norm = (raw_signals[:, :self.num_plds] - self.norm_stats['pcasl_mean']) / (self.norm_stats['pcasl_std'] + 1e-6)
-        vsasl_norm = (raw_signals[:, self.num_plds:] - self.norm_stats['vsasl_mean']) / (self.norm_stats['vsasl_std'] + 1e-6)
-        
-        # 3. Concatenate to form the final model input
-        final_input = np.concatenate([pcasl_norm, vsasl_norm, eng_features], axis=1)
-
-        # 4. Normalize the target parameters
-        params_norm = np.column_stack([
-            (raw_params[:, 0] - self.norm_stats['y_mean_cbf']) / self.norm_stats['y_std_cbf'],
-            (raw_params[:, 1] - self.norm_stats['y_mean_att']) / self.norm_stats['y_std_att']
-        ])
-        
-        return torch.from_numpy(final_input.astype(np.float32)), torch.from_numpy(params_norm.astype(np.float32))
+# --- REMOVED: CollateFn is no longer needed as logic is moved into the dataset ---
 
 class PerformanceMonitor: # Placeholder
     def __init__(self, *args, **kwargs): pass
@@ -197,6 +153,8 @@ def run_comprehensive_asl_research(config: ResearchConfig, output_parent_dir: Op
     monitor.log_progress("PHASE2", f"Using device: {device}")
 
     monitor.log_progress("PHASE2", "Generating a fixed dataset for normalization stats...")
+    # NOTE: This dataset is held in memory, but only temporarily to calculate statistics.
+    # The size (5000 subjects) is manageable for this one-time operation.
     norm_dataset = simulator.generate_diverse_dataset(plds=plds_np, n_subjects=5000, conditions=['healthy'], noise_levels=config.training_noise_levels_stage1)
     
     raw_signals_norm, raw_params_norm = norm_dataset['signals'], norm_dataset['parameters']
@@ -209,7 +167,6 @@ def run_comprehensive_asl_research(config: ResearchConfig, output_parent_dir: Op
         'y_mean_att': np.mean(raw_params_norm[:, 1]), 'y_std_att': np.std(raw_params_norm[:, 1]),
     }
     
-    # Clip small standard deviations to 1.0 to prevent division by zero
     for key in ['pcasl_std', 'vsasl_std']:
         norm_stats_final[key] = np.clip(norm_stats_final[key], a_min=1e-6, a_max=None).tolist()
     for key in ['y_std_cbf', 'y_std_att']:
@@ -218,38 +175,32 @@ def run_comprehensive_asl_research(config: ResearchConfig, output_parent_dir: Op
     amplitudes = np.linalg.norm(raw_signals_norm, axis=1)
     norm_stats_final['amplitude_mean'] = np.mean(amplitudes)
     norm_stats_final['amplitude_std'] = max(np.std(amplitudes), 1e-6)
-
-    train_dataset_s1 = ASLIterableDataset(simulator, plds_np, config.training_noise_levels_stage1)
-    train_dataset_s2 = ASLIterableDataset(simulator, plds_np, config.training_noise_levels_stage2)
     
-    collate_fn = CollateFn(norm_stats_final, num_plds)
+    # --- MODIFIED: Datasets now receive norm_stats to perform all data prep internally ---
+    train_dataset_s1 = ASLIterableDataset(simulator, plds_np, config.training_noise_levels_stage1, norm_stats=norm_stats_final)
+    train_dataset_s2 = ASLIterableDataset(simulator, plds_np, config.training_noise_levels_stage2, norm_stats=norm_stats_final)
     
     # --- MODIFIED: Use SLURM environment variables for optimal worker count on HPC ---
     try:
-        # Best for SLURM: Use the number of CPUs allocated to the task
         num_workers = int(os.environ.get('SLURM_CPUS_PER_TASK', os.cpu_count()))
     except (ValueError, TypeError):
-        # Fallback if the env var is not set or not a number
         num_workers = os.cpu_count()
     script_logger.info(f"Using {num_workers} DataLoader workers.")
 
-    train_loader_s1 = DataLoader(train_dataset_s1, batch_size=config.batch_size, num_workers=num_workers, collate_fn=collate_fn, pin_memory=True, persistent_workers=(num_workers > 0))
-    train_loader_s2 = DataLoader(train_dataset_s2, batch_size=config.batch_size, num_workers=num_workers, collate_fn=collate_fn, pin_memory=True, persistent_workers=(num_workers > 0))
+    # --- MODIFIED: DataLoaders no longer need the custom collate_fn ---
+    train_loader_s1 = DataLoader(train_dataset_s1, batch_size=config.batch_size, num_workers=num_workers, pin_memory=True, persistent_workers=(num_workers > 0))
+    train_loader_s2 = DataLoader(train_dataset_s2, batch_size=config.batch_size, num_workers=num_workers, pin_memory=True, persistent_workers=(num_workers > 0))
 
-    monitor.log_progress("PHASE2", f"Generating a fixed validation set with {config.n_validation_subjects} subjects...")
-    val_dataset_fixed = simulator.generate_diverse_dataset(plds=plds_np, n_subjects=config.n_validation_subjects, conditions=['healthy'], noise_levels=config.training_noise_levels_stage1)
-    
-    val_raw_signals, val_raw_params = val_dataset_fixed['signals'], val_dataset_fixed['parameters']
-    val_eng_features = engineer_signal_features(val_raw_signals, num_plds)
-    val_pcasl_norm = (val_raw_signals[:, :num_plds] - norm_stats_final['pcasl_mean']) / (np.array(norm_stats_final['pcasl_std']) + 1e-6)
-    val_vsasl_norm = (val_raw_signals[:, num_plds:] - norm_stats_final['vsasl_mean']) / (np.array(norm_stats_final['vsasl_std']) + 1e-6)
-    val_input_final = np.concatenate([val_pcasl_norm, val_vsasl_norm, val_eng_features], axis=1)
-    val_params_norm = np.column_stack([
-        (val_raw_params[:, 0] - norm_stats_final['y_mean_cbf']) / norm_stats_final['y_std_cbf'],
-        (val_raw_params[:, 1] - norm_stats_final['y_mean_att']) / norm_stats_final['y_std_att']
-    ])
-    val_dataset = EnhancedASLDataset(val_input_final, val_params_norm)
-    val_loader = DataLoader(val_dataset, batch_size=config.batch_size * 2, num_workers=num_workers, pin_memory=True, drop_last=False, persistent_workers=(num_workers > 0))
+    # --- CRITICAL FIX: The validation set is now also an iterable dataset to prevent OOM errors ---
+    monitor.log_progress("PHASE2", "Creating iterable validation dataset...")
+    val_dataset_iterable = ASLIterableDataset(simulator, plds_np, config.training_noise_levels_stage1, norm_stats=norm_stats_final)
+    val_loader = DataLoader(
+        val_dataset_iterable,
+        batch_size=config.batch_size * 2,
+        num_workers=num_workers,
+        pin_memory=True,
+        persistent_workers=(num_workers > 0)
+    )
 
     base_input_size_nn = num_plds * 2 + 4
     model_creation_config = asdict(config)
@@ -260,7 +211,6 @@ def run_comprehensive_asl_research(config: ResearchConfig, output_parent_dir: Op
     trainer.custom_loss_fn.norm_stats = norm_stats_final
     for model in trainer.models: model.set_norm_stats(norm_stats_final)
     
-    # --- MODIFIED: Use explicit steps from config, not calculated from n_subjects ---
     steps_per_epoch_s1 = config.steps_per_epoch_stage1
     steps_per_epoch_s2 = config.steps_per_epoch_stage2
     total_steps = steps_per_epoch_s1 * config.n_epochs_stage1 + steps_per_epoch_s2 * config.n_epochs_stage2
@@ -282,10 +232,9 @@ def run_comprehensive_asl_research(config: ResearchConfig, output_parent_dir: Op
     training_duration_hours = (time.time() - training_start_time) / 3600
     monitor.log_progress("PHASE2", f"Training completed in {training_duration_hours:.2f} hours.")
     
-    # The rest of the pipeline remains the same
-    # ...
+    # ... The rest of the pipeline remains the same ...
     
-    return {} # Return dummy dict
+    return {}
 
 if __name__ == "__main__":
     logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(name)s - %(levelname)s - %(message)s', handlers=[logging.StreamHandler(sys.stdout)], force=True) 

@@ -11,12 +11,12 @@ training:
   hidden_sizes: [512, 256, 64]                 # <-- From Optuna
   dropout_rate: 0.10781884498874056            # <-- From Optuna
   
-  # --- MODIFIED: Switched from n_subjects to explicit steps for IterableDataset ---
   n_ensembles: 1                               # <-- Reduced for speed
-  steps_per_epoch_stage1: 15                   # <-- Reduced for speed (was 2000 subjects)
-  steps_per_epoch_stage2: 8                    # <-- Reduced for speed (was 1000 subjects)
+  steps_per_epoch_stage1: 15                   # <-- Reduced for speed
+  steps_per_epoch_stage2: 8                    # <-- Reduced for speed
   n_epochs_stage1: 30                          # <-- Reduced for speed
   n_epochs_stage2: 15                          # <-- Reduced for speed
+  validation_steps_per_epoch: 10               # <-- MODIFIED: Added for iterable validation
 
   # --- These values will be OVERWRITTEN by the run_ablation.sh script ---
   loss_pinn_weight_stage1: 1.0
@@ -40,7 +40,6 @@ training:
   loss_log_var_reg_lambda: 0.0
 
 data:
-  val_split: 0.2
   pld_values: [500, 1000, 1500, 2000, 2500, 3000]
   att_ranges_config:
     - [500, 1500, "Short ATT"]
@@ -49,7 +48,6 @@ data:
   include_m0_in_training_data: false
 
 evaluation:
-  n_validation_subjects: 200      # Reduced for speed
   n_test_subjects_per_att_range: 50 # Reduced for speed
   n_clinical_scenario_subjects: 20  # Reduced for speed
 
@@ -62,7 +60,6 @@ simulation:
   T_tau: 1800.0
   reference_CBF: 60.0
 
-# This section is not used when running the ablation script directly
 optuna:
   optuna_n_trials: 0
   optuna_study_name: "ablation_run"

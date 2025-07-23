@@ -18,7 +18,7 @@ try:
     from enhanced_simulation import RealisticASLSimulator, ASLParameters
     from pcasl_functions import fun_PCASL_1comp_vect_pep
     from vsasl_functions import fun_VSASL_1comp_vect_pep
-    from main import engineer_signal_features # Import needed for model input
+    from utils import engineer_signal_features
 except ImportError as e:
     print(f"Error: Could not import necessary project modules. Make sure you are running this script from the project's root directory. Details: {e}")
     exit()

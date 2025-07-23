@@ -9,39 +9,31 @@ training:
   dropout_rate: 0.1
   norm_type: "batch"
   
-  # --- MODIFIED: Switched from n_subjects to explicit steps for IterableDataset ---
   steps_per_epoch_stage1: 20
   steps_per_epoch_stage2: 40
   n_epochs_stage1: 140
   n_epochs_stage2: 60
+  validation_steps_per_epoch: 50 # <-- MODIFIED: Added for iterable validation
   
   loss_pinn_weight_stage1: 1.0
   loss_pinn_weight_stage2: 0.1
   learning_rate_stage2: 0.0002
   
-  # Model-specific params for EnhancedASLNet
   use_transformer_temporal_model: true
   m0_input_feature_model: false 
-
-  # Transformer settings
   use_focused_transformer_model: true 
   transformer_d_model_focused: 32     
   transformer_nhead_model: 4
   transformer_nlayers_model: 2
-  
-  # Uncertainty head settings for EnhancedASLNet
   log_var_cbf_min: -6.0
   log_var_cbf_max: 7.0
   log_var_att_min: -2.0
   log_var_att_max: 14.0
-
-  # CustomLoss settings
   loss_weight_cbf: 1.0
   loss_weight_att: 2.0
   loss_log_var_reg_lambda: 0.0
 
 data:
-  val_split: 0.2
   pld_values: [500, 1000, 1500, 2000, 2500, 3000]
   att_ranges_config:
     - [500, 1500, "Short ATT"]
@@ -50,7 +42,6 @@ data:
   include_m0_in_training_data: false
   
 evaluation:
-  n_validation_subjects: 2000 
   n_test_subjects_per_att_range: 200
   n_clinical_scenario_subjects: 100
 
