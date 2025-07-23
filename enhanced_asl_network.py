@@ -82,7 +82,7 @@ def _torch_physical_kinetic_model(
     T2_factor = torch.tensor(model_params.get('T2_factor', 1.0), device=device, dtype=torch.float32)
     lambda_blood = 0.90; M0_b = 1.0
 
-    B = pred_cbf_cgs.shape[0]
+    B = pred_cbf.shape[0]
     plds_b = plds.unsqueeze(0).expand(B, -1)
 
     alpha1 = alpha_PCASL * (alpha_BS1**4)
@@ -112,7 +112,6 @@ def _torch_physical_kinetic_model(
 
     return pcasl_sig, vsasl_sig
 
-# --- OPTIMIZATION: Compile the physics model for a speedup in the PINN loss ---
 _compiled_torch_physical_kinetic_model = torch.compile(_torch_physical_kinetic_model, mode="reduce-overhead")
 
 def _torch_analytic_gradients(
@@ -350,6 +349,7 @@ def torch_kinetic_model(pred_cbf_norm: torch.Tensor, pred_att_norm: torch.Tensor
     pred_att = pred_att_norm * norm_stats['y_std_att'] + norm_stats['y_mean_att']
     plds = torch.tensor(model_params['pld_values'], device=device, dtype=torch.float32)
 
+    # --- FIX: CALL THE COMPILED PHYSICS MODEL ---
     pcasl_sig, vsasl_sig = _compiled_torch_physical_kinetic_model(pred_cbf, pred_att, plds, model_params)
 
     reconstructed_signal = torch.cat([pcasl_sig, vsasl_sig], dim=1)

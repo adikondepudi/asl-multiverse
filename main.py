@@ -155,11 +155,9 @@ class CollateFn:
         
         return torch.from_numpy(final_input.astype(np.float32)), torch.from_numpy(params_norm.astype(np.float32))
 
-# ... (PerformanceMonitor, HyperparameterOptimizer, ClinicalValidator, PublicationGenerator classes remain the same)
-# For brevity, they are omitted here but should be kept in your main.py file.
 class PerformanceMonitor: # Placeholder
     def __init__(self, *args, **kwargs): pass
-    def log_progress(self, *args, **kwargs): print(args, kwargs)
+    def log_progress(self, *args, **kwargs): script_logger.info(f"{args} {kwargs}")
     def check_target_achievement(self, *args, **kwargs): return {}
 class HyperparameterOptimizer: # Placeholder
     def __init__(self, *args, **kwargs): pass
@@ -192,77 +190,66 @@ def run_comprehensive_asl_research(config: ResearchConfig, output_parent_dir: Op
     asl_params_sim = ASLParameters(**{k:v for k,v in asdict(config).items() if k in ASLParameters.__annotations__})
     simulator = RealisticASLSimulator(params=asl_params_sim)
 
-    best_optuna_params = {} # Optuna logic remains the same
-
     monitor.log_progress("PHASE2", "Starting two-stage ensemble training")
-    device = torch.device('cuda' if torch.cuda.is_available() else 'cpu'); monitor.log_progress("PHASE2", f"Using device: {device}")
+    device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+    monitor.log_progress("PHASE2", f"Using device: {device}")
 
-    # --- NEW DATA PIPELINE ---
-    # 1. Generate a smaller, fixed dataset to calculate normalization stats from.
     monitor.log_progress("PHASE2", "Generating a fixed dataset for normalization stats...")
     norm_dataset = simulator.generate_diverse_dataset(plds=plds_np, n_subjects=5000, conditions=['healthy'], noise_levels=config.training_noise_levels_stage1)
     
-    # 2. Calculate normalization statistics
     raw_signals_norm, raw_params_norm = norm_dataset['signals'], norm_dataset['parameters']
     norm_stats_final = {
-        'pcasl_mean': np.mean(raw_signals_norm[:, :num_plds], axis=0),
-        'pcasl_std': np.std(raw_signals_norm[:, :num_plds], axis=0),
-        'vsasl_mean': np.mean(raw_signals_norm[:, num_plds:], axis=0),
-        'vsasl_std': np.std(raw_signals_norm[:, num_plds:], axis=0),
+        'pcasl_mean': np.mean(raw_signals_norm[:, :num_plds], axis=0).tolist(),
+        'pcasl_std': np.std(raw_signals_norm[:, :num_plds], axis=0).tolist(),
+        'vsasl_mean': np.mean(raw_signals_norm[:, num_plds:], axis=0).tolist(),
+        'vsasl_std': np.std(raw_signals_norm[:, num_plds:], axis=0).tolist(),
         'y_mean_cbf': np.mean(raw_params_norm[:, 0]), 'y_std_cbf': np.std(raw_params_norm[:, 0]),
         'y_mean_att': np.mean(raw_params_norm[:, 1]), 'y_std_att': np.std(raw_params_norm[:, 1]),
     }
-    for key in ['pcasl_std', 'vsasl_std', 'y_std_cbf', 'y_std_att']:
-        norm_stats_final[key][norm_stats_final[key] < 1e-6] = 1.0
-    # Also need amplitude stats for the model
+    
+    # Clip small standard deviations to 1.0 to prevent division by zero
+    for key in ['pcasl_std', 'vsasl_std']:
+        norm_stats_final[key] = np.clip(norm_stats_final[key], a_min=1e-6, a_max=None).tolist()
+    for key in ['y_std_cbf', 'y_std_att']:
+        norm_stats_final[key] = max(norm_stats_final[key], 1e-6)
+
     amplitudes = np.linalg.norm(raw_signals_norm, axis=1)
     norm_stats_final['amplitude_mean'] = np.mean(amplitudes)
-    norm_stats_final['amplitude_std'] = np.std(amplitudes)
-    if norm_stats_final['amplitude_std'] < 1e-6: norm_stats_final['amplitude_std'] = 1.0
+    norm_stats_final['amplitude_std'] = max(np.std(amplitudes), 1e-6)
 
-    # 3. Create IterableDatasets for on-the-fly training data
     train_dataset_s1 = ASLIterableDataset(simulator, plds_np, config.training_noise_levels_stage1)
     train_dataset_s2 = ASLIterableDataset(simulator, plds_np, config.training_noise_levels_stage2)
     
-    # 4. Create the collate function with the final normalization stats
     collate_fn = CollateFn(norm_stats_final, num_plds)
+    
+    num_workers = min(8, os.cpu_count())
+    train_loader_s1 = DataLoader(train_dataset_s1, batch_size=config.batch_size, num_workers=num_workers, collate_fn=collate_fn, pin_memory=True, persistent_workers=(num_workers > 0))
+    train_loader_s2 = DataLoader(train_dataset_s2, batch_size=config.batch_size, num_workers=num_workers, collate_fn=collate_fn, pin_memory=True, persistent_workers=(num_workers > 0))
 
-    # 5. Create the training DataLoaders
-    train_loader_s1 = DataLoader(train_dataset_s1, batch_size=config.batch_size, num_workers=min(8, os.cpu_count()), collate_fn=collate_fn, pin_memory=True)
-    train_loader_s2 = DataLoader(train_dataset_s2, batch_size=config.batch_size, num_workers=min(8, os.cpu_count()), collate_fn=collate_fn, pin_memory=True)
-
-    # 6. Generate a single, fixed validation dataset
     monitor.log_progress("PHASE2", f"Generating a fixed validation set with {config.n_validation_subjects} subjects...")
     val_dataset_fixed = simulator.generate_diverse_dataset(plds=plds_np, n_subjects=config.n_validation_subjects, conditions=['healthy'], noise_levels=config.training_noise_levels_stage1)
     
-    # 7. Process and create the validation DataLoader
-    val_raw_signals = val_dataset_fixed['signals']
-    val_raw_params = val_dataset_fixed['parameters']
+    val_raw_signals, val_raw_params = val_dataset_fixed['signals'], val_dataset_fixed['parameters']
     val_eng_features = engineer_signal_features(val_raw_signals, num_plds)
-    val_pcasl_norm = (val_raw_signals[:, :num_plds] - norm_stats_final['pcasl_mean']) / (norm_stats_final['pcasl_std'] + 1e-6)
-    val_vsasl_norm = (val_raw_signals[:, num_plds:] - norm_stats_final['vsasl_mean']) / (norm_stats_final['vsasl_std'] + 1e-6)
+    val_pcasl_norm = (val_raw_signals[:, :num_plds] - norm_stats_final['pcasl_mean']) / (np.array(norm_stats_final['pcasl_std']) + 1e-6)
+    val_vsasl_norm = (val_raw_signals[:, num_plds:] - norm_stats_final['vsasl_mean']) / (np.array(norm_stats_final['vsasl_std']) + 1e-6)
     val_input_final = np.concatenate([val_pcasl_norm, val_vsasl_norm, val_eng_features], axis=1)
     val_params_norm = np.column_stack([
         (val_raw_params[:, 0] - norm_stats_final['y_mean_cbf']) / norm_stats_final['y_std_cbf'],
         (val_raw_params[:, 1] - norm_stats_final['y_mean_att']) / norm_stats_final['y_std_att']
     ])
-    
     val_dataset = EnhancedASLDataset(val_input_final, val_params_norm)
-    # drop_last=False is crucial for validation to evaluate on all samples
-    val_loader = DataLoader(val_dataset, batch_size=config.batch_size, num_workers=min(8, os.cpu_count()), pin_memory=True, drop_last=False)
-    # --- END NEW DATA PIPELINE ---
+    val_loader = DataLoader(val_dataset, batch_size=config.batch_size * 2, num_workers=num_workers, pin_memory=True, drop_last=False, persistent_workers=(num_workers > 0))
 
-    base_input_size_nn = num_plds * 2 + 4 # 4 engineered features
+    base_input_size_nn = num_plds * 2 + 4
     model_creation_config = asdict(config)
     def create_main_model_closure(**kwargs): return EnhancedASLNet(input_size=base_input_size_nn, **kwargs)
 
     trainer = EnhancedASLTrainer(model_config=model_creation_config, model_class=create_main_model_closure, input_size=base_input_size_nn, learning_rate=config.learning_rate, weight_decay=config.weight_decay, batch_size=config.batch_size, n_ensembles=config.n_ensembles, device=device, n_plds_for_model=num_plds)
-
     trainer.norm_stats = norm_stats_final
     trainer.custom_loss_fn.norm_stats = norm_stats_final
     for model in trainer.models: model.set_norm_stats(norm_stats_final)
     
-    # Define steps per epoch based on config `n_subjects`
     steps_per_epoch_s1 = config.n_subjects_stage1 // config.batch_size
     steps_per_epoch_s2 = config.n_subjects_stage2 // config.batch_size
     total_steps = steps_per_epoch_s1 * config.n_epochs_stage1 + steps_per_epoch_s2 * config.n_epochs_stage2
@@ -270,53 +257,26 @@ def run_comprehensive_asl_research(config: ResearchConfig, output_parent_dir: Op
     for opt in trainer.optimizers:
         trainer.schedulers.append(torch.optim.lr_scheduler.OneCycleLR(opt, max_lr=config.learning_rate, total_steps=total_steps))
     
-    # The iterable loader doesn't have a `len`. We must manually limit the steps per epoch.
-    # This is typically done by wrapping the loader or checking inside the training loop.
-    # For simplicity here, we assume the trainer's epoch loop will be adapted to handle iterable datasets
-    # by using a fixed number of steps. Let's make that explicit.
-    # Let's modify the trainer to accept `steps_per_epoch`
-    # NOTE: I'll adapt the existing trainer by creating a simple iterator wrapper in this script.
-    
-    from itertools import islice
-    
-    # We need to re-wrap the loaders to limit their length per epoch
-    train_loader_s1_limited = (islice(train_loader_s1, steps_per_epoch_s1) for _ in range(config.n_epochs_stage1))
-    train_loader_s2_limited = (islice(train_loader_s2, steps_per_epoch_s2) for _ in range(config.n_epochs_stage2))
-
-    # This requires a small change in the trainer loop to handle this generator of loaders
-    # Let's keep it simple: the trainer will just see a loader of a fixed length for each epoch.
-    # This means we need to manually construct the list of loaders.
-    
     monitor.log_progress("PHASE2", f"Training {config.n_ensembles}-model ensemble...")
     training_start_time = time.time()
     
     trainer.train_ensemble(
-        train_loaders=[train_loader_s1 for _ in range(config.n_epochs_stage1)], # This is not ideal.
-        # A better way is to adapt the trainer. Let's assume the trainer is adapted.
-        # The provided trainer isn't, so I'll revert to a simpler model:
-        # Generate the loaders for each epoch. This is still better than all data at once.
-        # I will assume the trainer loop is simply `for batch in loader:`
-        # and that the loader has a fixed number of steps.
-        # This is a good compromise. Let's define the loaders as fixed length iterators.
-        
-    train_loaders_for_trainer_s1 = [islice(train_loader_s1, steps_per_epoch_s1)]
-    train_loaders_for_trainer_s2 = [islice(train_loader_s2, steps_per_epoch_s2)]
-    
-    trainer.train_ensemble(train_loaders=train_loaders_for_trainer_s1, val_loaders=[val_loader], epoch_schedule=[config.n_epochs_stage1])
-    trainer.train_ensemble(train_loaders=train_loaders_for_trainer_s2, val_loaders=[val_loader], epoch_schedule=[config.n_epochs_stage2])
+        train_loaders=[train_loader_s1, train_loader_s2],
+        val_loaders=[val_loader, val_loader],
+        epoch_schedule=[config.n_epochs_stage1, config.n_epochs_stage2],
+        steps_per_epoch_schedule=[steps_per_epoch_s1, steps_per_epoch_s2],
+        early_stopping_patience=25 
+    )
 
     training_duration_hours = (time.time() - training_start_time) / 3600
     monitor.log_progress("PHASE2", f"Training completed in {training_duration_hours:.2f} hours.")
-    # ... rest of the pipeline remains the same
     
-    # --- The rest of the script (evaluation, etc.) remains the same ---
-    monitor.log_progress("PHASE3", "Starting clinical validation")
+    # The rest of the pipeline remains the same
     # ...
     
     return {} # Return dummy dict
 
 if __name__ == "__main__":
-    # Main execution block remains the same
     logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(name)s - %(levelname)s - %(message)s', handlers=[logging.StreamHandler(sys.stdout)], force=True) 
     config_file_path_arg = sys.argv[1] if len(sys.argv) > 1 else "config/default.yaml"
     output_dir_arg = sys.argv[2] if len(sys.argv) > 2 else None
