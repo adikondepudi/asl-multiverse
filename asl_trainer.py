@@ -197,13 +197,16 @@ class ASLIterableDataset(IterableDataset):
         self.t1_range = self.physio_var.t1_artery_range
         self.norm_stats = norm_stats
 
+    ### MODIFIED ### - This entire method is updated with fail-fast logic.
     def __iter__(self):
         worker_info = torch.utils.data.get_worker_info()
         if worker_info is not None: np.random.seed(worker_info.id + int(time.time() * 1000) % (2**32))
         else: np.random.seed(int(time.time() * 1000) % (2**32))
 
-        ### --- DEEPMIND FIX: Robustness --- ###
-        # Add a try-except block to prevent a worker from hanging on a rare simulator error.
+        # --- NEW: Add a counter to prevent silent hangs on persistent errors ---
+        consecutive_failures = 0
+        max_consecutive_failures = 100 # Stop after 100 straight failures
+
         while True:
             try:
                 # 1. Stratified ATT sampling
@@ -247,12 +250,24 @@ class ASLIterableDataset(IterableDataset):
                 ])
                 
                 yield torch.from_numpy(final_input.astype(np.float32)), torch.from_numpy(params_norm.astype(np.float32))
-            
+
+                # --- NEW: Reset counter on success ---
+                consecutive_failures = 0
+
             except Exception as e:
                 worker_id = worker_info.id if worker_info else -1
                 logger.error(f"DataLoader worker {worker_id} failed to generate a sample: {e}")
                 traceback.print_exc()
-                continue # Skip this sample and try to generate another one
+
+                # --- NEW: Fail-fast logic ---
+                consecutive_failures += 1
+                if consecutive_failures >= max_consecutive_failures:
+                    raise RuntimeError(
+                        f"DataLoader worker {worker_id} has failed {max_consecutive_failures} consecutive times. "
+                        "This indicates a persistent bug in data generation. Aborting training."
+                    ) from e
+                
+                continue # Still allow skipping for transient errors
 
 class EnhancedASLTrainer:
     def __init__(self,
@@ -455,7 +470,7 @@ class EnhancedASLTrainer:
             att_weights = 1.0 / (all_att_aleatoric_vars_np + 1e-9); ensemble_att_mean_norm = np.average(all_att_means_np, weights=att_weights)
             mean_aleatoric_cbf_var_norm = np.mean(all_cbf_aleatoric_vars_np); mean_aleatoric_att_var_norm = np.mean(all_att_aleatoric_vars_np)
             epistemic_cbf_var_norm = np.var(all_cbf_means_norm_np) if self.n_ensembles > 1 else 0.0
-            epistemic_att_var_norm = np.var(all_att_means_norm_np) if self.n_ensembles > 1 else 0.0
+            epistemic_att_var_norm = np.var(all_att_means_np) if self.n_ensembles > 1 else 0.0
         else:
             all_cbf_means_norm_np = np.concatenate(all_cbf_means_norm_list, axis=1); all_att_means_norm_np = np.concatenate(all_att_means_norm_list, axis=1) 
             all_cbf_aleatoric_vars_np = np.concatenate(all_cbf_aleatoric_vars_list, axis=1); all_att_aleatoric_vars_np = np.concatenate(all_att_aleatoric_vars_list, axis=1) 
