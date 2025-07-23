@@ -6,10 +6,13 @@ training:
   n_ensembles: 5
   dropout_rate: 0.1
   norm_type: "batch"
-  n_subjects_stage1: 40000
-  n_epochs_stage1: 200
-  n_subjects_stage2: 10000
-  n_epochs_stage2: 80
+  
+  # --- MODIFIED: Switched from n_subjects to explicit steps for IterableDataset ---
+  steps_per_epoch_stage1: 1000
+  steps_per_epoch_stage2: 500
+  n_epochs_stage1: 80
+  n_epochs_stage2: 40
+  
   loss_pinn_weight_stage1: 2.0
   loss_pinn_weight_stage2: 0.1
   learning_rate_stage2: 0.0002
@@ -51,6 +54,17 @@ optuna:
   optuna_n_subjects: 2000
   optuna_n_epochs: 40
   optuna_study_name: "asl_multiverse_hpo_production"
+
+evaluation:
+  # --- MODIFIED: Increased validation subjects for robustness ---
+  n_validation_subjects: 10000 
+  n_test_subjects_per_att_range: 200
+  n_clinical_scenario_subjects: 100
+  clinical_scenario_definitions:
+    healthy_adult: {cbf_range: [50.0, 80.0], att_range: [800.0, 1800.0], snr: 8.0}
+    elderly_patient: {cbf_range: [30.0, 60.0], att_range: [1500.0, 3000.0], snr: 5.0}
+    stroke_patient: {cbf_range: [10.0, 40.0], att_range: [2000.0, 4000.0], snr: 3.0}
+    tumor_patient: {cbf_range: [20.0, 120.0], att_range: [1000.0, 3000.0], snr: 6.0}
 
 logging:
   level: "INFO"

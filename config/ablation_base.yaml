@@ -11,10 +11,10 @@ training:
   hidden_sizes: [512, 256, 64]                 # <-- From Optuna
   dropout_rate: 0.10781884498874056            # <-- From Optuna
   
-  # --- Settings reduced for a much FASTER run ---
+  # --- MODIFIED: Switched from n_subjects to explicit steps for IterableDataset ---
   n_ensembles: 1                               # <-- Reduced for speed
-  n_subjects_stage1: 2000                      # <-- Reduced for speed
-  n_subjects_stage2: 1000                      # <-- Reduced for speed
+  steps_per_epoch_stage1: 15                   # <-- Reduced for speed (was 2000 subjects)
+  steps_per_epoch_stage2: 8                    # <-- Reduced for speed (was 1000 subjects)
   n_epochs_stage1: 30                          # <-- Reduced for speed
   n_epochs_stage2: 15                          # <-- Reduced for speed
 
@@ -48,6 +48,11 @@ data:
     - [2500, 4000, "Long ATT"]
   include_m0_in_training_data: false
 
+evaluation:
+  n_validation_subjects: 200      # Reduced for speed
+  n_test_subjects_per_att_range: 50 # Reduced for speed
+  n_clinical_scenario_subjects: 20  # Reduced for speed
+
 simulation:
   T1_artery: 1850.0
   T2_factor: 1.0
@@ -61,10 +66,6 @@ simulation:
 optuna:
   optuna_n_trials: 0
   optuna_study_name: "ablation_run"
-
-evaluation:
-  n_test_subjects_per_att_range: 50 # Reduced for speed
-  n_clinical_scenario_subjects: 20  # Reduced for speed
 
 logging:
   level: "INFO"

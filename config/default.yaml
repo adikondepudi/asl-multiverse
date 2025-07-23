@@ -9,11 +9,12 @@ training:
   dropout_rate: 0.1
   norm_type: "batch"
   
-  # NEW: Two-stage curriculum parameters
-  n_subjects_stage1: 5000
-  n_subjects_stage2: 10000
+  # --- MODIFIED: Switched from n_subjects to explicit steps for IterableDataset ---
+  steps_per_epoch_stage1: 20
+  steps_per_epoch_stage2: 40
   n_epochs_stage1: 140
   n_epochs_stage2: 60
+  
   loss_pinn_weight_stage1: 1.0
   loss_pinn_weight_stage2: 0.1
   learning_rate_stage2: 0.0002
@@ -47,6 +48,11 @@ data:
     - [1500, 2500, "Medium ATT"]
     - [2500, 4000, "Long ATT"]
   include_m0_in_training_data: false
+  
+evaluation:
+  n_validation_subjects: 2000 
+  n_test_subjects_per_att_range: 200
+  n_clinical_scenario_subjects: 100
 
 simulation:
   T1_artery: 1850.0

@@ -43,11 +43,12 @@ class ResearchConfig:
     batch_size: int = 256
     val_split: float = 0.2
     
-    # Curriculum parameters
-    n_subjects_stage1: int = 40000 # Used to calculate steps_per_epoch
-    n_subjects_stage2: int = 10000 # Used to calculate steps_per_epoch
-    n_epochs_stage1: int = 200
-    n_epochs_stage2: int = 80
+    # --- MODIFIED: Switched from n_subjects to explicit steps for IterableDataset ---
+    steps_per_epoch_stage1: int = 20
+    steps_per_epoch_stage2: int = 40
+    n_epochs_stage1: int = 140
+    n_epochs_stage2: int = 60
+    
     loss_pinn_weight_stage1: float = 1.0
     loss_pinn_weight_stage2: float = 0.1
     pre_estimator_loss_weight_stage1: float = 1.0 
@@ -93,7 +94,8 @@ class ResearchConfig:
     training_noise_levels_stage1: List[float] = field(default_factory=lambda: [3.0, 5.0, 10.0, 15.0])
     training_noise_levels_stage2: List[float] = field(default_factory=lambda: [10.0, 15.0, 20.0])
     
-    n_validation_subjects: int = 2000
+    # --- MODIFIED: Increased validation subjects for robustness ---
+    n_validation_subjects: int = 10000
 
     n_test_subjects_per_att_range: int = 200 
     test_snr_levels: List[float] = field(default_factory=lambda: [5.0, 10.0])
@@ -222,7 +224,15 @@ def run_comprehensive_asl_research(config: ResearchConfig, output_parent_dir: Op
     
     collate_fn = CollateFn(norm_stats_final, num_plds)
     
-    num_workers = min(8, os.cpu_count())
+    # --- MODIFIED: Use SLURM environment variables for optimal worker count on HPC ---
+    try:
+        # Best for SLURM: Use the number of CPUs allocated to the task
+        num_workers = int(os.environ.get('SLURM_CPUS_PER_TASK', os.cpu_count()))
+    except (ValueError, TypeError):
+        # Fallback if the env var is not set or not a number
+        num_workers = os.cpu_count()
+    script_logger.info(f"Using {num_workers} DataLoader workers.")
+
     train_loader_s1 = DataLoader(train_dataset_s1, batch_size=config.batch_size, num_workers=num_workers, collate_fn=collate_fn, pin_memory=True, persistent_workers=(num_workers > 0))
     train_loader_s2 = DataLoader(train_dataset_s2, batch_size=config.batch_size, num_workers=num_workers, collate_fn=collate_fn, pin_memory=True, persistent_workers=(num_workers > 0))
 
@@ -250,8 +260,9 @@ def run_comprehensive_asl_research(config: ResearchConfig, output_parent_dir: Op
     trainer.custom_loss_fn.norm_stats = norm_stats_final
     for model in trainer.models: model.set_norm_stats(norm_stats_final)
     
-    steps_per_epoch_s1 = config.n_subjects_stage1 // config.batch_size
-    steps_per_epoch_s2 = config.n_subjects_stage2 // config.batch_size
+    # --- MODIFIED: Use explicit steps from config, not calculated from n_subjects ---
+    steps_per_epoch_s1 = config.steps_per_epoch_stage1
+    steps_per_epoch_s2 = config.steps_per_epoch_stage2
     total_steps = steps_per_epoch_s1 * config.n_epochs_stage1 + steps_per_epoch_s2 * config.n_epochs_stage2
 
     for opt in trainer.optimizers:

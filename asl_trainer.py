@@ -16,6 +16,7 @@ import wandb
 from sklearn.metrics import mean_absolute_error, mean_squared_error 
 from torch.cuda.amp import GradScaler, autocast
 from tqdm import trange # Import tqdm for progress bars
+import time
 
 num_workers = mp.cpu_count()
 
@@ -564,7 +565,8 @@ class EnhancedASLTrainer:
                 break
 
             signals, params_norm = signals.to(self.device), params_norm.to(self.device)
-            optimizer.zero_grad(set_to_none=True) # Performance tweak for modern PyTorch
+            # --- MODIFIED: Use set_to_none=True for performance ---
+            optimizer.zero_grad(set_to_none=True)
 
             with autocast(dtype=torch.bfloat16):
                 outputs = model(signals)

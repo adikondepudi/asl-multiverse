@@ -9,10 +9,12 @@ training:
   dropout_rate: 0.1
   norm_type: "batch"
   
-  n_subjects_stage1: 50
-  n_subjects_stage2: 50
+  # --- MODIFIED: Switched from n_subjects to explicit steps for IterableDataset ---
+  steps_per_epoch_stage1: 2
+  steps_per_epoch_stage2: 2
   n_epochs_stage1: 1              
   n_epochs_stage2: 1              
+  
   loss_pinn_weight_stage1: 1.0
   loss_pinn_weight_stage2: 0.1
   learning_rate_stage2: 0.0002
@@ -38,6 +40,11 @@ data:
     - [1500, 2500, "Medium ATT"]
     - [2500, 4000, "Long ATT"]
   include_m0_in_training_data: false
+  
+evaluation:
+  n_validation_subjects: 20
+  n_test_subjects_per_att_range: 10
+  n_clinical_scenario_subjects: 10
 
 simulation:
   T1_artery: 1850.0
@@ -54,10 +61,6 @@ optuna:
   optuna_n_subjects: 20
   optuna_n_epochs: 1
   optuna_study_name: "asl_multiverse_hpo_debug"
-
-evaluation:
-  n_test_subjects_per_att_range: 10
-  n_clinical_scenario_subjects: 10
 
 logging:
   level: "INFO"
