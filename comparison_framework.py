@@ -21,6 +21,21 @@ logger = logging.getLogger(__name__)
 if not logger.hasHandlers():
     logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(name)s - %(levelname)s - %(message)s')
 
+def _fit_single_ls_voxel(signal_reshaped, pldti, asl_params):
+    """Helper function to fit a single voxel, designed for use with joblib."""
+    try:
+        # Use a standard, reasonable initial guess for the fit
+        init_guess = [50.0 / 6000.0, 1500.0]
+        beta, conintval, _, _ = fit_PCVSASL_misMatchPLD_vectInit_pep(pldti, signal_reshaped, init_guess, **asl_params)
+        cbf_est = beta[0] * 6000
+        att_est = beta[1]
+        cbf_ci = (conintval[0, 1] - conintval[0, 0]) * 6000
+        att_ci = conintval[1, 1] - conintval[1, 0]
+        return cbf_est, att_est, cbf_ci, att_ci, True
+    except Exception:
+        # If the fit fails for any reason, return NaNs and a failure flag
+        return np.nan, np.nan, np.nan, np.nan, False
+
 def apply_normalization_to_input_flat(flat_signal: np.ndarray,
                                       norm_stats: Dict,
                                       num_plds_per_modality: int,
@@ -203,17 +218,19 @@ class ComprehensiveComparison:
         except Exception:
             return np.nan, np.nan, np.nan, np.nan, False
 
-    # Replace the existing _fit_ls method with this parallel version
     def _fit_ls(self, signals_arr: np.ndarray, true_params_arr: np.ndarray, plds_arr: np.ndarray, range_name_str: str) -> Optional[ComparisonResult]:
         n_samples = signals_arr.shape[0]
-        if n_samples == 0: return None
+        if n_samples == 0:
+            return None
         
         pldti = np.column_stack([plds_arr, plds_arr])
+        # Use all available CPU cores on the node for maximum speed
         num_cores = multiprocessing.cpu_count()
         
         start_time = time.time()
         
-        # Use joblib to parallelize the loop
+        # Use joblib to run the fitting on all cores in parallel
+        # The `delayed` function wraps our helper function for lazy execution
         results = Parallel(n_jobs=num_cores)(
             delayed(_fit_single_ls_voxel)(signals_arr[i], pldti, self.asl_params)
             for i in range(n_samples)
@@ -221,16 +238,28 @@ class ComprehensiveComparison:
         
         total_time = time.time() - start_time
         
-        # Unpack the results
+        # Unpack the results from all the parallel jobs
         cbf_estimates, att_estimates, ci_widths_cbf, ci_widths_att, success_flags = zip(*results)
-        successes = sum(success_flags)
-
-        metrics = self._calculate_detailed_metrics(cbf_estimates, true_params_arr[:,0], att_estimates, true_params_arr[:,1])
         
-        return ComparisonResult(method="LS", att_range_name=range_name_str, **metrics,
-                                cbf_ci_width=np.nanmean(ci_widths_cbf), att_ci_width=np.nanmean(ci_widths_att),
-                                computation_time=total_time / n_samples if n_samples > 0 else np.nan, 
-                                success_rate=(successes/n_samples*100) if n_samples > 0 else 0)
+        # Convert to numpy arrays for calculation
+        cbf_estimates = np.array(cbf_estimates)
+        att_estimates = np.array(att_estimates)
+        
+        # Calculate success rate
+        successes = sum(success_flags)
+        success_rate = (successes / n_samples * 100) if n_samples > 0 else 0
+        
+        # Calculate performance metrics on the results
+        metrics = self._calculate_detailed_metrics(cbf_estimates, true_params_arr[:, 0], att_estimates, true_params_arr[:, 1])
+        
+        # Return the final result object
+        return ComparisonResult(method="LS",
+                                att_range_name=range_name_str,
+                                **metrics,
+                                cbf_ci_width=np.nanmean(ci_widths_cbf),
+                                att_ci_width=np.nanmean(ci_widths_att),
+                                computation_time=total_time / n_samples if n_samples > 0 else np.nan,
+                                success_rate=success_rate)
 
     def _evaluate_neural_network(self, nn_input_arr: np.ndarray, true_params_arr: np.ndarray, plds_arr: np.ndarray, range_name_str: str) -> List[ComparisonResult]:
         if self.nn_model is None or nn_input_arr.shape[0] == 0: return []

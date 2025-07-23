@@ -33,7 +33,8 @@ from torch.utils.data import DataLoader
 from comparison_framework import ComprehensiveComparison
 from performance_metrics import ProposalEvaluator
 from single_repeat_validation import SingleRepeatValidator, run_single_repeat_validation_main
-from utils import engineer_signal_features
+# --- MODIFIED: Import the new parallel stats calculator ---
+from utils import engineer_signal_features, ParallelStreamingStatsCalculator
 
 script_logger = logging.getLogger(__name__)
 
@@ -89,16 +90,13 @@ class ResearchConfig:
     wandb_project: str = "asl-multiverse-project"
     wandb_entity: Optional[str] = None
 
-### --- DEEPMIND FIX: HPO Objective Function --- ###
 def objective(trial: optuna.Trial, base_config: ResearchConfig, output_dir: Path) -> float:
     """
     The objective function for Optuna hyperparameter optimization.
     Trains a model with a given set of hyperparameters and returns the validation loss.
     """
-    # Create a trial-specific config by copying the base and updating with suggestions
     trial_config = copy.deepcopy(base_config)
     
-    # Suggest hyperparameters for the trial
     trial_config.learning_rate = trial.suggest_float("learning_rate", 1e-4, 1e-2, log=True)
     trial_config.weight_decay = trial.suggest_float("weight_decay", 1e-6, 1e-3, log=True)
     trial_config.dropout_rate = trial.suggest_float("dropout_rate", 0.05, 0.4)
@@ -112,19 +110,16 @@ def objective(trial: optuna.Trial, base_config: ResearchConfig, output_dir: Path
     script_logger.info(f"--- Optuna Trial {trial.number} ---")
     script_logger.info(f"  Params: lr={trial_config.learning_rate:.5f}, wd={trial_config.weight_decay:.6f}, dropout={trial_config.dropout_rate:.3f}")
     
-    # Use a smaller, faster configuration for HPO
-    trial_config.n_ensembles = 1 # Only train one model for speed
+    trial_config.n_ensembles = 1
     trial_config.n_epochs_stage1 = base_config.optuna_n_epochs
-    trial_config.n_epochs_stage2 = 0 # Single stage training for HPO is sufficient and faster
+    trial_config.n_epochs_stage2 = 0
     trial_config.steps_per_epoch_stage1 = base_config.optuna_steps_per_epoch
     
-    # --- Data Generation and Training (abbreviated for HPO) ---
     plds_np = np.array(trial_config.pld_values)
     num_plds = len(plds_np)
     asl_params_sim = ASLParameters(**{k:v for k,v in asdict(trial_config).items() if k in ASLParameters.__annotations__})
     simulator = RealisticASLSimulator(params=asl_params_sim)
     
-    # Use a smaller dataset for norm stats to speed up trial setup
     norm_dataset = simulator.generate_diverse_dataset(plds=plds_np, n_subjects=trial_config.optuna_n_subjects_for_norm, conditions=['healthy'], noise_levels=trial_config.training_noise_levels_stage1)
     
     raw_signals_norm, raw_params_norm = norm_dataset['signals'], norm_dataset['parameters']
@@ -139,7 +134,7 @@ def objective(trial: optuna.Trial, base_config: ResearchConfig, output_dir: Path
     train_dataset = ASLIterableDataset(simulator, plds_np, trial_config.training_noise_levels_stage1, norm_stats=norm_stats)
     val_dataset = ASLIterableDataset(simulator, plds_np, trial_config.training_noise_levels_stage1, norm_stats=norm_stats)
     
-    num_workers = min(4, os.cpu_count()) # Limit workers for HPO to reduce overhead
+    num_workers = min(4, os.cpu_count())
     train_loader = DataLoader(train_dataset, batch_size=trial_config.batch_size, num_workers=num_workers, pin_memory=True, persistent_workers=(num_workers > 0))
     val_loader = DataLoader(val_dataset, batch_size=trial_config.batch_size * 2, num_workers=num_workers, pin_memory=True, persistent_workers=(num_workers > 0))
 
@@ -169,8 +164,6 @@ def objective(trial: optuna.Trial, base_config: ResearchConfig, output_dir: Path
         script_logger.info(f"Trial {trial.number} pruned.")
         return float('inf')
 
-
-### --- DEEPMIND FIX: Main Script Orchestration --- ###
 def run_hyperparameter_optimization(config: ResearchConfig, output_dir: Path):
     """Manages the Optuna HPO study, including saving and resuming."""
     study_name = config.optuna_study_name
@@ -193,7 +186,7 @@ def run_hyperparameter_optimization(config: ResearchConfig, output_dir: Path):
             lambda trial: objective(trial, config, output_dir),
             n_trials=config.optuna_n_trials,
             timeout=config.optuna_timeout_hours * 3600,
-            callbacks=[lambda s, t: joblib.dump(s, study_journal_path)] # Save after each trial
+            callbacks=[lambda s, t: joblib.dump(s, study_journal_path)]
         )
     except KeyboardInterrupt:
         script_logger.warning("HPO interrupted. Saving current state.")
@@ -211,7 +204,6 @@ def run_hyperparameter_optimization(config: ResearchConfig, output_dir: Path):
     for key, value in study.best_trial.params.items():
         script_logger.info(f"    {key}: {value}")
     script_logger.info(f"Best parameters saved to {best_params_path}")
-
 
 def run_comprehensive_asl_research(config: ResearchConfig, output_dir: Path) -> Dict:
     """The main research pipeline for a full training run."""
@@ -239,22 +231,21 @@ def run_comprehensive_asl_research(config: ResearchConfig, output_dir: Path) -> 
         with open(norm_stats_path, 'r') as f:
             norm_stats_final = json.load(f)
     else:
-        script_logger.info("Generating a fixed dataset for normalization stats...")
-        norm_dataset = simulator.generate_diverse_dataset(plds=plds_np, n_subjects=5000, conditions=['healthy'], noise_levels=config.training_noise_levels_stage1)
+        # --- MODIFIED: Replaced serial stats calculation with parallel streaming version ---
+        script_logger.info("Calculating normalization stats using parallel streaming calculator...")
+        try:
+            num_stat_workers = int(os.environ.get('SLURM_CPUS_PER_TASK', os.cpu_count()))
+        except (ValueError, TypeError):
+            num_stat_workers = os.cpu_count()
+
+        stats_calculator = ParallelStreamingStatsCalculator(
+            simulator=simulator,
+            plds=plds_np,
+            num_samples=10000,  # Use a large number of samples for stable statistics
+            num_workers=num_stat_workers
+        )
+        norm_stats_final = stats_calculator.calculate()
         
-        raw_signals_norm, raw_params_norm = norm_dataset['signals'], norm_dataset['parameters']
-        norm_stats_final = {
-            'pcasl_mean': np.mean(raw_signals_norm[:, :num_plds], axis=0).tolist(),
-            'pcasl_std': np.clip(np.std(raw_signals_norm[:, :num_plds], axis=0), 1e-6, None).tolist(),
-            'vsasl_mean': np.mean(raw_signals_norm[:, num_plds:], axis=0).tolist(),
-            'vsasl_std': np.clip(np.std(raw_signals_norm[:, num_plds:], axis=0), 1e-6, None).tolist(),
-            'y_mean_cbf': np.mean(raw_params_norm[:, 0]),
-            'y_std_cbf': max(np.std(raw_params_norm[:, 0]), 1e-6),
-            'y_mean_att': np.mean(raw_params_norm[:, 1]),
-            'y_std_att': max(np.std(raw_params_norm[:, 1]), 1e-6),
-            'amplitude_mean': np.mean(np.linalg.norm(raw_signals_norm, axis=1)),
-            'amplitude_std': max(np.std(np.linalg.norm(raw_signals_norm, axis=1)), 1e-6)
-        }
         script_logger.info(f"Saving normalization stats to {norm_stats_path}")
         with open(norm_stats_path, 'w') as f:
             json.dump(norm_stats_final, f, indent=2)
