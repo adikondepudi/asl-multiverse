@@ -2,7 +2,7 @@
 
 training:
   batch_size: 2048
-  learning_rate: 0.0028
+  learning_rate: 0.006
   weight_decay: 0.00001
   hidden_sizes: [256, 128, 64]
   n_ensembles: 5
