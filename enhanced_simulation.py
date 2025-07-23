@@ -2,12 +2,12 @@
 import numpy as np
 from typing import Dict, List, Tuple, Optional, Union
 from dataclasses import dataclass
-# import matplotlib.pyplot as plt # No longer needed for visualize_simulation_quality
 from scipy.ndimage import gaussian_filter
 from asl_simulation import ASLSimulator, ASLParameters
 import multiprocessing as mp
 from tqdm import tqdm
-import logging # Added for logging
+import logging 
+import time
 
 logger = logging.getLogger(__name__)
 
@@ -33,24 +33,17 @@ def _generate_single_balanced_subject(args: Tuple) -> Tuple[np.ndarray, List[flo
     
     np.random.seed(seed)
     
-    # a) Sample ATT strictly from within its designated bin.
     true_att = np.random.uniform(att_min_bin, att_max_bin)
-    
-    # b) Sample all other parameters independently from their FULL plausible ranges.
     true_cbf = np.random.uniform(*cbf_full_range)
     true_t1_artery = np.random.uniform(*t1_artery_full_range)
-    
-    # c) Randomly select a noise level for this specific sample.
     current_snr = np.random.choice(noise_levels)
     
-    # d) Apply sequence parameter perturbations.
     perturbed_t_tau = base_params.T_tau * (1 + np.random.uniform(*physio_var.t_tau_perturb_range))
     perturbed_alpha_pcasl = np.clip(base_params.alpha_PCASL * (1 + np.random.uniform(*physio_var.alpha_perturb_range)), 0.1, 1.1)
     perturbed_alpha_vsasl = np.clip(base_params.alpha_VSASL * (1 + np.random.uniform(*physio_var.alpha_perturb_range)), 0.1, 1.0)
     
     simulator = RealisticASLSimulator(base_params)
 
-    # e) Use the efficient generate_synthetic_data to create one noisy instance.
     data_dict = simulator.generate_synthetic_data(
         plds,
         att_values=np.array([true_att]),
@@ -76,64 +69,6 @@ class RealisticASLSimulator(ASLSimulator):
     def __init__(self, params: ASLParameters = ASLParameters()):
         super().__init__(params)
         self.physio_var = PhysiologicalVariation()
-
-    def generate_balanced_dataset(
-        self,
-        plds: np.ndarray,
-        total_subjects: int,
-        noise_levels: List[float],
-        num_att_bins: int = 14  # Results in 250ms bins for the 500-4000ms range
-    ) -> Dict:
-        """
-        Generates a dataset with a near-uniform ATT distribution by decoupling parameters.
-        This uses stratified sampling on ATT to ensure the model is trained on an unbiased
-        distribution, preventing it from developing a preference for mean ATT values.
-        This version is parallelized for high performance.
-        """
-        logger.info("--- Starting Parallel Balanced (Uniform ATT) Data Generation ---")
-        
-        att_range = self.physio_var.att_range
-        att_bins = np.linspace(att_range[0], att_range[1], num_att_bins + 1)
-        subjects_per_bin = total_subjects // num_att_bins
-        if subjects_per_bin == 0:
-            raise ValueError(f"total_subjects ({total_subjects}) is too low for ATT bins ({num_att_bins}).")
-
-        logger.info(f"Stratifying ATT range [{att_range[0]}, {att_range[1]}] into {num_att_bins} bins.")
-        logger.info(f"Allocating {subjects_per_bin} subjects per bin using parallel workers.")
-
-        cbf_full_range = self.physio_var.cbf_range
-        t1_artery_full_range = self.physio_var.t1_artery_range
-        base_params = self.params
-        
-        worker_args = []
-        master_seed = np.random.randint(2**32 - 1)
-        for i in range(num_att_bins):
-            att_min_bin, att_max_bin = att_bins[i], att_bins[i+1]
-            for j in range(subjects_per_bin):
-                worker_seed = master_seed + i * subjects_per_bin + j
-                worker_args.append((
-                    att_min_bin, att_max_bin, cbf_full_range, t1_artery_full_range,
-                    base_params, plds, noise_levels, self.physio_var, worker_seed
-                ))
-        
-        dataset = {'signals': [], 'parameters': [], 'perturbed_params': []}
-        num_workers = max(1, mp.cpu_count() - 2)
-        logger.info(f"Using {num_workers} worker processes.")
-
-        with mp.Pool(processes=num_workers) as pool:
-            results = list(tqdm(pool.imap_unordered(_generate_single_balanced_subject, worker_args), 
-                                total=len(worker_args), desc="Parallel Balanced Data Generation"))
-        
-        for signal, params, perturbed_params in results:
-            dataset['signals'].append(signal)
-            dataset['parameters'].append(params)
-            dataset['perturbed_params'].append(perturbed_params)
-
-        for key in ['signals', 'parameters']:
-            dataset[key] = np.array(dataset[key])
-        
-        logger.info(f"--- Balanced data generation complete. Total samples: {len(dataset['signals'])} ---")
-        return dataset
 
     def add_realistic_noise(self, signal: np.ndarray, noise_type: str = 'gaussian', snr: float = 5.0,
                           temporal_correlation: float = 0.3, include_spike_artifacts: bool = False,
@@ -177,6 +112,10 @@ class RealisticASLSimulator(ASLSimulator):
                                conditions: List[str] = ['healthy', 'stroke', 'tumor', 'elderly'],
                                noise_levels: List[float] = [3.0, 5.0, 10.0],
                                noise_artifact_options: Optional[Dict] = None) -> Dict:
+        """
+        Generates a fixed-size dataset for validation or testing.
+        NOTE: For training, use the ASLIterableDataset to avoid memory issues.
+        """
         dataset = {'signals': [], 'parameters': [], 'conditions': [], 'noise_levels': [], 'perturbed_params': []}
         default_artifact_options = {'temporal_correlation': 0.2, 'include_spike_artifacts': True,
                                     'spike_probability': 0.01, 'spike_magnitude_factor': 3.0,
@@ -184,7 +123,7 @@ class RealisticASLSimulator(ASLSimulator):
         if noise_artifact_options: default_artifact_options.update(noise_artifact_options)
         noise_artifact_options = default_artifact_options
         base_params = self.params
-        for _ in tqdm(range(n_subjects), desc="Generating Subjects"):
+        for _ in tqdm(range(n_subjects), desc="Generating Fixed Diverse Dataset"):
             condition = np.random.choice(conditions)
             if condition == 'healthy': cbf, att, t1_a = np.random.uniform(*self.physio_var.cbf_range), np.random.uniform(*self.physio_var.att_range), np.random.uniform(*self.physio_var.t1_artery_range)
             elif condition == 'stroke': cbf, att, t1_a = np.random.uniform(*self.physio_var.stroke_cbf_range), np.random.uniform(*self.physio_var.stroke_att_range), np.random.uniform(self.physio_var.t1_artery_range[0]-100, self.physio_var.t1_artery_range[1]+100)
@@ -228,8 +167,6 @@ class RealisticASLSimulator(ASLSimulator):
                     data_4d_pcasl[i,j,z,:] = self.add_realistic_noise(signal, 'rician', snr=np.random.uniform(5,15))
         return data_4d_pcasl, cbf_map_smooth, att_map_smooth
 
-# Removed visualize_simulation_quality function as it was primarily for saving plots.
-
 def generate_training_data_parallel(n_cores: int = None):
     if n_cores is None: n_cores = max(1, mp.cpu_count() - 1)
     base_asl_params = ASLParameters(); plds = np.arange(500, 3001, 500)
@@ -261,11 +198,10 @@ def generate_training_data_parallel(n_cores: int = None):
 
 if __name__ == "__main__":
     simulator = RealisticASLSimulator()
-    logger.info("Enhanced ASL Simulator initialized. `visualize_simulation_quality` removed as per no-PNG requirement.")
-    logger.info("\nTesting parallel data generation...")
-    training_data = generate_training_data_parallel(n_cores=2)
-    if training_data['signals'].size > 0:
-        logger.info(f"\nGenerated training dataset shape: {training_data['signals'].shape}")
-        logger.info(f"Parameter ranges: CBF [{training_data['parameters'][:,0].min():.1f}, {training_data['parameters'][:,0].max():.1f}]")
-        logger.info(f"                 ATT [{training_data['parameters'][:,1].min():.1f}, {training_data['parameters'][:,1].max():.1f}]")
-    else: logger.info("No training data generated in the test.")
+    logger.info("Enhanced ASL Simulator initialized. `generate_balanced_dataset` has been removed.")
+    logger.info("For training, please use the `ASLIterableDataset` class.")
+    logger.info("\nTesting `generate_diverse_dataset` for fixed validation/test sets...")
+    test_data = simulator.generate_diverse_dataset(plds=np.arange(500, 3001, 500), n_subjects=10)
+    if test_data['signals'].size > 0:
+        logger.info(f"\nGenerated test dataset shape: {test_data['signals'].shape}")
+    else: logger.info("No test data generated.")

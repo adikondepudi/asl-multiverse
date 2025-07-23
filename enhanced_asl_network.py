@@ -1,3 +1,5 @@
+# enhanced_asl_network.py
+
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
@@ -110,6 +112,9 @@ def _torch_physical_kinetic_model(
 
     return pcasl_sig, vsasl_sig
 
+# --- OPTIMIZATION: Compile the physics model for a speedup in the PINN loss ---
+_compiled_torch_physical_kinetic_model = torch.compile(_torch_physical_kinetic_model, mode="reduce-overhead")
+
 def _torch_analytic_gradients(
     pred_cbf: torch.Tensor, pred_att: torch.Tensor,
     plds: torch.Tensor, model_params: Dict[str, Any]
@@ -118,7 +123,7 @@ def _torch_analytic_gradients(
     Computes analytical gradients of the physical ASL signals with respect to CBF and ATT.
     This is the core of the Differentiable Physics-Encoder.
     """
-    pcasl_sig, vsasl_sig = _torch_physical_kinetic_model(pred_cbf, pred_att, plds, model_params)
+    pcasl_sig, vsasl_sig = _compiled_torch_physical_kinetic_model(pred_cbf, pred_att, plds, model_params)
     
     # 1. dS/dCBF is simple due to linear relationship
     # Add a small epsilon to avoid division by zero if cbf is zero
@@ -345,7 +350,7 @@ def torch_kinetic_model(pred_cbf_norm: torch.Tensor, pred_att_norm: torch.Tensor
     pred_att = pred_att_norm * norm_stats['y_std_att'] + norm_stats['y_mean_att']
     plds = torch.tensor(model_params['pld_values'], device=device, dtype=torch.float32)
 
-    pcasl_sig, vsasl_sig = _torch_physical_kinetic_model(pred_cbf, pred_att, plds, model_params)
+    pcasl_sig, vsasl_sig = _compiled_torch_physical_kinetic_model(pred_cbf, pred_att, plds, model_params)
 
     reconstructed_signal = torch.cat([pcasl_sig, vsasl_sig], dim=1)
 

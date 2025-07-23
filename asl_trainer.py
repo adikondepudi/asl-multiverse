@@ -1,7 +1,9 @@
+# asl_trainer.py
+
 import torch
 import torch.nn as nn
 import torch.optim as optim
-from torch.utils.data import Dataset, DataLoader, WeightedRandomSampler
+from torch.utils.data import Dataset, DataLoader, WeightedRandomSampler, IterableDataset
 import numpy as np
 from typing import Dict, List, Tuple, Optional, Union, Any
 from dataclasses import dataclass
@@ -18,13 +20,12 @@ from torch.cuda.amp import GradScaler, autocast
 num_workers = mp.cpu_count()
 
 from enhanced_asl_network import EnhancedASLNet, CustomLoss
-# from enhanced_simulation import RealisticASLSimulator # For type hinting
+from enhanced_simulation import RealisticASLSimulator, _generate_single_balanced_subject
 
 import logging
 logger = logging.getLogger(__name__)
 if not logger.hasHandlers():
     logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(name)s - %(levelname)s - %(message)s')
-
 
 class ASLNet(nn.Module):
     """Neural network for ASL parameter estimation"""
@@ -312,6 +313,70 @@ class EnhancedASLDataset(Dataset):
 
         return signal, param
 
+class ASLIterableDataset(IterableDataset):
+    """
+    An iterable dataset for on-the-fly data generation.
+    This avoids creating massive datasets in RAM and ensures the model
+    sees unique noise realizations in every epoch.
+    """
+    def __init__(self, simulator, plds, noise_levels, num_att_bins=14):
+        super().__init__()
+        self.simulator = simulator
+        self.plds = plds
+        self.noise_levels = noise_levels
+        self.num_att_bins = num_att_bins
+        self.base_params = simulator.params
+        self.physio_var = simulator.physio_var
+        self.att_range = self.physio_var.att_range
+        self.cbf_range = self.physio_var.cbf_range
+        self.t1_range = self.physio_var.t1_artery_range
+
+    def __iter__(self):
+        worker_info = torch.utils.data.get_worker_info()
+        # Seed each worker differently for stochastic, non-repeated data
+        if worker_info is not None:
+            np.random.seed(worker_info.id + int(time.time() * 1000) % (2**32))
+        else:
+            np.random.seed(int(time.time() * 1000) % (2**32))
+
+        # Continuously generate data
+        while True:
+            # Re-implement the core logic from `_generate_single_balanced_subject`
+            # 1. Stratified ATT sampling
+            att_bins = np.linspace(self.att_range[0], self.att_range[1], self.num_att_bins + 1)
+            att_bin_idx = np.random.randint(0, self.num_att_bins)
+            true_att = np.random.uniform(att_bins[att_bin_idx], att_bins[att_bin_idx+1])
+
+            # 2. Independent sampling of other parameters
+            true_cbf = np.random.uniform(*self.cbf_range)
+            true_t1_artery = np.random.uniform(*self.t1_range)
+            current_snr = np.random.choice(self.noise_levels)
+            
+            # 3. Apply sequence parameter perturbations for robustness
+            perturbed_t_tau = self.base_params.T_tau * (1 + np.random.uniform(*self.physio_var.t_tau_perturb_range))
+            perturbed_alpha_pcasl = np.clip(self.base_params.alpha_PCASL * (1 + np.random.uniform(*self.physio_var.alpha_perturb_range)), 0.1, 1.1)
+            perturbed_alpha_vsasl = np.clip(self.base_params.alpha_VSASL * (1 + np.random.uniform(*self.physio_var.alpha_perturb_range)), 0.1, 1.0)
+
+            # 4. Generate the noisy signal
+            data_dict = self.simulator.generate_synthetic_data(
+                self.plds,
+                att_values=np.array([true_att]),
+                n_noise=1,
+                tsnr=current_snr,
+                cbf_val=true_cbf,
+                t1_artery_val=true_t1_artery,
+                t_tau_val=perturbed_t_tau,
+                alpha_pcasl_val=perturbed_alpha_pcasl,
+                alpha_vsasl_val=perturbed_alpha_vsasl
+            )
+            
+            pcasl_noisy = data_dict['MULTIVERSE'][0, 0, :, 0]
+            vsasl_noisy = data_dict['MULTIVERSE'][0, 0, :, 1]
+            raw_signal = np.concatenate([pcasl_noisy, vsasl_noisy]).astype(np.float32)
+            params = np.array([true_cbf, true_att], dtype=np.float32)
+
+            yield raw_signal, params
+
 class EnhancedASLTrainer:
     def __init__(self,
                  model_config: Dict, # Pass necessary params for model instantiation and loss
@@ -337,180 +402,29 @@ class EnhancedASLTrainer:
         # --- OPTIMIZATION 3b: Add a GradScaler for each model ---
         self.scalers = [GradScaler() for _ in range(self.n_ensembles)]
 
-        # self.models = [model_class(**model_config).to(device) for _ in range(n_ensembles)]
         self.models = [
             torch.compile(model_class(**model_config).to(device), mode="max-autotune")
             for _ in range(n_ensembles)
         ]
         self.best_states = [None] * self.n_ensembles
         self.optimizers = [torch.optim.Adam(model.parameters(), lr=learning_rate, weight_decay=self.weight_decay) for model in self.models] # Added weight_decay
-        self.schedulers = [] # To be initialized in prepare_curriculum_data
+        self.schedulers = [] # To be initialized in main script now
         
-        # Pass relevant params from model_config to CustomLoss
         loss_params = {
             'w_cbf': model_config.get('loss_weight_cbf', 1.0),
             'w_att': model_config.get('loss_weight_att', 1.0),
             'log_var_reg_lambda': model_config.get('loss_log_var_reg_lambda', 0.0),
             'focal_gamma': model_config.get('focal_gamma', 1.5),
             'pinn_weight': model_config.get('loss_pinn_weight_stage1', model_config.get('loss_pinn_weight', 0.0)), # Use stage1 as default
-            'model_params': model_config, # NEW: Pass all model params for physics constants
-            'pre_estimator_loss_weight': model_config.get('pre_estimator_loss_weight', 0.5) # Add new param
+            'model_params': model_config, 
+            'pre_estimator_loss_weight': model_config.get('pre_estimator_loss_weight', 0.5) 
         }
         self.custom_loss_fn = CustomLoss(**loss_params)
 
         self.train_losses = defaultdict(list)
         self.val_metrics = defaultdict(list)
         self.global_step = 0
-        self.norm_stats = None # Will be populated by prepare_curriculum_data
-
-    def prepare_curriculum_data(self,
-                                simulator, # RealisticASLSimulator instance
-                                plds: np.ndarray,
-                                n_training_subjects: int = 10000,
-                                val_split: float = 0.2,
-                                curriculum_att_ranges_config: Optional[List[Tuple[float, float, str]]] = None,
-                                training_conditions_config: Optional[List[str]] = None,
-                                training_noise_levels_config: Optional[List[float]] = None,
-                                n_epochs_for_scheduler: int = 200,
-                                include_m0_in_data: bool = False,
-                                dataset_aug_config: Optional[Dict] = None,
-                                precomputed_dataset: Optional[Dict] = None
-                                ) -> Tuple[List[DataLoader], List[Optional[DataLoader]], Optional[Dict]]:
-        
-        if not precomputed_dataset:
-            raise ValueError("prepare_curriculum_data now requires a pre-computed dataset. The main pipeline should handle data generation.")
-
-        logger.info("Using pre-computed dataset for training data preparation.")
-        raw_dataset = precomputed_dataset
-        
-        if plds is None: plds = np.arange(500, 3001, 500)
-        num_raw_signal_features = len(plds) * 2
-
-        X_all_raw, y_all_raw = raw_dataset['signals'], raw_dataset['parameters']
-
-        n_total_samples_raw = X_all_raw.shape[0]
-        if n_total_samples_raw == 0: raise ValueError("No data generated.")
-        
-        indices_raw = np.random.permutation(n_total_samples_raw)
-        n_val_raw = int(n_total_samples_raw * val_split)
-        if n_val_raw == 0 and n_total_samples_raw > 1: n_val_raw = 1
-        if n_val_raw >= n_total_samples_raw: n_val_raw = n_total_samples_raw -1 if n_total_samples_raw > 0 else 0
-
-        train_idx_raw, val_idx_raw = indices_raw[:-n_val_raw], indices_raw[-n_val_raw:]
-        X_train_raw, X_val_raw = X_all_raw[train_idx_raw], X_all_raw[val_idx_raw]
-        y_train_raw, y_val_raw = y_all_raw[train_idx_raw], y_all_raw[val_idx_raw]
-        
-        X_train_raw_signal_part = X_train_raw[:, :num_raw_signal_features]
-
-        norm_stats = { 
-            'pcasl_mean': np.zeros(len(plds)), 'pcasl_std': np.ones(len(plds)),
-            'vsasl_mean': np.zeros(len(plds)), 'vsasl_std': np.ones(len(plds)),
-            'y_mean_cbf': 0.0, 'y_std_cbf': 1.0, 'y_mean_att': 0.0, 'y_std_att': 1.0,
-            'amplitude_mean': 0.0, 'amplitude_std': 1.0
-        }
-
-        if X_train_raw_signal_part.shape[0] > 0 :
-            pcasl_train_signals = X_train_raw_signal_part[:, :len(plds)]
-            norm_stats['pcasl_mean'] = np.mean(pcasl_train_signals, axis=0)
-            norm_stats['pcasl_std'] = np.std(pcasl_train_signals, axis=0)
-            norm_stats['pcasl_std'][norm_stats['pcasl_std'] < 1e-6] = 1.0
-
-            vsasl_train_signals = X_train_raw_signal_part[:, len(plds):]
-            norm_stats['vsasl_mean'] = np.mean(vsasl_train_signals, axis=0)
-            norm_stats['vsasl_std'] = np.std(vsasl_train_signals, axis=0)
-            norm_stats['vsasl_std'][norm_stats['vsasl_std'] < 1e-6] = 1.0
-            
-            amplitudes = np.linalg.norm(X_train_raw_signal_part, axis=1)
-            norm_stats['amplitude_mean'] = np.mean(amplitudes)
-            norm_stats['amplitude_std'] = np.std(amplitudes)
-            if norm_stats['amplitude_std'] < 1e-6: norm_stats['amplitude_std'] = 1.0
-
-            norm_stats['y_mean_cbf'] = np.mean(y_train_raw[:, 0])
-            norm_stats['y_std_cbf'] = np.std(y_train_raw[:, 0])
-            if norm_stats['y_std_cbf'] < 1e-6: norm_stats['y_std_cbf'] = 1.0
-            
-            norm_stats['y_mean_att'] = np.mean(y_train_raw[:, 1])
-            norm_stats['y_std_att'] = np.std(y_train_raw[:, 1])
-            if norm_stats['y_std_att'] < 1e-6: norm_stats['y_std_att'] = 1.0
-        else:
-            logger.warning("Raw training set for normalization stats is empty.")
-
-        X_all_processed = X_all_raw.copy()
-        X_all_processed[:, :len(plds)] = (X_all_raw[:, :len(plds)] - norm_stats['pcasl_mean']) / (norm_stats['pcasl_std'] + 1e-6)
-        X_all_processed[:, len(plds):num_raw_signal_features] = (X_all_raw[:, len(plds):num_raw_signal_features] - norm_stats['vsasl_mean']) / (norm_stats['vsasl_std'] + 1e-6)
-
-        y_all_normalized = np.zeros_like(y_all_raw)
-        y_all_normalized[:, 0] = (y_all_raw[:, 0] - norm_stats['y_mean_cbf']) / norm_stats['y_std_cbf']
-        y_all_normalized[:, 1] = (y_all_raw[:, 1] - norm_stats['y_mean_att']) / norm_stats['y_std_att']
-
-        self.norm_stats = norm_stats
-        self.custom_loss_fn.norm_stats = norm_stats
-
-        for model in self.models:
-            model.set_norm_stats(self.norm_stats)
-        logger.info("Normalization stats buffers set on all ensemble models.")
-
-        logger.info(f"Total processed samples for training/validation: {X_all_processed.shape[0]}")
-        
-        X_train, y_train_norm = X_all_processed[train_idx_raw], y_all_normalized[train_idx_raw]
-        y_train_raw_split = y_all_raw[train_idx_raw]
-        X_val, y_val_norm = X_all_processed[val_idx_raw], y_all_normalized[val_idx_raw]
-        y_val_raw_split = y_all_raw[val_idx_raw]
-
-
-        logger.info(f"Training samples: {X_train.shape[0]}, Validation samples: {X_val.shape[0]}")
-        if X_train.shape[0] == 0: raise ValueError("Training set is empty after split and normalization.")
-
-        if curriculum_att_ranges_config is None:
-            min_att, max_att = simulator.physio_var.att_range
-            curriculum_stages_def = [(min_att, 1500.0), (1500.0, 2500.0), (2500.0, max_att)]
-        else:
-            curriculum_stages_def = [(r[0], r[1]) for r in curriculum_att_ranges_config]
-
-        train_loaders, val_loaders = [], []
-        default_aug_config = {
-            'noise_config': {'type': 'additive_gaussian', 'std_fraction': 0.05},
-            'dropout_range': (0.05, 0.15),
-            'global_scale_range': (0.95, 1.05),
-            'baseline_shift_std_factor': 0.01,
-            'reference_signal_max_for_noise': 3.0,
-            'spike_config': {'prob': 0.1, 'magnitude_factor': 4.0},
-            'drift_config': {'prob': 0.3, 'magnitude_factor': 0.05}
-        }
-        if dataset_aug_config: default_aug_config.update(dataset_aug_config)
-
-        val_aug_config_minimal = {**default_aug_config, 'noise_config': {}, 'dropout_range': None, 'spike_config': None, 'drift_config': None}
-
-        for i, (att_min, att_max) in enumerate(curriculum_stages_def):
-            train_mask = (y_train_raw_split[:, 1] >= att_min) & (y_train_raw_split[:, 1] < att_max)
-            stage_X_train, stage_y_train_norm = X_train[train_mask], y_train_norm[train_mask]
-            
-            if len(stage_X_train) == 0:
-                logger.warning(f"Curriculum train stage {i+1} has no samples. Skipping.")
-                train_loaders.append(DataLoader(EnhancedASLDataset(np.array([]), np.array([])), batch_size=self.batch_size))
-            else:
-                att_weights = np.atleast_1d(np.exp(-np.clip(y_train_raw_split[train_mask, 1], 100.0, None) / 2000.0))
-                sampler = WeightedRandomSampler(att_weights, len(att_weights), replacement=True) if np.sum(att_weights) > 1e-9 else None
-                dataset = EnhancedASLDataset(stage_X_train, stage_y_train_norm, **default_aug_config)
-                loader = DataLoader(dataset, batch_size=self.batch_size, sampler=sampler, num_workers=max(0,num_workers-1), pin_memory=True, drop_last=(len(stage_X_train) > self.batch_size))
-                train_loaders.append(loader)
-
-            if X_val.shape[0] > 0:
-                val_mask = (y_val_raw_split[:, 1] >= att_min) & (y_val_raw_split[:, 1] < att_max)
-                stage_X_val, stage_y_val_norm = X_val[val_mask], y_val_norm[val_mask]
-                val_dataset = EnhancedASLDataset(stage_X_val, stage_y_val_norm, **val_aug_config_minimal)
-                val_loaders.append(DataLoader(val_dataset, batch_size=self.batch_size, num_workers=max(0,num_workers-1), pin_memory=True))
-            else:
-                val_loaders.append(DataLoader(EnhancedASLDataset(np.array([]), np.array([])), batch_size=self.batch_size))
-        
-        self.schedulers = []
-        if train_loaders:
-            total_steps_overall = sum(len(loader) for loader in train_loaders) * n_epochs_for_scheduler
-            if total_steps_overall > 0:
-                for opt in self.optimizers:
-                    self.schedulers.append(OneCycleLR(opt, max_lr=opt.param_groups[0]['lr'], total_steps=total_steps_overall))
-        
-        return train_loaders, val_loaders, norm_stats
+        self.norm_stats = None
 
     def train_ensemble(self,
                    train_loaders: List[DataLoader],
@@ -532,20 +446,12 @@ class EnhancedASLTrainer:
                 self.custom_loss_fn.pinn_weight = self.model_config.get('loss_pinn_weight_stage1', 1.0)
                 logger.info(f"--- STAGE {stage_idx+1}: Foundational Pre-training ---")
                 logger.info(f"  Setting PINN weight to {self.custom_loss_fn.pinn_weight}")
-            # elif stage_idx == 1:
-            #     self.custom_loss_fn.pinn_weight = self.model_config.get('loss_pinn_weight_stage2', 0.1)
-            #     new_lr = self.model_config.get('learning_rate_stage2', self.learning_rate / 5.0)
-            #     logger.info(f"--- STAGE {stage_idx+1}: Full-Spectrum Fine-tuning ---")
-            #     logger.info(f"  Setting PINN weight to {self.custom_loss_fn.pinn_weight}")
-            #     logger.info(f"  Setting learning rate to {new_lr}")
-            #     for opt in self.optimizers:
-            #         for param_group in opt.param_groups:
-            #             param_group['lr'] = new_lr
             elif stage_idx == 1:
                 self.custom_loss_fn.pinn_weight = self.model_config.get('loss_pinn_weight_stage2', 0.1)
                 logger.info(f"--- STAGE {stage_idx+1}: Full-Spectrum Fine-tuning ---")
                 logger.info(f"  Setting PINN weight to {self.custom_loss_fn.pinn_weight}")
-                # The learning rate is now managed automatically by the scheduler across both stages.
+                # NOTE: Learning rate is now managed by the OneCycleLR scheduler across all stages.
+                # No manual LR adjustment is needed here.
             # --- END of STAGE-SPECIFIC ADJUSTMENTS ---
 
             current_val_loader = val_loaders[stage_idx] if stage_idx < len(val_loaders) else None
@@ -664,20 +570,14 @@ class EnhancedASLTrainer:
             signals, params_norm = signals.to(self.device), params_norm.to(self.device)
             optimizer.zero_grad()
 
-            # Use autocast to run the forward pass in mixed precision (BF16 on H100)
             with autocast(dtype=torch.bfloat16):
                 outputs = model(signals)
                 cbf_mean_norm, att_mean_norm, cbf_log_var, att_log_var, cbf_rough, att_rough = outputs
                 loss = self.custom_loss_fn(signals, cbf_mean_norm, att_mean_norm, params_norm[:, 0:1], params_norm[:, 1:2], 
                                            cbf_log_var, att_log_var, cbf_rough, att_rough, current_global_epoch)
 
-            # scaler.scale(loss) creates scaled gradients to prevent underflow
             scaler.scale(loss).backward()
-            
-            # scaler.step() first un-scales the gradients, then calls optimizer.step()
             scaler.step(optimizer)
-            
-            # scaler.update() prepares the scaler for the next iteration
             scaler.update()
 
             if scheduler:
@@ -698,18 +598,11 @@ class EnhancedASLTrainer:
                 signals, params_norm = signals.to(self.device), params_norm.to(self.device)
                 with autocast(dtype=torch.bfloat16):
                     outputs = model(signals)
-                    # The rest of the code inside the loop remains indented under autocast
                     cbf_mean_norm, att_mean_norm, cbf_log_var, att_log_var, cbf_rough, att_rough = outputs
                     loss = self.custom_loss_fn(signals, cbf_mean_norm, att_mean_norm, params_norm[:, 0:1], params_norm[:, 1:2], 
                                                cbf_log_var, att_log_var, cbf_rough, att_rough, current_global_epoch)
                 
                 total_loss_val += loss.item()
-                # outputs = model(signals)
-                # cbf_mean_norm, att_mean_norm, cbf_log_var, att_log_var, cbf_rough, att_rough = outputs
-
-                # loss = self.custom_loss_fn(signals, cbf_mean_norm, att_mean_norm, params_norm[:, 0:1], params_norm[:, 1:2], 
-                #                            cbf_log_var, att_log_var, cbf_rough, att_rough, current_global_epoch)
-                # total_loss_val += loss.item()
                 all_cbf_preds_norm.append(cbf_mean_norm.cpu()); all_att_preds_norm.append(att_mean_norm.cpu())
                 all_cbf_trues_norm.append(params_norm[:, 0:1].cpu()); all_att_trues_norm.append(params_norm[:, 1:2].cpu())
                 all_cbf_log_vars.append(cbf_log_var.cpu()); all_att_log_vars.append(att_log_var.cpu())
@@ -755,7 +648,6 @@ class EnhancedASLTrainer:
         for model in self.models:
             model.eval()
             with torch.no_grad():
-                # We only need the final predictions here, so we slice the model output
                 cbf_mean_norm, att_mean_norm, cbf_log_var, att_log_var, _, _ = model(signals_tensor)
                 all_cbf_means_norm_list.append(cbf_mean_norm.cpu().numpy())
                 all_att_means_norm_list.append(att_mean_norm.cpu().numpy())
@@ -768,7 +660,6 @@ class EnhancedASLTrainer:
             all_cbf_aleatoric_vars_np = np.array(all_cbf_aleatoric_vars_list).squeeze() 
             all_att_aleatoric_vars_np = np.array(all_att_aleatoric_vars_list).squeeze() 
             
-            # --- Tier 1: Uncertainty-Weighted Averaging ---
             cbf_weights = 1.0 / (all_cbf_aleatoric_vars_np + 1e-9)
             ensemble_cbf_mean_norm = np.average(all_cbf_means_norm_np, weights=cbf_weights)
             
@@ -786,7 +677,6 @@ class EnhancedASLTrainer:
             all_cbf_aleatoric_vars_np = np.concatenate(all_cbf_aleatoric_vars_list, axis=1) 
             all_att_aleatoric_vars_np = np.concatenate(all_att_aleatoric_vars_list, axis=1) 
 
-            # --- Tier 1: Uncertainty-Weighted Averaging ---
             cbf_weights = 1.0 / (all_cbf_aleatoric_vars_np + 1e-9)
             ensemble_cbf_mean_norm = np.average(all_cbf_means_norm_np, axis=1, weights=cbf_weights)
 
