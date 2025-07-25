@@ -224,12 +224,13 @@ def run_comprehensive_asl_research(config: ResearchConfig, output_dir: Path, nor
     train_dataset_s1 = ASLIterableDataset(simulator, plds_np, config.training_noise_levels_stage1, norm_stats=norm_stats_final)
     train_dataset_s2 = ASLIterableDataset(simulator, plds_np, config.training_noise_levels_stage2, norm_stats=norm_stats_final)
     
-    try:
-        # Use a reasonable cap, e.g., 16, to prevent excessive overhead
-        cpu_count = int(os.environ.get('SLURM_CPUS_PER_TASK', os.cpu_count()))
-        num_workers = min(cpu_count, 16) 
-    except (ValueError, TypeError):
-        num_workers = min(os.cpu_count(), 16)
+    # try:
+    #     # Use a reasonable cap, e.g., 16, to prevent excessive overhead
+    #     cpu_count = int(os.environ.get('SLURM_CPUS_PER_TASK', os.cpu_count()))
+    #     num_workers = min(cpu_count, 16) 
+    # except (ValueError, TypeError):
+    #     num_workers = min(os.cpu_count(), 16)
+    num_workers = 4
     script_logger.info(f"Using {num_workers} DataLoader workers (capped at 16).")
 
     train_loader_s1 = DataLoader(train_dataset_s1, batch_size=config.batch_size, num_workers=num_workers, pin_memory=True, persistent_workers=(num_workers > 0))
