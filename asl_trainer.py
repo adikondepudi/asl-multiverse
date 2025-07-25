@@ -1,8 +1,4 @@
 # FILE: asl_trainer.py
-# (Full and updated content)
-
-# asl_trainer.py
-
 import torch
 import torch.nn as nn
 import torch.optim as optim
@@ -22,6 +18,7 @@ from tqdm import trange
 import time
 from itertools import islice
 import traceback
+import optuna
 
 num_workers = mp.cpu_count()
 
@@ -290,7 +287,8 @@ class EnhancedASLTrainer:
         self.validation_steps_per_epoch = model_config.get('validation_steps_per_epoch', 50)
         self.scalers = [GradScaler() for _ in range(self.n_ensembles)]
 
-        self.models = [torch.compile(model_class(**model_config).to(device), mode="max-autotune") for _ in range(n_ensembles)]
+        # self.models = [torch.compile(model_class(**model_config).to(device), mode="max-autotune") for _ in range(n_ensembles)]
+        self.models = [model_class(**model_config).to(device) for _ in range(n_ensembles)]
         self.best_states = [None] * self.n_ensembles
         self.optimizers = [torch.optim.Adam(model.parameters(), lr=learning_rate, weight_decay=self.weight_decay) for model in self.models]
         self.schedulers = [] # ### --- DEEPMIND FIX --- ### Schedulers will now be created per-stage in train_ensemble
