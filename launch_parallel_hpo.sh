@@ -26,24 +26,26 @@ echo "Starting ${NUM_GPUS_TO_USE} HPO workers..."
 # Create the output directory for the results.
 mkdir -p $OUTPUT_DIR
 
-# The main loop. This will iterate from GPU 0 to GPU (NUM_GPUS_TO_USE - 1).
+# The main loop.
 for (( i=0; i<$NUM_GPUS_TO_USE; i++ ))
 do
     echo "Launching worker for GPU ${i}..."
 
-    # Set the CUDA_VISIBLE_DEVICES environment variable specifically for the upcoming command.
-    # This ensures each background process only sees one unique GPU.
-    # The '&' at the end of the command runs the process in the background.
-    CUDA_VISIBLE_DEVICES=$i python main.py $CONFIG_FILE $OUTPUT_DIR --optimize --study-name "$STUDY_NAME" &
+    CACHE_DIR="/tmp/torch_cache_worker_${i}"
+    mkdir -p $CACHE_DIR
 
-    # Add a small delay between launches to prevent system/network congestion.
+    # Set environment variables ON THE SAME LINE as the command.
+    # This is the most robust way to ensure they apply only to this specific process.
+    TORCH_INDUCTOR_CACHE_DIR=$CACHE_DIR \
+    CUDA_VISIBLE_DEVICES=$i \
+    MAX_JOINT_CAT_BYTES=100000 \
+    python main.py $CONFIG_FILE $OUTPUT_DIR --optimize --study-name "$STUDY_NAME" &
+
     sleep 2
 done
 
 echo "----------------------------------------------------"
 echo "All ${NUM_GPUS_TO_USE} workers have been launched in the background."
 echo "You can monitor their progress using 'htop' or 'nvidia-smi'."
-echo "To see the live output of all workers, you can run:"
-echo "tail -f ${OUTPUT_DIR}/slurm_logs/*.out  (Note: This assumes main.py logs to a file; if not, monitor via htop)"
-echo "IMPORTANT: The processes will continue to run even if you close your SSH session."
-echo "To stop all workers, you can run: pkill -f 'python main.py'"
+echo "To stop all workers, run: pkill -f 'python main.py'"
+echo "You can now safely detach from tmux (Ctrl+B, then D) or close your SSH window."
