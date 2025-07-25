@@ -1,3 +1,6 @@
+# FILE: asl_trainer.py
+# (Full and updated content)
+
 # asl_trainer.py
 
 import torch
@@ -353,7 +356,8 @@ class EnhancedASLTrainer:
                     histories[model_idx][f'train_losses_stage_{stage_idx}'].append(train_loss_epoch)
                     if model_idx < self.n_ensembles - 1: train_loader_iter = iter(train_loader)
 
-                if current_val_loader:
+                # ### FIX for IterableDataset len() bug ###
+                if current_val_loader is not None and current_val_loader.dataset is not None:
                     for model_idx in range(self.n_ensembles):
                         val_metrics_dict = self._validate(self.models[model_idx], current_val_loader, global_epoch_counter)
                         epoch_val_metrics_all_models.append(val_metrics_dict)
@@ -440,16 +444,23 @@ class EnhancedASLTrainer:
         if all_cbf_preds_norm and self.norm_stats:
             y_mean_cbf, y_std_cbf = self.norm_stats.get('y_mean_cbf', 0.0), self.norm_stats.get('y_std_cbf', 1.0)
             y_mean_att, y_std_att = self.norm_stats.get('y_mean_att', 0.0), self.norm_stats.get('y_std_att', 1.0)
-            cbf_preds_norm_cat = torch.cat(all_cbf_preds_norm).numpy().squeeze(); att_preds_norm_cat = torch.cat(all_att_preds_norm).numpy().squeeze()
-            cbf_trues_norm_cat = torch.cat(all_cbf_trues_norm).numpy().squeeze(); att_trues_norm_cat = torch.cat(all_att_trues_norm).numpy().squeeze()
+            
+            # ### FIX for BFloat16 bug ###
+            cbf_preds_norm_cat = torch.cat(all_cbf_preds_norm).float().numpy().squeeze(); att_preds_norm_cat = torch.cat(all_att_preds_norm).float().numpy().squeeze()
+            cbf_trues_norm_cat = torch.cat(all_cbf_trues_norm).float().numpy().squeeze(); att_trues_norm_cat = torch.cat(all_att_trues_norm).float().numpy().squeeze()
+            
             cbf_preds_denorm = cbf_preds_norm_cat * y_std_cbf + y_mean_cbf; att_preds_denorm = att_preds_norm_cat * y_std_att + y_mean_att
             cbf_trues_denorm = cbf_trues_norm_cat * y_std_cbf + y_mean_cbf; att_trues_denorm = att_trues_norm_cat * y_std_att + y_mean_att
+            
             if len(cbf_preds_denorm) > 0 : 
                 metrics_dict['cbf_mae'] = mean_absolute_error(cbf_trues_denorm, cbf_preds_denorm)
                 metrics_dict['cbf_rmse'] = np.sqrt(mean_squared_error(cbf_trues_denorm, cbf_preds_denorm))
                 metrics_dict['att_mae'] = mean_absolute_error(att_trues_denorm, att_preds_denorm)
                 metrics_dict['att_rmse'] = np.sqrt(mean_squared_error(att_trues_denorm, att_preds_denorm))
-                cbf_log_vars_cat = torch.cat(all_cbf_log_vars).numpy().squeeze(); att_log_vars_cat = torch.cat(all_att_log_vars).numpy().squeeze()
+                
+                # ### FIX for BFloat16 bug ###
+                cbf_log_vars_cat = torch.cat(all_cbf_log_vars).float().numpy().squeeze(); att_log_vars_cat = torch.cat(all_att_log_vars).float().numpy().squeeze()
+                
                 metrics_dict['mean_cbf_log_var'] = np.mean(cbf_log_vars_cat); metrics_dict['mean_att_log_var'] = np.mean(att_log_vars_cat)
         return metrics_dict
 
