@@ -397,13 +397,14 @@ class CustomLoss(nn.Module):
         self.pinn_att_weighting_sigma = pinn_att_weighting_sigma
         self.mse_loss = nn.MSELoss()
 
+    # --- DEEPMIND FIX: Return a dictionary of loss components for detailed logging ---
     def forward(self,
                 normalized_input_signal: torch.Tensor,
                 cbf_pred_norm: torch.Tensor, att_pred_norm: torch.Tensor, 
                 cbf_true_norm: torch.Tensor, att_true_norm: torch.Tensor, 
                 cbf_log_var: torch.Tensor, att_log_var: torch.Tensor, 
                 cbf_rough_physical: torch.Tensor, att_rough_physical: torch.Tensor,
-                global_epoch: int) -> torch.Tensor:
+                global_epoch: int) -> Tuple[torch.Tensor, Dict[str, torch.Tensor]]:
         
         # --- Standard NLL calculation (Aleatoric Uncertainty Loss) ---
         cbf_nll_loss = 0.5 * (torch.exp(-cbf_log_var) * (cbf_pred_norm - cbf_true_norm)**2 + cbf_log_var)
@@ -424,12 +425,12 @@ class CustomLoss(nn.Module):
         total_param_loss = torch.mean(weighted_cbf_loss + weighted_att_loss)
         
         # --- Optional regularization on the magnitude of predicted uncertainty ---
-        log_var_regularization = 0.0
+        log_var_regularization = torch.tensor(0.0, device=total_param_loss.device)
         if self.log_var_reg_lambda > 0:
             log_var_regularization = self.log_var_reg_lambda * (torch.mean(cbf_log_var**2) + torch.mean(att_log_var**2))
             
         # --- Physics-Informed (PINN) Regularization ---
-        pinn_loss = 0.0
+        pinn_loss = torch.tensor(0.0, device=total_param_loss.device)
         if self.pinn_weight > 0 and self.norm_stats and self.model_params and global_epoch > 10:
             reconstructed_signal_norm = torch_kinetic_model(cbf_pred_norm, att_pred_norm, self.norm_stats, self.model_params)
             num_raw_signal_feats = len(self.model_params.get('pld_values', [])) * 2
@@ -437,9 +438,8 @@ class CustomLoss(nn.Module):
             pinn_loss = self.mse_loss(reconstructed_signal_norm, input_signal_norm)
 
         # --- Auxiliary Loss for Pre-Estimator (in NORMALIZED space) ---
-        pre_estimator_loss = 0.0
+        pre_estimator_loss = torch.tensor(0.0, device=total_param_loss.device)
         if self.pre_estimator_loss_weight > 0 and self.norm_stats:
-            # Normalize the pre-estimator's physical outputs to match the ground truth's scale
             cbf_rough_norm = (cbf_rough_physical - self.norm_stats['y_mean_cbf']) / (self.norm_stats['y_std_cbf'] + 1e-6)
             att_rough_norm = (att_rough_physical - self.norm_stats['y_mean_att']) / (self.norm_stats['y_std_att'] + 1e-6)
             
@@ -449,4 +449,11 @@ class CustomLoss(nn.Module):
 
         total_loss = total_param_loss + log_var_regularization + self.pinn_weight * pinn_loss + self.pre_estimator_loss_weight * pre_estimator_loss
         
-        return total_loss
+        loss_components = {
+            'param_nll_loss': total_param_loss,
+            'log_var_reg_loss': log_var_regularization,
+            'pinn_loss': pinn_loss,
+            'pre_estimator_loss': pre_estimator_loss
+        }
+        
+        return total_loss, loss_components

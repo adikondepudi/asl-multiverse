@@ -339,11 +339,21 @@ class EnhancedASLTrainer:
             patience_counters_stage = [0] * self.n_ensembles
             
             for epoch in range(n_epochs_stage):
-                epoch_train_losses_all_models, epoch_val_metrics_all_models = [], []
+                epoch_train_losses_all_models = defaultdict(list)
+                epoch_val_metrics_all_models = []
+                
                 train_loader_iter = iter(train_loader)
                 for model_idx in range(self.n_ensembles):
-                    train_loss_epoch = self._train_epoch(self.models[model_idx], train_loader_iter, self.optimizers[model_idx], self.scalers[model_idx], self.schedulers[model_idx], global_epoch_counter, steps_per_epoch)
-                    epoch_train_losses_all_models.append(train_loss_epoch)
+                    train_loss_epoch, train_loss_components = self._train_epoch(
+                        self.models[model_idx], train_loader_iter, self.optimizers[model_idx], 
+                        self.scalers[model_idx], self.schedulers[model_idx], 
+                        global_epoch_counter, steps_per_epoch
+                    )
+                    # --- DEEPMIND FIX: Store all training loss components per model ---
+                    epoch_train_losses_all_models['total_loss'].append(train_loss_epoch)
+                    for key, val in train_loss_components.items():
+                        epoch_train_losses_all_models[key].append(val)
+                    
                     histories[model_idx][f'train_losses_stage_{stage_idx}'].append(train_loss_epoch)
                     if model_idx < self.n_ensembles - 1: train_loader_iter = iter(train_loader)
 
@@ -353,6 +363,7 @@ class EnhancedASLTrainer:
                         epoch_val_metrics_all_models.append(val_metrics_dict)
                         histories[model_idx][f'val_metrics_stage_{stage_idx}'].append(val_metrics_dict)
                         val_loss_for_es = val_metrics_dict.get('val_loss', float('inf'))
+                        
                         if val_loss_for_es < best_val_losses_stage[model_idx]:
                             best_val_losses_stage[model_idx] = val_loss_for_es
                             patience_counters_stage[model_idx] = 0
@@ -363,27 +374,30 @@ class EnhancedASLTrainer:
                         else:
                             patience_counters_stage[model_idx] += 1
                 
-                # --- DEEPMIND FIX: Add comprehensive W&B logging for all relevant metrics ---
+                # --- DEEPMIND FIX: Comprehensive W&B logging for all metrics ---
                 if wandb.run:
-                    # Calculate mean losses and metrics across all models for this epoch
-                    mean_train_loss_epoch = np.nanmean(epoch_train_losses_all_models) if epoch_train_losses_all_models else float('nan')
+                    log_dict = {'epoch': global_epoch_counter}
                     
-                    # Prepare a dictionary for W&B logging
-                    log_dict = {'train/mean_loss': mean_train_loss_epoch, 'epoch': global_epoch_counter}
-                    
+                    # Log mean training losses and their components
+                    for key, values in epoch_train_losses_all_models.items():
+                        log_dict[f'train/mean_{key}'] = np.nanmean(values)
+
+                    # Log per-model training losses
+                    for i, loss_val in enumerate(epoch_train_losses_all_models['total_loss']):
+                        log_dict[f'train/loss_model_{i}'] = loss_val
+
+                    # Log aggregated and per-model validation metrics
                     if epoch_val_metrics_all_models:
-                        # Aggregate all validation metrics from the list of dicts
                         aggregated_val_metrics = defaultdict(list)
-                        for m_dict in epoch_val_metrics_all_models:
+                        for i, m_dict in enumerate(epoch_val_metrics_all_models):
                             for key, value in m_dict.items():
                                 if value is not None and np.isfinite(value):
                                     aggregated_val_metrics[key].append(value)
+                                    log_dict[f'val/{key}_model_{i}'] = value
                         
-                        # Calculate the mean of each validation metric and add to the log dict
                         for key, values in aggregated_val_metrics.items():
-                            log_dict[f'val/{key}'] = np.nanmean(values)
+                            log_dict[f'val/mean_{key}'] = np.nanmean(values)
                     
-                    # Log the aggregated dictionary to W&B against the global step count
                     wandb.log(log_dict, step=self.global_step)
 
                 if optuna_trial:
@@ -396,7 +410,7 @@ class EnhancedASLTrainer:
                     logger.info(f"All active models early stopped within stage {stage_idx+1}, epoch {epoch+1}. Moving to next stage.")
                     break 
                 if (epoch + 1) % 10 == 0:
-                    mean_train_loss_console = np.nanmean(epoch_train_losses_all_models) if epoch_train_losses_all_models else float('nan')
+                    mean_train_loss_console = np.nanmean(epoch_train_losses_all_models['total_loss']) if 'total_loss' in epoch_train_losses_all_models else float('nan')
                     mean_val_loss_console_stage = np.nanmean([m.get('val_loss', np.nan) for m in epoch_val_metrics_all_models]) if epoch_val_metrics_all_models else float('nan')
                     logger.info(f"Stage {stage_idx+1}, Epoch {epoch + 1}/{n_epochs_stage}: Mean Active Train Loss = {mean_train_loss_console:.6f}, Mean Active Val Loss (Stage) = {mean_val_loss_console_stage:.6f}")
                 global_epoch_counter += 1
@@ -411,8 +425,13 @@ class EnhancedASLTrainer:
         if wandb.run: wandb.summary['final_mean_val_loss_overall'] = final_mean_val_loss_overall
         return {'final_mean_val_loss': final_mean_val_loss_overall, 'all_histories': histories}
 
-    def _train_epoch(self, model, train_loader_iter, optimizer, scaler, scheduler, current_global_epoch: int, steps_per_epoch: int) -> float:
-        model.train(); total_loss = 0.0
+    # --- DEEPMIND FIX: Update method to handle and return decomposed loss dict ---
+    def _train_epoch(self, model, train_loader_iter, optimizer, scaler, scheduler, current_global_epoch: int, steps_per_epoch: int) -> Tuple[float, Dict[str, float]]:
+        model.train()
+        total_loss = 0.0
+        # Use defaultdict to easily accumulate component losses
+        total_components = defaultdict(float)
+        
         pbar = trange(steps_per_epoch, desc=f"Epoch {current_global_epoch+1} Training", leave=False, ncols=100)
         for i in pbar:
             try: signals, params_norm = next(train_loader_iter)
@@ -422,12 +441,23 @@ class EnhancedASLTrainer:
             with autocast(dtype=torch.bfloat16):
                 outputs = model(signals)
                 cbf_mean_norm, att_mean_norm, cbf_log_var, att_log_var, cbf_rough, att_rough = outputs
-                loss = self.custom_loss_fn(signals, cbf_mean_norm, att_mean_norm, params_norm[:, 0:1], params_norm[:, 1:2], cbf_log_var, att_log_var, cbf_rough, att_rough, current_global_epoch)
+                # Capture both total loss and the components dictionary
+                loss, loss_components = self.custom_loss_fn(signals, cbf_mean_norm, att_mean_norm, params_norm[:, 0:1], params_norm[:, 1:2], cbf_log_var, att_log_var, cbf_rough, att_rough, current_global_epoch)
+            
             scaler.scale(loss).backward(); scaler.step(optimizer); scaler.update()
             if scheduler: scheduler.step()
             if wandb.run and scheduler: wandb.log({'lr': scheduler.get_last_lr()[0]}, step=self.global_step)
-            total_loss += loss.item(); pbar.set_postfix(loss=loss.item()); self.global_step += 1
-        return total_loss / steps_per_epoch if steps_per_epoch > 0 else 0.0
+            
+            total_loss += loss.item()
+            for key, value in loss_components.items():
+                total_components[key] += value.item()
+                
+            pbar.set_postfix(loss=loss.item()); self.global_step += 1
+        
+        mean_total_loss = total_loss / steps_per_epoch if steps_per_epoch > 0 else 0.0
+        mean_components = {key: val / steps_per_epoch for key, val in total_components.items()} if steps_per_epoch > 0 else {}
+        
+        return mean_total_loss, mean_components
 
     def _validate(self, model, val_loader, current_global_epoch: int) -> Dict[str, float]:
         model.eval(); total_loss_val = 0.0
@@ -441,7 +471,8 @@ class EnhancedASLTrainer:
                 with autocast(dtype=torch.bfloat16):
                     outputs = model(signals)
                     cbf_mean_norm, att_mean_norm, cbf_log_var, att_log_var, cbf_rough, att_rough = outputs
-                    loss = self.custom_loss_fn(signals, cbf_mean_norm, att_mean_norm, params_norm[:, 0:1], params_norm[:, 1:2], cbf_log_var, att_log_var, cbf_rough, att_rough, current_global_epoch)
+                    # We only need the total loss for validation, not the components
+                    loss, _ = self.custom_loss_fn(signals, cbf_mean_norm, att_mean_norm, params_norm[:, 0:1], params_norm[:, 1:2], cbf_log_var, att_log_var, cbf_rough, att_rough, current_global_epoch)
                 total_loss_val += loss.item()
                 all_cbf_preds_norm.append(cbf_mean_norm.cpu()); all_att_preds_norm.append(att_mean_norm.cpu())
                 all_cbf_trues_norm.append(params_norm[:, 0:1].cpu()); all_att_trues_norm.append(params_norm[:, 1:2].cpu())
