@@ -197,15 +197,13 @@ class ASLIterableDataset(IterableDataset):
         self.t1_range = self.physio_var.t1_artery_range
         self.norm_stats = norm_stats
 
-    ### MODIFIED ### - This entire method is updated with fail-fast logic.
     def __iter__(self):
         worker_info = torch.utils.data.get_worker_info()
         if worker_info is not None: np.random.seed(worker_info.id + int(time.time() * 1000) % (2**32))
         else: np.random.seed(int(time.time() * 1000) % (2**32))
 
-        # --- NEW: Add a counter to prevent silent hangs on persistent errors ---
         consecutive_failures = 0
-        max_consecutive_failures = 100 # Stop after 100 straight failures
+        max_consecutive_failures = 100 
 
         while True:
             try:
@@ -251,7 +249,6 @@ class ASLIterableDataset(IterableDataset):
                 
                 yield torch.from_numpy(final_input.astype(np.float32)), torch.from_numpy(params_norm.astype(np.float32))
 
-                # --- NEW: Reset counter on success ---
                 consecutive_failures = 0
 
             except Exception as e:
@@ -259,7 +256,6 @@ class ASLIterableDataset(IterableDataset):
                 logger.error(f"DataLoader worker {worker_id} failed to generate a sample: {e}")
                 traceback.print_exc()
 
-                # --- NEW: Fail-fast logic ---
                 consecutive_failures += 1
                 if consecutive_failures >= max_consecutive_failures:
                     raise RuntimeError(
@@ -267,7 +263,7 @@ class ASLIterableDataset(IterableDataset):
                         "This indicates a persistent bug in data generation. Aborting training."
                     ) from e
                 
-                continue # Still allow skipping for transient errors
+                continue 
 
 class EnhancedASLTrainer:
     def __init__(self,
@@ -287,11 +283,10 @@ class EnhancedASLTrainer:
         self.validation_steps_per_epoch = model_config.get('validation_steps_per_epoch', 50)
         self.scalers = [GradScaler() for _ in range(self.n_ensembles)]
 
-        # self.models = [torch.compile(model_class(**model_config).to(device), mode="max-autotune") for _ in range(n_ensembles)]
         self.models = [model_class(**model_config).to(device) for _ in range(n_ensembles)]
         self.best_states = [None] * self.n_ensembles
         self.optimizers = [torch.optim.Adam(model.parameters(), lr=learning_rate, weight_decay=self.weight_decay) for model in self.models]
-        self.schedulers = [] # ### --- DEEPMIND FIX --- ### Schedulers will now be created per-stage in train_ensemble
+        self.schedulers = [] 
         
         loss_params = {
             'w_cbf': model_config.get('loss_weight_cbf', 1.0), 'w_att': model_config.get('loss_weight_att', 1.0),
@@ -315,7 +310,6 @@ class EnhancedASLTrainer:
         self.overall_best_val_losses = [float('inf')] * self.n_ensembles
 
         for stage_idx, train_loader in enumerate(train_loaders):
-            ### --- DEEPMIND FIX: Stage-Aware Scheduler and Loss Weight Initialization --- ###
             steps_per_epoch = steps_per_epoch_schedule[stage_idx]
             n_epochs_stage = epoch_schedule[stage_idx]
             total_steps_stage = steps_per_epoch * n_epochs_stage
@@ -334,7 +328,6 @@ class EnhancedASLTrainer:
                 logger.info(f"--- STAGE 2: Full-Spectrum Fine-tuning ({n_epochs_stage} epochs) ---")
                 logger.info(f"  PINN Weight: {self.custom_loss_fn.pinn_weight}, Pre-Estimator Weight: {self.custom_loss_fn.pre_estimator_loss_weight}, Max LR: {stage_lr}")
 
-            # Re-initialize schedulers for the current stage
             self.schedulers = [
                 torch.optim.lr_scheduler.OneCycleLR(opt, max_lr=stage_lr, total_steps=total_steps_stage)
                 for opt in self.optimizers
@@ -354,7 +347,6 @@ class EnhancedASLTrainer:
                     histories[model_idx][f'train_losses_stage_{stage_idx}'].append(train_loss_epoch)
                     if model_idx < self.n_ensembles - 1: train_loader_iter = iter(train_loader)
 
-                # ### FIX for IterableDataset len() bug ###
                 if current_val_loader is not None and current_val_loader.dataset is not None:
                     for model_idx in range(self.n_ensembles):
                         val_metrics_dict = self._validate(self.models[model_idx], current_val_loader, global_epoch_counter)
@@ -371,7 +363,28 @@ class EnhancedASLTrainer:
                         else:
                             patience_counters_stage[model_idx] += 1
                 
-                # ... (wandb logging remains the same) ...
+                # --- DEEPMIND FIX: Add comprehensive W&B logging for all relevant metrics ---
+                if wandb.run:
+                    # Calculate mean losses and metrics across all models for this epoch
+                    mean_train_loss_epoch = np.nanmean(epoch_train_losses_all_models) if epoch_train_losses_all_models else float('nan')
+                    
+                    # Prepare a dictionary for W&B logging
+                    log_dict = {'train/mean_loss': mean_train_loss_epoch, 'epoch': global_epoch_counter}
+                    
+                    if epoch_val_metrics_all_models:
+                        # Aggregate all validation metrics from the list of dicts
+                        aggregated_val_metrics = defaultdict(list)
+                        for m_dict in epoch_val_metrics_all_models:
+                            for key, value in m_dict.items():
+                                if value is not None and np.isfinite(value):
+                                    aggregated_val_metrics[key].append(value)
+                        
+                        # Calculate the mean of each validation metric and add to the log dict
+                        for key, values in aggregated_val_metrics.items():
+                            log_dict[f'val/{key}'] = np.nanmean(values)
+                    
+                    # Log the aggregated dictionary to W&B against the global step count
+                    wandb.log(log_dict, step=self.global_step)
 
                 if optuna_trial:
                     mean_val_loss_for_pruning = np.nanmean([m.get('val_loss', np.nan) for m in epoch_val_metrics_all_models]) if epoch_val_metrics_all_models else float('inf')
@@ -443,7 +456,6 @@ class EnhancedASLTrainer:
             y_mean_cbf, y_std_cbf = self.norm_stats.get('y_mean_cbf', 0.0), self.norm_stats.get('y_std_cbf', 1.0)
             y_mean_att, y_std_att = self.norm_stats.get('y_mean_att', 0.0), self.norm_stats.get('y_std_att', 1.0)
             
-            # ### FIX for BFloat16 bug ###
             cbf_preds_norm_cat = torch.cat(all_cbf_preds_norm).float().numpy().squeeze(); att_preds_norm_cat = torch.cat(all_att_preds_norm).float().numpy().squeeze()
             cbf_trues_norm_cat = torch.cat(all_cbf_trues_norm).float().numpy().squeeze(); att_trues_norm_cat = torch.cat(all_att_trues_norm).float().numpy().squeeze()
             
@@ -456,7 +468,6 @@ class EnhancedASLTrainer:
                 metrics_dict['att_mae'] = mean_absolute_error(att_trues_denorm, att_preds_denorm)
                 metrics_dict['att_rmse'] = np.sqrt(mean_squared_error(att_trues_denorm, att_preds_denorm))
                 
-                # ### FIX for BFloat16 bug ###
                 cbf_log_vars_cat = torch.cat(all_cbf_log_vars).float().numpy().squeeze(); att_log_vars_cat = torch.cat(all_att_log_vars).float().numpy().squeeze()
                 
                 metrics_dict['mean_cbf_log_var'] = np.mean(cbf_log_vars_cat); metrics_dict['mean_att_log_var'] = np.mean(att_log_vars_cat)
@@ -476,10 +487,10 @@ class EnhancedASLTrainer:
             all_cbf_means_norm_np = np.array(all_cbf_means_norm_list).squeeze(); all_att_means_norm_np = np.array(all_att_means_norm_list).squeeze() 
             all_cbf_aleatoric_vars_np = np.array(all_cbf_aleatoric_vars_list).squeeze(); all_att_aleatoric_vars_np = np.array(all_att_aleatoric_vars_list).squeeze() 
             cbf_weights = 1.0 / (all_cbf_aleatoric_vars_np + 1e-9); ensemble_cbf_mean_norm = np.average(all_cbf_means_norm_np, weights=cbf_weights)
-            att_weights = 1.0 / (all_att_aleatoric_vars_np + 1e-9); ensemble_att_mean_norm = np.average(all_att_means_np, weights=att_weights)
+            att_weights = 1.0 / (all_att_aleatoric_vars_np + 1e-9); ensemble_att_mean_norm = np.average(all_att_means_norm_np, weights=att_weights)
             mean_aleatoric_cbf_var_norm = np.mean(all_cbf_aleatoric_vars_np); mean_aleatoric_att_var_norm = np.mean(all_att_aleatoric_vars_np)
             epistemic_cbf_var_norm = np.var(all_cbf_means_norm_np) if self.n_ensembles > 1 else 0.0
-            epistemic_att_var_norm = np.var(all_att_means_np) if self.n_ensembles > 1 else 0.0
+            epistemic_att_var_norm = np.var(all_att_means_norm_np) if self.n_ensembles > 1 else 0.0
         else:
             all_cbf_means_norm_np = np.concatenate(all_cbf_means_norm_list, axis=1); all_att_means_norm_np = np.concatenate(all_att_means_norm_list, axis=1) 
             all_cbf_aleatoric_vars_np = np.concatenate(all_cbf_aleatoric_vars_list, axis=1); all_att_aleatoric_vars_np = np.concatenate(all_att_aleatoric_vars_list, axis=1) 

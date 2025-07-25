@@ -89,7 +89,6 @@ class ResearchConfig:
     wandb_project: str = "asl-multiverse-project"
     wandb_entity: Optional[str] = None
 
-### MODIFIED ### - Function now accepts pre-computed norm_stats
 def objective(trial: optuna.Trial, base_config: ResearchConfig, output_dir: Path, norm_stats: Dict) -> float:
     """
     The objective function for Optuna hyperparameter optimization.
@@ -120,15 +119,10 @@ def objective(trial: optuna.Trial, base_config: ResearchConfig, output_dir: Path
     asl_params_sim = ASLParameters(**{k:v for k,v in asdict(trial_config).items() if k in ASLParameters.__annotations__})
     simulator = RealisticASLSimulator(params=asl_params_sim)
     
-    ### MODIFIED ### - The per-trial stats calculation is REMOVED. norm_stats is now passed in.
-    
     train_dataset = ASLIterableDataset(simulator, plds_np, trial_config.training_noise_levels_stage1, norm_stats=norm_stats)
     val_dataset = ASLIterableDataset(simulator, plds_np, trial_config.training_noise_levels_stage1, norm_stats=norm_stats)
     
     num_workers = min(4, os.cpu_count())
-    # === FIX ===
-    # Set persistent_workers to False inside the HPO loop. Each trial creates new DataLoaders,
-    # and leaving the workers persistent causes a "Too many open files" error as they accumulate across trials.
     train_loader = DataLoader(train_dataset, batch_size=trial_config.batch_size, num_workers=num_workers, pin_memory=True, persistent_workers=False)
     val_loader = DataLoader(val_dataset, batch_size=trial_config.batch_size * 2, num_workers=num_workers, pin_memory=True, persistent_workers=False)
 
@@ -158,7 +152,6 @@ def objective(trial: optuna.Trial, base_config: ResearchConfig, output_dir: Path
         script_logger.info(f"Trial {trial.number} pruned.")
         return float('inf')
 
-### MODIFIED ### - Function now accepts pre-computed norm_stats
 def run_hyperparameter_optimization(config: ResearchConfig, output_dir: Path, norm_stats: Dict):
     """Manages the Optuna HPO study, including saving and resuming."""
     study_name = config.optuna_study_name
@@ -177,7 +170,6 @@ def run_hyperparameter_optimization(config: ResearchConfig, output_dir: Path, no
         script_logger.info("Created a new Optuna study.")
 
     try:
-        ### MODIFIED ### - Pass norm_stats into the objective function via lambda
         study.optimize(
             lambda trial: objective(trial, config, output_dir, norm_stats),
             n_trials=config.optuna_n_trials,
@@ -201,7 +193,6 @@ def run_hyperparameter_optimization(config: ResearchConfig, output_dir: Path, no
         script_logger.info(f"    {key}: {value}")
     script_logger.info(f"Best parameters saved to {best_params_path}")
 
-### MODIFIED ### - Function now accepts pre-computed norm_stats
 def run_comprehensive_asl_research(config: ResearchConfig, output_dir: Path, norm_stats: Dict) -> Dict:
     """The main research pipeline for a full training run."""
     output_dir.mkdir(parents=True, exist_ok=True)
@@ -221,14 +212,12 @@ def run_comprehensive_asl_research(config: ResearchConfig, output_dir: Path, nor
     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
     script_logger.info(f"Using device: {device}")
 
-    ### MODIFIED ### - Stats calculation block is REMOVED. We use the passed-in norm_stats.
     norm_stats_final = norm_stats
     
     train_dataset_s1 = ASLIterableDataset(simulator, plds_np, config.training_noise_levels_stage1, norm_stats=norm_stats_final)
     train_dataset_s2 = ASLIterableDataset(simulator, plds_np, config.training_noise_levels_stage2, norm_stats=norm_stats_final)
     
     try:
-        # Use a reasonable cap, e.g., 16, to prevent excessive overhead
         cpu_count = int(os.environ.get('SLURM_CPUS_PER_TASK', os.cpu_count()))
         num_workers = min(cpu_count, 16) 
     except (ValueError, TypeError):
@@ -265,11 +254,37 @@ def run_comprehensive_asl_research(config: ResearchConfig, output_dir: Path, nor
     training_duration_hours = (time.time() - training_start_time) / 3600
     script_logger.info(f"Training completed in {training_duration_hours:.2f} hours.")
     
-    # ... (evaluation phases would follow here) ...
+    # --- DEEPMIND FIX: Save the final trained models to disk ---
+    script_logger.info("Saving final trained ensemble models...")
+    models_dir = output_dir / 'trained_models'
+    models_dir.mkdir(exist_ok=True)
     
+    num_saved = 0
+    for i, state_dict in enumerate(trainer.best_states):
+        if state_dict:
+            model_path = models_dir / f'ensemble_model_{i}.pt'
+            torch.save(state_dict, model_path)
+            script_logger.info(f"  - Saved model {i} to {model_path}")
+            num_saved += 1
+        else:
+            script_logger.warning(f"  - No best state found for model {i}, not saving.")
+    
+    script_logger.info(f"Successfully saved {num_saved} models.")
+
+    # Also log the model directory as a W&B artifact if any models were saved
+    if wandb.run and num_saved > 0:
+        model_artifact = wandb.Artifact(name=f"asl_ensemble_{wandb_run.id}", type="model")
+        model_artifact.add_dir(str(models_dir)) # Use string path for artifact
+        wandb_run.log_artifact(model_artifact)
+        script_logger.info("Logged trained models as a W&B artifact.")
+    
+    if wandb.run:
+        wandb.finish()
+        
+    # This dictionary would typically be populated by subsequent evaluation steps
+    # For now, it's a placeholder.
     return {}
 
-### MODIFIED ### - Entire main execution block is updated for unified stats calculation.
 if __name__ == "__main__":
     logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(name)s - %(levelname)s - %(message)s', handlers=[logging.StreamHandler(sys.stdout)], force=True) 
     
@@ -290,7 +305,6 @@ if __name__ == "__main__":
                 for key, value in params.items():
                     if hasattr(config_obj, key): setattr(config_obj, key, value)
     
-    # Determine output directory and create it
     if args.output_dir:
         output_path = Path(args.output_dir)
     else:
@@ -302,7 +316,6 @@ if __name__ == "__main__":
     if args.study_name:
         config_obj.optuna_study_name = args.study_name
 
-    # --- NEW: Centralized Normalization Statistics Calculation ---
     norm_stats_path = output_path / 'norm_stats.json'
     if norm_stats_path.exists():
         script_logger.info(f"Loading cached normalization stats from {norm_stats_path}")
@@ -327,7 +340,6 @@ if __name__ == "__main__":
         with open(norm_stats_path, 'w') as f:
             json.dump(norm_stats, f, indent=2)
 
-    # --- Execute requested mode with unified norm_stats ---
     if args.optimize:
         run_hyperparameter_optimization(config=config_obj, output_dir=output_path, norm_stats=norm_stats)
     else:

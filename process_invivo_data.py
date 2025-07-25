@@ -22,7 +22,8 @@ def find_and_sort_files_by_pld(subject_dir: Path, patterns: list) -> List[Path]:
         # Use rglob to search in subdirectories as well, which can be helpful
         files = list(subject_dir.rglob(pattern))
         if files:
-            print(f"  --> Found files for '{subject_dir.name}' using pattern: '{pattern}'")
+            # This print statement is commented out as it can be too verbose
+            # print(f"  --> Found files for '{subject_dir.name}' using pattern: '{pattern}'")
             return sorted(files, key=get_pld_from_path)
     return []
 
@@ -40,7 +41,7 @@ def preprocess_subject(subject_dir: Path, output_root: Path):
     """
     subject_id = subject_dir.name
     subject_output_dir = output_root / subject_id
-    print(f"\n--- Processing Subject: {subject_id} ---")
+    tqdm.write(f"\n--- Processing Subject: {subject_id} ---")
 
     try:
         # Define the exact file patterns to search for, as advised by your PI
@@ -54,20 +55,20 @@ def preprocess_subject(subject_dir: Path, output_root: Path):
 
         # Basic validation
         if not pcasl_files or not vsasl_files or len(pcasl_files) != len(vsasl_files):
-            print(f"  [WARNING] Inconsistent or missing ASL files for {subject_id}. Skipping.")
+            tqdm.write(f"  [WARNING] Inconsistent or missing ASL files for {subject_id}. Skipping.")
             return
 
         subject_output_dir.mkdir(parents=True, exist_ok=True)
 
         # --- Create Brain Mask from M0 Scan ---
         if m0_file_list:
-            print("  --> Found M0 scan, creating robust brain mask.")
+            tqdm.write("  --> Found M0 scan, creating robust brain mask.")
             m0_data = load_nifti_data(m0_file_list[0])
             # A simple threshold on the M0 image is very effective.
             threshold = np.percentile(m0_data[m0_data > 0], 50) * 0.5
             brain_mask = m0_data > threshold
         else:
-            print("  [WARNING] No M0 scan found. Masking quality may be reduced.")
+            tqdm.write("  [WARNING] No M0 scan found. Masking quality may be reduced.")
             # Fallback: create mask from the first PCASL scan's average signal
             first_pcasl_data = load_nifti_data(pcasl_files[0])
             mean_signal = np.mean(np.abs(first_pcasl_data), axis=-1)
@@ -75,11 +76,11 @@ def preprocess_subject(subject_dir: Path, output_root: Path):
             brain_mask = mean_signal > threshold
         
         if np.sum(brain_mask) == 0:
-            print(f"  [ERROR] Brain mask for {subject_id} is empty. Skipping.")
+            tqdm.write(f"  [ERROR] Brain mask for {subject_id} is empty. Skipping.")
             return
             
         np.save(subject_output_dir / 'brain_mask.npy', brain_mask)
-        print(f"  --> Brain mask created with {np.sum(brain_mask)} voxels.")
+        tqdm.write(f"  --> Brain mask created with {np.sum(brain_mask)} voxels.")
 
         # --- Load, Process, and Stack Data ---
         pcasl_1_repeat, pcasl_4_repeat_avg = [], []
@@ -120,10 +121,10 @@ def preprocess_subject(subject_dir: Path, output_root: Path):
         np.save(subject_output_dir / 'image_affine.npy', first_img.affine)
         np.save(subject_output_dir / 'image_header.npy', first_img.header)
         np.save(subject_output_dir / 'image_dims.npy', np.array(first_img.shape[:3]))
-        print(f"  --> Saved processed NumPy arrays to {subject_output_dir}")
+        tqdm.write(f"  --> Saved processed NumPy arrays to {subject_output_dir}")
 
     except Exception as e:
-        print(f"  [FATAL ERROR] processing subject {subject_id}: {e}")
+        tqdm.write(f"  [FATAL ERROR] processing subject {subject_id}: {e}")
         import traceback
         traceback.print_exc()
 
@@ -135,10 +136,8 @@ if __name__ == '__main__':
     root_data_dir = Path(sys.argv[1])
     output_dir = Path(sys.argv[2])
 
-    # =========== FIX IS HERE ===========
-    # Instead of a hardcoded list, find all subdirectories in the input folder.
-    subject_dirs = [d for d in root_data_dir.iterdir() if d.is_dir()]
-    # ===================================
+    # --- DEEPMIND FIX: Dynamically find subject directories instead of using a hardcoded list. ---
+    subject_dirs = sorted([d for d in root_data_dir.iterdir() if d.is_dir()])
     
     if not subject_dirs:
          print(f"[ERROR] No subject folders found in '{root_data_dir}'. Did the prepare script run correctly?")
@@ -146,7 +145,7 @@ if __name__ == '__main__':
 
     print(f"Found {len(subject_dirs)} valid subject folders to process.")
     
-    for sub_dir in subject_dirs:
+    for sub_dir in tqdm(subject_dirs, desc="Processing all subjects"):
         preprocess_subject(sub_dir, output_dir)
         
     print("\n--- In-vivo data preprocessing complete! ---")
