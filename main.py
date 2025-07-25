@@ -126,8 +126,11 @@ def objective(trial: optuna.Trial, base_config: ResearchConfig, output_dir: Path
     val_dataset = ASLIterableDataset(simulator, plds_np, trial_config.training_noise_levels_stage1, norm_stats=norm_stats)
     
     num_workers = min(4, os.cpu_count())
-    train_loader = DataLoader(train_dataset, batch_size=trial_config.batch_size, num_workers=num_workers, pin_memory=True, persistent_workers=(num_workers > 0))
-    val_loader = DataLoader(val_dataset, batch_size=trial_config.batch_size * 2, num_workers=num_workers, pin_memory=True, persistent_workers=(num_workers > 0))
+    # === FIX ===
+    # Set persistent_workers to False inside the HPO loop. Each trial creates new DataLoaders,
+    # and leaving the workers persistent causes a "Too many open files" error as they accumulate across trials.
+    train_loader = DataLoader(train_dataset, batch_size=trial_config.batch_size, num_workers=num_workers, pin_memory=True, persistent_workers=False)
+    val_loader = DataLoader(val_dataset, batch_size=trial_config.batch_size * 2, num_workers=num_workers, pin_memory=True, persistent_workers=False)
 
     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
     base_input_size_nn = num_plds * 2 + 4
