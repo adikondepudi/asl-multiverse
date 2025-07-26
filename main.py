@@ -218,19 +218,21 @@ def run_comprehensive_asl_research(config: ResearchConfig, output_dir: Path, nor
     train_dataset_s2 = ASLIterableDataset(simulator, plds_np, config.training_noise_levels_stage2, norm_stats=norm_stats_final)
     
     try:
-        cpu_count = int(os.environ.get('SLURM_CPUS_PER_TASK', os.cpu_count()))
-        num_workers = min(cpu_count, 16) 
+        # Use the exact number of CPUs allocated by SLURM for maximum throughput
+        num_workers = int(os.environ.get('SLURM_CPUS_PER_TASK'))
     except (ValueError, TypeError):
+        # Fallback for local testing if SLURM variable isn't set
         num_workers = min(os.cpu_count(), 16)
-    script_logger.info(f"Using {num_workers} DataLoader workers (capped at 16).")
+    script_logger.info(f"Using {num_workers} DataLoader workers.")
 
-    train_loader_s1 = DataLoader(train_dataset_s1, batch_size=config.batch_size, num_workers=num_workers, pin_memory=True, persistent_workers=(num_workers > 0))
-    train_loader_s2 = DataLoader(train_dataset_s2, batch_size=config.batch_size, num_workers=num_workers, pin_memory=True, persistent_workers=(num_workers > 0))
+    # Added prefetch_factor=4. This tells each worker to prepare 4 batches in advance.
+    train_loader_s1 = DataLoader(train_dataset_s1, batch_size=config.batch_size, num_workers=num_workers, pin_memory=True, persistent_workers=(num_workers > 0), prefetch_factor=4)
+    train_loader_s2 = DataLoader(train_dataset_s2, batch_size=config.batch_size, num_workers=num_workers, pin_memory=True, persistent_workers=(num_workers > 0), prefetch_factor=4)
 
     script_logger.info("Creating iterable validation dataset...")
     val_dataset_iterable = ASLIterableDataset(simulator, plds_np, config.training_noise_levels_stage1, norm_stats=norm_stats_final)
-    val_loader = DataLoader(val_dataset_iterable, batch_size=config.batch_size * 2, num_workers=num_workers, pin_memory=True, persistent_workers=(num_workers > 0))
-
+    val_loader = DataLoader(val_dataset_iterable, batch_size=config.batch_size * 2, num_workers=num_workers, pin_memory=True, persistent_workers=(num_workers > 0), prefetch_factor=4)
+    
     base_input_size_nn = num_plds * 2 + 4
     model_creation_config = asdict(config)
     def create_main_model_closure(**kwargs): return EnhancedASLNet(input_size=base_input_size_nn, **kwargs)
