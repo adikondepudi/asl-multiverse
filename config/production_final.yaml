@@ -13,11 +13,11 @@ training:
   loss_pinn_weight_stage2: 0.4527734124202008
   
   # --- Production-safe learning rates ---
-  learning_rate: 0.005
-  learning_rate_stage2: 0.0002
+  learning_rate: 0.0025
+  learning_rate_stage2: 0.0001
 
   # --- Production run parameters ---
-  batch_size: 2048
+  batch_size: 8192
   n_ensembles: 5
   steps_per_epoch_stage1: 1000
   steps_per_epoch_stage2: 500
