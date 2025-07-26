@@ -28,7 +28,6 @@ warnings.filterwarnings('ignore', category=UserWarning)
 from enhanced_asl_network import EnhancedASLNet
 from asl_simulation import ASLParameters
 from enhanced_simulation import RealisticASLSimulator
-# +++ MODIFIED: Import the new in-memory dataset class
 from asl_trainer import EnhancedASLTrainer, ASLIterableDataset, ASLInMemoryDataset
 from torch.utils.data import DataLoader
 from comparison_framework import ComprehensiveComparison
@@ -213,34 +212,30 @@ def run_comprehensive_asl_research(config: ResearchConfig, output_dir: Path, nor
     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
     script_logger.info(f"Using device: {device}")
 
-    # +++ MODIFIED: Centralized data loading logic +++
     with open(args.config_file, 'r') as f_yaml:
         config_from_yaml = yaml.safe_load(f_yaml) or {}
     data_config = config_from_yaml.get('data', {})
     use_offline = data_config.get('use_offline_dataset', False)
     offline_path = data_config.get('offline_dataset_path', None)
     
-    num_workers = os.cpu_count() or 1
-    script_logger.info(f"Using {num_workers} CPU cores for data loading.")
+    # +++ THIS IS THE FIX +++
+    # Cap the number of workers to a reasonable maximum to avoid resource exhaustion.
+    # 16 is a safe and effective number for a high-performance system.
+    num_workers = min(os.cpu_count() or 1, 16)
+    script_logger.info(f"Using a capped number of {num_workers} CPU cores for data loading.")
 
     if use_offline and offline_path:
         script_logger.info(f"Using OFFLINE In-Memory dataset from: {offline_path}")
         train_dataset = ASLInMemoryDataset(data_dir=offline_path, norm_stats=norm_stats)
-        # Use a small on-the-fly dataset for validation to test generalization
         val_dataset = ASLIterableDataset(simulator, plds_np, config.training_noise_levels_stage1, norm_stats=norm_stats)
-        
-        # In-memory dataset is a standard map-style dataset, so shuffling is required.
         shuffle_train = True 
-        # For a massive in-memory dataset, steps_per_epoch is no longer needed. The loader will iterate through the whole dataset.
         steps_s1 = None 
         steps_s2 = None
     else:
         script_logger.info("Using ON-THE-FLY IterableDataset for training.")
         train_dataset = ASLIterableDataset(simulator, plds_np, config.training_noise_levels_stage1, norm_stats=norm_stats)
         val_dataset = ASLIterableDataset(simulator, plds_np, config.training_noise_levels_stage1, norm_stats=norm_stats)
-        # IterableDataset handles its own randomization, so shuffling must be False.
         shuffle_train = False
-        # For iterable datasets, we must define how many steps constitute an "epoch".
         steps_s1 = config.steps_per_epoch_stage1
         steps_s2 = config.steps_per_epoch_stage2
 
@@ -266,7 +261,7 @@ def run_comprehensive_asl_research(config: ResearchConfig, output_dir: Path, nor
         train_loaders=[train_loader_s1, train_loader_s2],
         val_loaders=[val_loader, val_loader],
         epoch_schedule=[config.n_epochs_stage1, config.n_epochs_stage2],
-        steps_per_epoch_schedule=[steps_s1, steps_s2], # Use the determined step counts
+        steps_per_epoch_schedule=[steps_s1, steps_s2],
         early_stopping_patience=25 
     )
 

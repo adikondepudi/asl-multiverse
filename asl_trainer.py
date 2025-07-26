@@ -271,7 +271,7 @@ class EnhancedASLTrainer:
                  weight_decay: float = 1e-5, batch_size: int = 256, n_ensembles: int = 5,
                  device: str = 'cuda' if torch.cuda.is_available() else 'cpu',
                  n_plds_for_model: Optional[int] = None, m0_input_feature_model: bool = False):
-        self.device = device
+        self.device = torch.device(device) # Ensure device is a torch.device object
         self.batch_size = batch_size
         self.n_ensembles = n_ensembles
         self.n_plds_for_model = n_plds_for_model
@@ -281,9 +281,9 @@ class EnhancedASLTrainer:
         self.weight_decay = weight_decay
         self.model_config = model_config
         self.validation_steps_per_epoch = model_config.get('validation_steps_per_epoch', 50)
-        self.scalers = [GradScaler() for _ in range(self.n_ensembles)]
+        self.scalers = [torch.cuda.amp.GradScaler() for _ in range(self.n_ensembles)]
 
-        self.models = [model_class(**model_config).to(device) for _ in range(n_ensembles)]
+        self.models = [model_class(**model_config).to(self.device) for _ in range(n_ensembles)]
         self.best_states = [None] * self.n_ensembles
         self.optimizers = [torch.optim.Adam(model.parameters(), lr=learning_rate, weight_decay=self.weight_decay) for model in self.models]
         self.schedulers = [] 
@@ -299,7 +299,7 @@ class EnhancedASLTrainer:
 
     def train_ensemble(self,
                    train_loaders: List[DataLoader], val_loaders: List[Optional[DataLoader]],
-                   epoch_schedule: List[int], steps_per_epoch_schedule: List[int],
+                   epoch_schedule: List[int], steps_per_epoch_schedule: List[Optional[int]],
                    early_stopping_patience: int = 20, optuna_trial: Optional[Any] = None) -> Dict[str, Any]:
         
         histories = defaultdict(lambda: defaultdict(list)); self.global_step = 0; global_epoch_counter = 0 
@@ -312,6 +312,14 @@ class EnhancedASLTrainer:
         for stage_idx, train_loader in enumerate(train_loaders):
             steps_per_epoch = steps_per_epoch_schedule[stage_idx]
             n_epochs_stage = epoch_schedule[stage_idx]
+            
+            # +++ THIS IS THE FIX +++
+            if steps_per_epoch is None:
+                # This occurs when using an in-memory map-style dataset.
+                # One epoch means a full pass over the data.
+                steps_per_epoch = len(train_loader)
+                logger.info(f"  Using map-style dataset. One epoch will be {steps_per_epoch} steps (full dataset).")
+
             total_steps_stage = steps_per_epoch * n_epochs_stage
 
             if stage_idx == 0:
@@ -342,6 +350,7 @@ class EnhancedASLTrainer:
                 epoch_train_losses_all_models = defaultdict(list)
                 epoch_val_metrics_all_models = []
                 
+                # For map-style datasets, the iterator is recreated each epoch if shuffle=True
                 train_loader_iter = iter(train_loader)
                 for model_idx in range(self.n_ensembles):
                     train_loss_epoch, train_loss_components = self._train_epoch(
@@ -349,12 +358,12 @@ class EnhancedASLTrainer:
                         self.scalers[model_idx], self.schedulers[model_idx], 
                         global_epoch_counter, steps_per_epoch
                     )
-                    # --- DEEPMIND FIX: Store all training loss components per model ---
                     epoch_train_losses_all_models['total_loss'].append(train_loss_epoch)
                     for key, val in train_loss_components.items():
                         epoch_train_losses_all_models[key].append(val)
                     
                     histories[model_idx][f'train_losses_stage_{stage_idx}'].append(train_loss_epoch)
+                    # If using map-style, we need a fresh iterator for each model in the same epoch
                     if model_idx < self.n_ensembles - 1: train_loader_iter = iter(train_loader)
 
                 if current_val_loader is not None and current_val_loader.dataset is not None:
@@ -374,19 +383,15 @@ class EnhancedASLTrainer:
                         else:
                             patience_counters_stage[model_idx] += 1
                 
-                # --- DEEPMIND FIX: Comprehensive W&B logging for all metrics ---
                 if wandb.run:
                     log_dict = {'epoch': global_epoch_counter}
                     
-                    # Log mean training losses and their components
                     for key, values in epoch_train_losses_all_models.items():
                         log_dict[f'train/mean_{key}'] = np.nanmean(values)
 
-                    # Log per-model training losses
                     for i, loss_val in enumerate(epoch_train_losses_all_models['total_loss']):
                         log_dict[f'train/loss_model_{i}'] = loss_val
 
-                    # Log aggregated and per-model validation metrics
                     if epoch_val_metrics_all_models:
                         aggregated_val_metrics = defaultdict(list)
                         for i, m_dict in enumerate(epoch_val_metrics_all_models):
@@ -425,29 +430,24 @@ class EnhancedASLTrainer:
         if wandb.run: wandb.summary['final_mean_val_loss_overall'] = final_mean_val_loss_overall
         return {'final_mean_val_loss': final_mean_val_loss_overall, 'all_histories': histories}
 
-    # --- DEEPMIND FIX: Update method to handle and return decomposed loss dict ---
     def _train_epoch(self, model, train_loader_iter, optimizer, scaler, scheduler, current_global_epoch: int, steps_per_epoch: int) -> Tuple[float, Dict[str, float]]:
         model.train()
         total_loss = 0.0
-        # Use defaultdict to easily accumulate component losses
         total_components = defaultdict(float)
         
-        # +++ MODIFIED: Use the standard DataLoader iterator if steps_per_epoch is not specified for the whole dataset
-        data_iterator = islice(train_loader_iter, steps_per_epoch) if steps_per_epoch else train_loader_iter
-        pbar = tqdm(data_iterator, total=steps_per_epoch, desc=f"Epoch {current_global_epoch+1} Training", leave=False, ncols=100)
-
-        for signals, params_norm in pbar:
+        pbar = tqdm(islice(train_loader_iter, steps_per_epoch), total=steps_per_epoch, desc=f"Epoch {current_global_epoch+1} Training", leave=False, ncols=100)
+        
+        for i, (signals, params_norm) in enumerate(pbar):
             signals, params_norm = signals.to(self.device), params_norm.to(self.device)
             optimizer.zero_grad(set_to_none=True)
             with torch.amp.autocast(device_type=self.device.type, dtype=torch.bfloat16):
                 outputs = model(signals)
                 cbf_mean_norm, att_mean_norm, cbf_log_var, att_log_var, cbf_rough, att_rough = outputs
-                # Capture both total loss and the components dictionary
                 loss, loss_components = self.custom_loss_fn(signals, cbf_mean_norm, att_mean_norm, params_norm[:, 0:1], params_norm[:, 1:2], cbf_log_var, att_log_var, cbf_rough, att_rough, current_global_epoch)
             
             scaler.scale(loss).backward()
-            scaler.unscale_(optimizer) # Unscales the gradients of optimizer's assigned params in-place
-            torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0) # Clip the now-unscaled gradients
+            scaler.unscale_(optimizer)
+            torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
             scaler.step(optimizer)
             scaler.update()
 
@@ -460,9 +460,9 @@ class EnhancedASLTrainer:
                 
             pbar.set_postfix(loss=loss.item()); self.global_step += 1
         
-        num_steps = steps_per_epoch if steps_per_epoch > 0 else 1
-        mean_total_loss = total_loss / num_steps
-        mean_components = {key: val / num_steps for key, val in total_components.items()}
+        num_steps = i + 1
+        mean_total_loss = total_loss / num_steps if num_steps > 0 else 0.0
+        mean_components = {key: val / num_steps for key, val in total_components.items()} if num_steps > 0 else {}
         
         return mean_total_loss, mean_components
 
@@ -478,7 +478,6 @@ class EnhancedASLTrainer:
                 with torch.amp.autocast(device_type=self.device.type, dtype=torch.bfloat16):
                     outputs = model(signals)
                     cbf_mean_norm, att_mean_norm, cbf_log_var, att_log_var, cbf_rough, att_rough = outputs
-                    # We only need the total loss for validation, not the components
                     loss, _ = self.custom_loss_fn(signals, cbf_mean_norm, att_mean_norm, params_norm[:, 0:1], params_norm[:, 1:2], cbf_log_var, att_log_var, cbf_rough, att_rough, current_global_epoch)
                 total_loss_val += loss.item()
                 all_cbf_preds_norm.append(cbf_mean_norm.cpu()); all_att_preds_norm.append(att_mean_norm.cpu())
@@ -545,11 +544,6 @@ class EnhancedASLTrainer:
         total_cbf_std_denorm = np.sqrt(np.maximum(total_cbf_var_denorm, 0)); total_att_std_denorm = np.sqrt(np.maximum(total_att_var_denorm, 0))
         return ensemble_cbf_mean_denorm, ensemble_att_mean_denorm, total_cbf_std_denorm, total_att_std_denorm
 
-# --- DELETED ---
-# The old, inefficient ASLOfflineDataset is no longer needed.
-# --- DELETED ---
-
-# +++ ADDED: The new, hyper-efficient in-memory dataset +++
 class ASLInMemoryDataset(torch.utils.data.Dataset):
     """
     A high-performance PyTorch Dataset that pre-loads and pre-processes the
@@ -573,7 +567,6 @@ class ASLInMemoryDataset(torch.utils.data.Dataset):
                 all_signals.append(data['signals'])
                 all_params.append(data['params'])
         
-        # Concatenate into two massive numpy arrays
         self.signals_unnormalized = np.concatenate(all_signals, axis=0)
         self.params_unnormalized = np.concatenate(all_params, axis=0)
         logger.info(f"Loaded {len(self.signals_unnormalized)} samples into memory.")
@@ -584,17 +577,14 @@ class ASLInMemoryDataset(torch.utils.data.Dataset):
         self.params_normalized = self._normalize_params(self.params_unnormalized)
         logger.info("Normalization complete. Dataset is ready.")
 
-        # --- Convert to Tensors for maximum speed in __getitem__ ---
         self.signals_tensor = torch.from_numpy(self.signals_normalized.astype(np.float32))
         self.params_tensor = torch.from_numpy(self.params_normalized.astype(np.float32))
 
     def _normalize_signals(self, signals_unnorm: np.ndarray) -> np.ndarray:
-        # Unpack raw signals and engineered features
         pcasl_raw = signals_unnorm[:, :self.num_plds]
         vsasl_raw = signals_unnorm[:, self.num_plds:self.num_plds*2]
         eng_features = signals_unnorm[:, self.num_plds*2:]
 
-        # Normalize signals using pre-calculated stats
         pcasl_mean = np.array(self.norm_stats['pcasl_mean'])
         pcasl_std = np.array(self.norm_stats['pcasl_std']) + 1e-6
         vsasl_mean = np.array(self.norm_stats['vsasl_mean'])
@@ -615,9 +605,7 @@ class ASLInMemoryDataset(torch.utils.data.Dataset):
         return np.stack([cbf_norm, att_norm], axis=1)
 
     def __len__(self):
-        # The length is now just the size of the in-memory tensor
         return self.signals_tensor.shape[0]
 
     def __getitem__(self, idx):
-        # This is now an extremely fast memory lookup.
         return self.signals_tensor[idx], self.params_tensor[idx]
