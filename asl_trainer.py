@@ -444,7 +444,16 @@ class EnhancedASLTrainer:
                 # Capture both total loss and the components dictionary
                 loss, loss_components = self.custom_loss_fn(signals, cbf_mean_norm, att_mean_norm, params_norm[:, 0:1], params_norm[:, 1:2], cbf_log_var, att_log_var, cbf_rough, att_rough, current_global_epoch)
             
-            scaler.scale(loss).backward(); scaler.step(optimizer); scaler.update()
+            # scaler.scale(loss).backward()
+            # scaler.step(optimizer)
+            # scaler.update()
+
+            scaler.scale(loss).backward()
+            scaler.unscale_(optimizer) # Unscales the gradients of optimizer's assigned params in-place
+            torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0) # Clip the now-unscaled gradients
+            scaler.step(optimizer)
+            scaler.update()
+
             if scheduler: scheduler.step()
             if wandb.run and scheduler: wandb.log({'lr': scheduler.get_last_lr()[0]}, step=self.global_step)
             

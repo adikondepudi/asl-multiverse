@@ -1,25 +1,25 @@
 training:
-  batch_size: 2048
-  learning_rate: 0.006
-  weight_decay: 0.00001
-  hidden_sizes: [256, 128, 64]
-  n_ensembles: 5
-  dropout_rate: 0.1
-  norm_type: "batch"
+  learning_rate: 0.007144207732675186
+  weight_decay: 1.3881673000805048e-05
+  hidden_sizes: [512, 256, 128]
+  dropout_rate: 0.08782614465960897
+  loss_pinn_weight_stage1: 1.449542754902142
+  loss_pinn_weight_stage2: 0.4527734124202008
   
-  # Training length is determined by steps * epochs, as an IterableDataset is used.
+  learning_rate_stage2: 0.0007144
+  
+  batch_size: 2048
+  n_ensembles: 5
   steps_per_epoch_stage1: 1000
   steps_per_epoch_stage2: 500
   n_epochs_stage1: 80
   n_epochs_stage2: 40
   validation_steps_per_epoch: 50
   
+  # --- Architectural and Loss Function Settings ---
+  norm_type: "batch"
   pre_estimator_loss_weight_stage1: 1.0 
   pre_estimator_loss_weight_stage2: 0.0
-
-  loss_pinn_weight_stage1: 2.0
-  loss_pinn_weight_stage2: 0.1
-  learning_rate_stage2: 0.0002
   use_transformer_temporal_model: true
   m0_input_feature_model: false
   use_focused_transformer_model: true
@@ -51,10 +51,9 @@ simulation:
   T_tau: 1800.0
   reference_CBF: 60.0
 
+# Optuna section is not needed for the final training run.
 optuna:
-  optuna_n_trials: 100
-  optuna_timeout_hours: 4.0
-  optuna_study_name: "asl_multiverse_hpo_production"
+  optuna_n_trials: 0
 
 evaluation:
   n_test_subjects_per_att_range: 200

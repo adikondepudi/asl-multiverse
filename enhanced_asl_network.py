@@ -407,8 +407,16 @@ class CustomLoss(nn.Module):
                 global_epoch: int) -> Tuple[torch.Tensor, Dict[str, torch.Tensor]]:
         
         # --- Standard NLL calculation (Aleatoric Uncertainty Loss) ---
-        cbf_nll_loss = 0.5 * (torch.exp(-cbf_log_var) * (cbf_pred_norm - cbf_true_norm)**2 + cbf_log_var)
-        att_nll_loss = 0.5 * (torch.exp(-att_log_var) * (att_pred_norm - att_true_norm)**2 + att_log_var)
+        # cbf_nll_loss = 0.5 * (torch.exp(-cbf_log_var) * (cbf_pred_norm - cbf_true_norm)**2 + cbf_log_var)
+        # att_nll_loss = 0.5 * (torch.exp(-att_log_var) * (att_pred_norm - att_true_norm)**2 + att_log_var)
+
+        # Clamp log_var to prevent the precision term (exp(-log_var)) from exploding.
+        # A max of 10 means the precision can't be more than exp(-10), which is still huge but not infinite.
+        cbf_precision = torch.exp(-torch.clamp(cbf_log_var, max=10.0))
+        att_precision = torch.exp(-torch.clamp(att_log_var, max=10.0))
+
+        cbf_nll_loss = 0.5 * (cbf_precision * (cbf_pred_norm - cbf_true_norm)**2 + cbf_log_var)
+        att_nll_loss = 0.5 * (att_precision * (att_pred_norm - att_true_norm)**2 + att_log_var)
 
         # --- Focal Weighting for ATT based on prediction error ---
         focal_weight = torch.ones_like(att_nll_loss)
