@@ -28,7 +28,8 @@ warnings.filterwarnings('ignore', category=UserWarning)
 from enhanced_asl_network import EnhancedASLNet
 from asl_simulation import ASLParameters
 from enhanced_simulation import RealisticASLSimulator
-from asl_trainer import EnhancedASLTrainer, ASLIterableDataset
+# +++ MODIFIED: Import the new in-memory dataset class
+from asl_trainer import EnhancedASLTrainer, ASLIterableDataset, ASLInMemoryDataset
 from torch.utils.data import DataLoader
 from comparison_framework import ComprehensiveComparison
 from performance_metrics import ProposalEvaluator
@@ -212,57 +213,51 @@ def run_comprehensive_asl_research(config: ResearchConfig, output_dir: Path, nor
     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
     script_logger.info(f"Using device: {device}")
 
-    norm_stats_final = norm_stats
-    
-    # --- NEW: LOGIC TO SWITCH BETWEEN OFFLINE AND ONLINE DATASETS ---
-    # The config file will now control which dataset is used.
-    # We will assume 'config' is your flattened ResearchConfig object.
-    
-    # Find the data config from the original YAML structure before it's flattened
+    # +++ MODIFIED: Centralized data loading logic +++
     with open(args.config_file, 'r') as f_yaml:
         config_from_yaml = yaml.safe_load(f_yaml) or {}
     data_config = config_from_yaml.get('data', {})
-    
     use_offline = data_config.get('use_offline_dataset', False)
     offline_path = data_config.get('offline_dataset_path', None)
     
+    num_workers = os.cpu_count() or 1
+    script_logger.info(f"Using {num_workers} CPU cores for data loading.")
+
     if use_offline and offline_path:
-        script_logger.info(f"Using OFFLINE dataset from: {offline_path}")
-        from asl_trainer import ASLOfflineDataset # Import it locally to avoid circular dependencies
-        # Use the same large offline dataset for both training stages
-        train_dataset = ASLOfflineDataset(data_dir=offline_path, norm_stats=norm_stats_final)
-        # Validation can still be generated on-the-fly for true out-of-sample testing
-        val_dataset = ASLIterableDataset(simulator, plds_np, config.training_noise_levels_stage1, norm_stats=norm_stats_final)
-        # Since we use a standard Dataset, we MUST enable shuffling in the DataLoader
-        shuffle_train = True
+        script_logger.info(f"Using OFFLINE In-Memory dataset from: {offline_path}")
+        train_dataset = ASLInMemoryDataset(data_dir=offline_path, norm_stats=norm_stats)
+        # Use a small on-the-fly dataset for validation to test generalization
+        val_dataset = ASLIterableDataset(simulator, plds_np, config.training_noise_levels_stage1, norm_stats=norm_stats)
+        
+        # In-memory dataset is a standard map-style dataset, so shuffling is required.
+        shuffle_train = True 
+        # For a massive in-memory dataset, steps_per_epoch is no longer needed. The loader will iterate through the whole dataset.
+        steps_s1 = None 
+        steps_s2 = None
     else:
         script_logger.info("Using ON-THE-FLY IterableDataset for training.")
-        train_dataset = ASLIterableDataset(simulator, plds_np, config.training_noise_levels_stage1, norm_stats=norm_stats_final)
-        val_dataset = ASLIterableDataset(simulator, plds_np, config.training_noise_levels_stage1, norm_stats=norm_stats_final)
-        shuffle_train = False # IterableDataset handles its own randomization
+        train_dataset = ASLIterableDataset(simulator, plds_np, config.training_noise_levels_stage1, norm_stats=norm_stats)
+        val_dataset = ASLIterableDataset(simulator, plds_np, config.training_noise_levels_stage1, norm_stats=norm_stats)
+        # IterableDataset handles its own randomization, so shuffling must be False.
+        shuffle_train = False
+        # For iterable datasets, we must define how many steps constitute an "epoch".
+        steps_s1 = config.steps_per_epoch_stage1
+        steps_s2 = config.steps_per_epoch_stage2
 
-    try:
-        # This will work on SLURM by reading the specific allocation
-        num_workers = int(os.environ.get('SLURM_CPUS_PER_TASK'))
-        script_logger.info(f"Detected SLURM environment. Using {num_workers} allocated CPUs.")
-    except (ValueError, TypeError):
-        # This will work on Vast.ai or a local machine by using all available cores
-        num_workers = os.cpu_count() or 1 # os.cpu_count() can be None
-        script_logger.info(f"No SLURM environment detected. Using all available CPUs: {num_workers}.")
-
-    # Create the DataLoaders using the selected datasets
-    train_loader_s1 = DataLoader(train_dataset, batch_size=config.batch_size, num_workers=num_workers, pin_memory=True, persistent_workers=(num_workers > 0), prefetch_factor=4, shuffle=shuffle_train)
-    train_loader_s2 = DataLoader(train_dataset, batch_size=config.batch_size, num_workers=num_workers, pin_memory=True, persistent_workers=(num_workers > 0), prefetch_factor=4, shuffle=shuffle_train)
-    val_loader = DataLoader(val_dataset, batch_size=config.batch_size * 2, num_workers=num_workers, pin_memory=True, persistent_workers=(num_workers > 0), prefetch_factor=4)
-        
+    train_loader_s1 = DataLoader(train_dataset, batch_size=config.batch_size, num_workers=num_workers, pin_memory=True, persistent_workers=(num_workers > 0), prefetch_factor=4 if num_workers > 0 else None, shuffle=shuffle_train)
+    train_loader_s2 = DataLoader(train_dataset, batch_size=config.batch_size, num_workers=num_workers, pin_memory=True, persistent_workers=(num_workers > 0), prefetch_factor=4 if num_workers > 0 else None, shuffle=shuffle_train)
+    val_loader = DataLoader(val_dataset, batch_size=config.batch_size * 2, num_workers=num_workers, pin_memory=True, persistent_workers=(num_workers > 0), prefetch_factor=4 if num_workers > 0 else None)
+    
     base_input_size_nn = num_plds * 2 + 4
     model_creation_config = asdict(config)
     def create_main_model_closure(**kwargs): return EnhancedASLNet(input_size=base_input_size_nn, **kwargs)
 
     trainer = EnhancedASLTrainer(model_config=model_creation_config, model_class=create_main_model_closure, input_size=base_input_size_nn, learning_rate=config.learning_rate, weight_decay=config.weight_decay, batch_size=config.batch_size, n_ensembles=config.n_ensembles, device=device, n_plds_for_model=num_plds)
-    trainer.norm_stats = norm_stats_final
-    trainer.custom_loss_fn.norm_stats = norm_stats_final
-    for model in trainer.models: model.set_norm_stats(norm_stats_final)
+    trainer.norm_stats = norm_stats
+    trainer.custom_loss_fn.norm_stats = norm_stats
+    for model in trainer.models: 
+        model.to(device)
+        model.set_norm_stats(norm_stats)
     
     script_logger.info(f"Training {config.n_ensembles}-model ensemble...")
     training_start_time = time.time()
@@ -271,14 +266,13 @@ def run_comprehensive_asl_research(config: ResearchConfig, output_dir: Path, nor
         train_loaders=[train_loader_s1, train_loader_s2],
         val_loaders=[val_loader, val_loader],
         epoch_schedule=[config.n_epochs_stage1, config.n_epochs_stage2],
-        steps_per_epoch_schedule=[config.steps_per_epoch_stage1, config.steps_per_epoch_stage2],
+        steps_per_epoch_schedule=[steps_s1, steps_s2], # Use the determined step counts
         early_stopping_patience=25 
     )
 
     training_duration_hours = (time.time() - training_start_time) / 3600
     script_logger.info(f"Training completed in {training_duration_hours:.2f} hours.")
     
-    # --- DEEPMIND FIX: Save the final trained models to disk ---
     script_logger.info("Saving final trained ensemble models...")
     models_dir = output_dir / 'trained_models'
     models_dir.mkdir(exist_ok=True)
@@ -295,18 +289,15 @@ def run_comprehensive_asl_research(config: ResearchConfig, output_dir: Path, nor
     
     script_logger.info(f"Successfully saved {num_saved} models.")
 
-    # Also log the model directory as a W&B artifact if any models were saved
     if wandb.run and num_saved > 0:
         model_artifact = wandb.Artifact(name=f"asl_ensemble_{wandb_run.id}", type="model")
-        model_artifact.add_dir(str(models_dir)) # Use string path for artifact
+        model_artifact.add_dir(str(models_dir))
         wandb_run.log_artifact(model_artifact)
         script_logger.info("Logged trained models as a W&B artifact.")
     
     if wandb.run:
         wandb.finish()
         
-    # This dictionary would typically be populated by subsequent evaluation steps
-    # For now, it's a placeholder.
     return {}
 
 if __name__ == "__main__":
@@ -320,7 +311,6 @@ if __name__ == "__main__":
 
     args = parser.parse_args()
 
-    # Load configuration
     config_obj = ResearchConfig()
     if Path(args.config_file).exists():
         with open(args.config_file, 'r') as f_yaml: config_from_yaml = yaml.safe_load(f_yaml) or {}
@@ -350,10 +340,8 @@ if __name__ == "__main__":
         plds_np = np.array(config_obj.pld_values)
         asl_params_sim = ASLParameters(**{k:v for k,v in asdict(config_obj).items() if k in ASLParameters.__annotations__})
         simulator = RealisticASLSimulator(params=asl_params_sim)
-        try:
-            num_stat_workers = int(os.environ.get('SLURM_CPUS_PER_TASK', os.cpu_count()))
-        except (ValueError, TypeError):
-            num_stat_workers = os.cpu_count()
+        
+        num_stat_workers = os.cpu_count() or 1
 
         stats_calculator = ParallelStreamingStatsCalculator(
             simulator=simulator, plds=plds_np, num_samples=20000, num_workers=num_stat_workers

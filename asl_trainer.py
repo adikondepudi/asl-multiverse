@@ -14,7 +14,7 @@ from pathlib import Path
 import wandb 
 from sklearn.metrics import mean_absolute_error, mean_squared_error 
 from torch.cuda.amp import GradScaler, autocast
-from tqdm import trange
+from tqdm import trange, tqdm
 import time
 from itertools import islice
 import traceback
@@ -432,22 +432,19 @@ class EnhancedASLTrainer:
         # Use defaultdict to easily accumulate component losses
         total_components = defaultdict(float)
         
-        pbar = trange(steps_per_epoch, desc=f"Epoch {current_global_epoch+1} Training", leave=False, ncols=100)
-        for i in pbar:
-            try: signals, params_norm = next(train_loader_iter)
-            except StopIteration: logger.warning("Train loader iterator exhausted prematurely."); break
+        # +++ MODIFIED: Use the standard DataLoader iterator if steps_per_epoch is not specified for the whole dataset
+        data_iterator = islice(train_loader_iter, steps_per_epoch) if steps_per_epoch else train_loader_iter
+        pbar = tqdm(data_iterator, total=steps_per_epoch, desc=f"Epoch {current_global_epoch+1} Training", leave=False, ncols=100)
+
+        for signals, params_norm in pbar:
             signals, params_norm = signals.to(self.device), params_norm.to(self.device)
             optimizer.zero_grad(set_to_none=True)
-            with torch.amp.autocast(device_type=self.device, dtype=torch.bfloat16):
+            with torch.amp.autocast(device_type=self.device.type, dtype=torch.bfloat16):
                 outputs = model(signals)
                 cbf_mean_norm, att_mean_norm, cbf_log_var, att_log_var, cbf_rough, att_rough = outputs
                 # Capture both total loss and the components dictionary
                 loss, loss_components = self.custom_loss_fn(signals, cbf_mean_norm, att_mean_norm, params_norm[:, 0:1], params_norm[:, 1:2], cbf_log_var, att_log_var, cbf_rough, att_rough, current_global_epoch)
             
-            # scaler.scale(loss).backward()
-            # scaler.step(optimizer)
-            # scaler.update()
-
             scaler.scale(loss).backward()
             scaler.unscale_(optimizer) # Unscales the gradients of optimizer's assigned params in-place
             torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0) # Clip the now-unscaled gradients
@@ -463,8 +460,9 @@ class EnhancedASLTrainer:
                 
             pbar.set_postfix(loss=loss.item()); self.global_step += 1
         
-        mean_total_loss = total_loss / steps_per_epoch if steps_per_epoch > 0 else 0.0
-        mean_components = {key: val / steps_per_epoch for key, val in total_components.items()} if steps_per_epoch > 0 else {}
+        num_steps = steps_per_epoch if steps_per_epoch > 0 else 1
+        mean_total_loss = total_loss / num_steps
+        mean_components = {key: val / num_steps for key, val in total_components.items()}
         
         return mean_total_loss, mean_components
 
@@ -474,10 +472,10 @@ class EnhancedASLTrainer:
         all_cbf_log_vars, all_att_log_vars = [], []
 
         with torch.no_grad():
-            pbar_val = trange(self.validation_steps_per_epoch, desc=f"Epoch {current_global_epoch+1} Validation", leave=False, ncols=100)
-            for signals, params_norm in islice(val_loader, self.validation_steps_per_epoch):
+            pbar_val = tqdm(islice(val_loader, self.validation_steps_per_epoch), total=self.validation_steps_per_epoch, desc=f"Epoch {current_global_epoch+1} Validation", leave=False, ncols=100)
+            for signals, params_norm in pbar_val:
                 signals, params_norm = signals.to(self.device), params_norm.to(self.device)
-                with torch.amp.autocast(device_type=self.device, dtype=torch.bfloat16):
+                with torch.amp.autocast(device_type=self.device.type, dtype=torch.bfloat16):
                     outputs = model(signals)
                     cbf_mean_norm, att_mean_norm, cbf_log_var, att_log_var, cbf_rough, att_rough = outputs
                     # We only need the total loss for validation, not the components
@@ -486,8 +484,6 @@ class EnhancedASLTrainer:
                 all_cbf_preds_norm.append(cbf_mean_norm.cpu()); all_att_preds_norm.append(att_mean_norm.cpu())
                 all_cbf_trues_norm.append(params_norm[:, 0:1].cpu()); all_att_trues_norm.append(params_norm[:, 1:2].cpu())
                 all_cbf_log_vars.append(cbf_log_var.cpu()); all_att_log_vars.append(att_log_var.cpu())
-                pbar_val.update(1)
-            pbar_val.close()
         
         avg_loss_val = total_loss_val / self.validation_steps_per_epoch if self.validation_steps_per_epoch > 0 else float('inf')
         metrics_dict = {'val_loss': avg_loss_val}
@@ -548,64 +544,80 @@ class EnhancedASLTrainer:
         total_cbf_var_denorm = total_cbf_var_norm * (y_std_cbf**2); total_att_var_denorm = total_att_var_norm * (y_std_att**2)
         total_cbf_std_denorm = np.sqrt(np.maximum(total_cbf_var_denorm, 0)); total_att_std_denorm = np.sqrt(np.maximum(total_att_var_denorm, 0))
         return ensemble_cbf_mean_denorm, ensemble_att_mean_denorm, total_cbf_std_denorm, total_att_std_denorm
-    
-class ASLOfflineDataset(torch.utils.data.Dataset):
+
+# --- DELETED ---
+# The old, inefficient ASLOfflineDataset is no longer needed.
+# --- DELETED ---
+
+# +++ ADDED: The new, hyper-efficient in-memory dataset +++
+class ASLInMemoryDataset(torch.utils.data.Dataset):
     """
-    A standard PyTorch Dataset that reads pre-generated, normalized data from disk.
-    This is extremely fast as it only involves file I/O.
+    A high-performance PyTorch Dataset that pre-loads and pre-processes the
+    entire offline dataset into RAM. This eliminates I/O bottlenecks during training.
     """
     def __init__(self, data_dir: str, norm_stats: dict):
         self.data_dir = Path(data_dir)
-        self.file_paths = sorted(list(self.data_dir.glob('dataset_chunk_*.npz')))
-        if not self.file_paths:
-            raise FileNotFoundError(f"No dataset chunks found in {data_dir}. Did you run generate_offline_dataset.py?")
-        
         self.norm_stats = norm_stats
         self.num_plds = len(norm_stats.get('pcasl_mean', []))
 
-        # --- Pre-calculate a map from a global index to a (file_idx, in_file_idx) pair ---
-        self.chunk_sizes = [int(np.load(f)['signals'].shape[0]) for f in self.file_paths]
-        self.cumulative_sizes = np.cumsum(self.chunk_sizes)
-        self.total_samples = self.cumulative_sizes[-1]
+        # --- HEAVY LIFTING: Load all data chunks into memory ONCE ---
+        logger.info(f"Loading all dataset chunks from {self.data_dir} into RAM...")
+        file_paths = sorted(list(self.data_dir.glob('dataset_chunk_*.npz')))
+        if not file_paths:
+            raise FileNotFoundError(f"No dataset chunks found in {data_dir}. Run generate_offline_dataset.py first.")
+        
+        all_signals = []
+        all_params = []
+        for f in tqdm(file_paths, desc="Loading data chunks"):
+            with np.load(f) as data:
+                all_signals.append(data['signals'])
+                all_params.append(data['params'])
+        
+        # Concatenate into two massive numpy arrays
+        self.signals_unnormalized = np.concatenate(all_signals, axis=0)
+        self.params_unnormalized = np.concatenate(all_params, axis=0)
+        logger.info(f"Loaded {len(self.signals_unnormalized)} samples into memory.")
+
+        # --- ONE-SHOT NORMALIZATION: Process the entire dataset at once ---
+        logger.info("Performing one-shot vectorized normalization on the entire dataset...")
+        self.signals_normalized = self._normalize_signals(self.signals_unnormalized)
+        self.params_normalized = self._normalize_params(self.params_unnormalized)
+        logger.info("Normalization complete. Dataset is ready.")
+
+        # --- Convert to Tensors for maximum speed in __getitem__ ---
+        self.signals_tensor = torch.from_numpy(self.signals_normalized.astype(np.float32))
+        self.params_tensor = torch.from_numpy(self.params_normalized.astype(np.float32))
+
+    def _normalize_signals(self, signals_unnorm: np.ndarray) -> np.ndarray:
+        # Unpack raw signals and engineered features
+        pcasl_raw = signals_unnorm[:, :self.num_plds]
+        vsasl_raw = signals_unnorm[:, self.num_plds:self.num_plds*2]
+        eng_features = signals_unnorm[:, self.num_plds*2:]
+
+        # Normalize signals using pre-calculated stats
+        pcasl_mean = np.array(self.norm_stats['pcasl_mean'])
+        pcasl_std = np.array(self.norm_stats['pcasl_std']) + 1e-6
+        vsasl_mean = np.array(self.norm_stats['vsasl_mean'])
+        vsasl_std = np.array(self.norm_stats['vsasl_std']) + 1e-6
+
+        pcasl_norm = (pcasl_raw - pcasl_mean) / pcasl_std
+        vsasl_norm = (vsasl_raw - vsasl_mean) / vsasl_std
+        
+        return np.concatenate([pcasl_norm, vsasl_norm, eng_features], axis=1)
+
+    def _normalize_params(self, params_unnorm: np.ndarray) -> np.ndarray:
+        cbf_unnorm = params_unnorm[:, 0]
+        att_unnorm = params_unnorm[:, 1]
+        
+        cbf_norm = (cbf_unnorm - self.norm_stats['y_mean_cbf']) / self.norm_stats['y_std_cbf']
+        att_norm = (att_unnorm - self.norm_stats['y_mean_att']) / self.norm_stats['y_std_att']
+        
+        return np.stack([cbf_norm, att_norm], axis=1)
 
     def __len__(self):
-        return self.total_samples
+        # The length is now just the size of the in-memory tensor
+        return self.signals_tensor.shape[0]
 
     def __getitem__(self, idx):
-        # Find which chunk the index belongs to
-        chunk_idx = np.searchsorted(self.cumulative_sizes, idx, side='right')
-        if chunk_idx == 0:
-            local_idx = idx
-        else:
-            local_idx = idx - self.cumulative_sizes[chunk_idx - 1]
-
-        # Load the correct chunk and get the sample
-        with np.load(self.file_paths[chunk_idx]) as data:
-            signal_unnorm = data['signals'][local_idx]
-            params_unnorm = data['params'][local_idx]
-        
-        # --- Apply Normalization during loading ---
-        # Raw signals
-        pcasl_raw = signal_unnorm[:self.num_plds]
-        vsasl_raw = signal_unnorm[self.num_plds:self.num_plds*2]
-        
-        # Engineered features are already part of the signal vector
-        eng_features = signal_unnorm[self.num_plds*2:]
-
-        # Normalize signals
-        pcasl_mean = np.array(self.norm_stats['pcasl_mean'])
-        pcasl_std = np.array(self.norm_stats['pcasl_std'])
-        vsasl_mean = np.array(self.norm_stats['vsasl_mean'])
-        vsasl_std = np.array(self.norm_stats['vsasl_std'])
-
-        pcasl_norm = (pcasl_raw - pcasl_mean) / (pcasl_std + 1e-6)
-        vsasl_norm = (vsasl_raw - vsasl_mean) / (vsasl_std + 1e-6)
-        
-        final_input = np.concatenate([pcasl_norm, vsasl_norm, eng_features])
-        
-        # Normalize target parameters
-        cbf_norm = (params_unnorm[0] - self.norm_stats['y_mean_cbf']) / self.norm_stats['y_std_cbf']
-        att_norm = (params_unnorm[1] - self.norm_stats['y_mean_att']) / self.norm_stats['y_std_att']
-        params_norm = np.array([cbf_norm, att_norm])
-
-        return torch.from_numpy(final_input.astype(np.float32)), torch.from_numpy(params_norm.astype(np.float32))
+        # This is now an extremely fast memory lookup.
+        return self.signals_tensor[idx], self.params_tensor[idx]
