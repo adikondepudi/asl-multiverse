@@ -1,0 +1,84 @@
+# config/production_final.yaml
+#
+# The definitive configuration for the final production run.
+# Parameters are from the successful HPO Trial #34, with a safety-factored learning rate.
+# This config is set up to use the new OFFLINE dataset for maximum speed.
+
+training:
+  # --- HPO values for architecture and regularization ---
+  hidden_sizes: [512, 256, 128]
+  dropout_rate: 0.08782614465960897
+  weight_decay: 0.000013881673000805048
+  loss_pinn_weight_stage1: 1.449542754902142
+  loss_pinn_weight_stage2: 0.4527734124202008
+  
+  # --- Production-safe learning rates ---
+  learning_rate: 0.005
+  learning_rate_stage2: 0.0002
+
+  # --- Production run parameters ---
+  batch_size: 2048
+  n_ensembles: 5
+  steps_per_epoch_stage1: 1000
+  steps_per_epoch_stage2: 500
+  n_epochs_stage1: 80
+  n_epochs_stage2: 40
+  validation_steps_per_epoch: 50
+  norm_type: "batch"
+  pre_estimator_loss_weight_stage1: 1.0 
+  pre_estimator_loss_weight_stage2: 0.0
+  use_transformer_temporal_model: true
+  m0_input_feature_model: false
+  use_focused_transformer_model: true
+  transformer_d_model_focused: 32
+  transformer_nhead_model: 4
+  transformer_nlayers_model: 2
+  log_var_cbf_min: -6.0
+  log_var_cbf_max: 7.0
+  log_var_att_min: -2.0
+  log_var_att_max: 14.0
+  loss_weight_cbf: 1.0
+  loss_weight_att: 2.0
+  loss_log_var_reg_lambda: 0.0
+
+data:
+  # --- NEW: Controls for using the offline dataset ---
+  use_offline_dataset: true
+  offline_dataset_path: "asl_offline_dataset_10M"  # <-- IMPORTANT: Change this if you use a different name!
+
+  # --- Standard data parameters ---
+  pld_values: [500, 1000, 1500, 2000, 2500, 3000]
+  att_ranges_config:
+    - [500, 1500, "Short ATT"]
+    - [1500, 2500, "Medium ATT"]
+    - [2500, 4000, "Long ATT"]
+  include_m0_in_training_data: false
+
+simulation:
+  T1_artery: 1850.0
+  T2_factor: 1.0
+  alpha_BS1: 1.0
+  alpha_PCASL: 0.85
+  alpha_VSASL: 0.56
+  T_tau: 1800.0
+  reference_CBF: 60.0
+
+# Optuna section is not needed for the final training run.
+optuna:
+  optuna_n_trials: 0
+
+evaluation:
+  n_test_subjects_per_att_range: 200
+  n_clinical_scenario_subjects: 100
+  clinical_scenario_definitions:
+    healthy_adult: {cbf_range: [50.0, 80.0], att_range: [800.0, 1800.0], snr: 8.0}
+    elderly_patient: {cbf_range: [30.0, 60.0], att_range: [1500.0, 3000.0], snr: 5.0}
+    stroke_patient: {cbf_range: [10.0, 40.0], att_range: [2000.0, 4000.0], snr: 3.0}
+    tumor_patient: {cbf_range: [20.0, 120.0], att_range: [1000.0, 3000.0], snr: 6.0}
+
+logging:
+  level: "INFO"
+
+wandb:
+  wandb_project: "asl-multiverse-production"
+  wandb_entity: null

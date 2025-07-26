@@ -214,25 +214,47 @@ def run_comprehensive_asl_research(config: ResearchConfig, output_dir: Path, nor
 
     norm_stats_final = norm_stats
     
-    train_dataset_s1 = ASLIterableDataset(simulator, plds_np, config.training_noise_levels_stage1, norm_stats=norm_stats_final)
-    train_dataset_s2 = ASLIterableDataset(simulator, plds_np, config.training_noise_levels_stage2, norm_stats=norm_stats_final)
+    # --- NEW: LOGIC TO SWITCH BETWEEN OFFLINE AND ONLINE DATASETS ---
+    # The config file will now control which dataset is used.
+    # We will assume 'config' is your flattened ResearchConfig object.
     
+    # Find the data config from the original YAML structure before it's flattened
+    with open(args.config_file, 'r') as f_yaml:
+        config_from_yaml = yaml.safe_load(f_yaml) or {}
+    data_config = config_from_yaml.get('data', {})
+    
+    use_offline = data_config.get('use_offline_dataset', False)
+    offline_path = data_config.get('offline_dataset_path', None)
+    
+    if use_offline and offline_path:
+        script_logger.info(f"Using OFFLINE dataset from: {offline_path}")
+        from asl_trainer import ASLOfflineDataset # Import it locally to avoid circular dependencies
+        # Use the same large offline dataset for both training stages
+        train_dataset = ASLOfflineDataset(data_dir=offline_path, norm_stats=norm_stats_final)
+        # Validation can still be generated on-the-fly for true out-of-sample testing
+        val_dataset = ASLIterableDataset(simulator, plds_np, config.training_noise_levels_stage1, norm_stats=norm_stats_final)
+        # Since we use a standard Dataset, we MUST enable shuffling in the DataLoader
+        shuffle_train = True
+    else:
+        script_logger.info("Using ON-THE-FLY IterableDataset for training.")
+        train_dataset = ASLIterableDataset(simulator, plds_np, config.training_noise_levels_stage1, norm_stats=norm_stats_final)
+        val_dataset = ASLIterableDataset(simulator, plds_np, config.training_noise_levels_stage1, norm_stats=norm_stats_final)
+        shuffle_train = False # IterableDataset handles its own randomization
+
     try:
-        # Use the exact number of CPUs allocated by SLURM for maximum throughput
+        # This will work on SLURM by reading the specific allocation
         num_workers = int(os.environ.get('SLURM_CPUS_PER_TASK'))
+        script_logger.info(f"Detected SLURM environment. Using {num_workers} allocated CPUs.")
     except (ValueError, TypeError):
-        # Fallback for local testing if SLURM variable isn't set
-        num_workers = min(os.cpu_count(), 16)
-    script_logger.info(f"Using {num_workers} DataLoader workers.")
+        # This will work on Vast.ai or a local machine by using all available cores
+        num_workers = os.cpu_count() or 1 # os.cpu_count() can be None
+        script_logger.info(f"No SLURM environment detected. Using all available CPUs: {num_workers}.")
 
-    # Added prefetch_factor=4. This tells each worker to prepare 4 batches in advance.
-    train_loader_s1 = DataLoader(train_dataset_s1, batch_size=config.batch_size, num_workers=num_workers, pin_memory=True, persistent_workers=(num_workers > 0), prefetch_factor=4)
-    train_loader_s2 = DataLoader(train_dataset_s2, batch_size=config.batch_size, num_workers=num_workers, pin_memory=True, persistent_workers=(num_workers > 0), prefetch_factor=4)
-
-    script_logger.info("Creating iterable validation dataset...")
-    val_dataset_iterable = ASLIterableDataset(simulator, plds_np, config.training_noise_levels_stage1, norm_stats=norm_stats_final)
-    val_loader = DataLoader(val_dataset_iterable, batch_size=config.batch_size * 2, num_workers=num_workers, pin_memory=True, persistent_workers=(num_workers > 0), prefetch_factor=4)
-    
+    # Create the DataLoaders using the selected datasets
+    train_loader_s1 = DataLoader(train_dataset, batch_size=config.batch_size, num_workers=num_workers, pin_memory=True, persistent_workers=(num_workers > 0), prefetch_factor=4, shuffle=shuffle_train)
+    train_loader_s2 = DataLoader(train_dataset, batch_size=config.batch_size, num_workers=num_workers, pin_memory=True, persistent_workers=(num_workers > 0), prefetch_factor=4, shuffle=shuffle_train)
+    val_loader = DataLoader(val_dataset, batch_size=config.batch_size * 2, num_workers=num_workers, pin_memory=True, persistent_workers=(num_workers > 0), prefetch_factor=4)
+        
     base_input_size_nn = num_plds * 2 + 4
     model_creation_config = asdict(config)
     def create_main_model_closure(**kwargs): return EnhancedASLNet(input_size=base_input_size_nn, **kwargs)

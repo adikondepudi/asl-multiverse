@@ -438,7 +438,7 @@ class EnhancedASLTrainer:
             except StopIteration: logger.warning("Train loader iterator exhausted prematurely."); break
             signals, params_norm = signals.to(self.device), params_norm.to(self.device)
             optimizer.zero_grad(set_to_none=True)
-            with autocast(dtype=torch.bfloat16):
+            with torch.amp.autocast(device_type=self.device, dtype=torch.bfloat16):
                 outputs = model(signals)
                 cbf_mean_norm, att_mean_norm, cbf_log_var, att_log_var, cbf_rough, att_rough = outputs
                 # Capture both total loss and the components dictionary
@@ -477,7 +477,7 @@ class EnhancedASLTrainer:
             pbar_val = trange(self.validation_steps_per_epoch, desc=f"Epoch {current_global_epoch+1} Validation", leave=False, ncols=100)
             for signals, params_norm in islice(val_loader, self.validation_steps_per_epoch):
                 signals, params_norm = signals.to(self.device), params_norm.to(self.device)
-                with autocast(dtype=torch.bfloat16):
+                with torch.amp.autocast(device_type=self.device, dtype=torch.bfloat16):
                     outputs = model(signals)
                     cbf_mean_norm, att_mean_norm, cbf_log_var, att_log_var, cbf_rough, att_rough = outputs
                     # We only need the total loss for validation, not the components
@@ -548,3 +548,64 @@ class EnhancedASLTrainer:
         total_cbf_var_denorm = total_cbf_var_norm * (y_std_cbf**2); total_att_var_denorm = total_att_var_norm * (y_std_att**2)
         total_cbf_std_denorm = np.sqrt(np.maximum(total_cbf_var_denorm, 0)); total_att_std_denorm = np.sqrt(np.maximum(total_att_var_denorm, 0))
         return ensemble_cbf_mean_denorm, ensemble_att_mean_denorm, total_cbf_std_denorm, total_att_std_denorm
+    
+class ASLOfflineDataset(torch.utils.data.Dataset):
+    """
+    A standard PyTorch Dataset that reads pre-generated, normalized data from disk.
+    This is extremely fast as it only involves file I/O.
+    """
+    def __init__(self, data_dir: str, norm_stats: dict):
+        self.data_dir = Path(data_dir)
+        self.file_paths = sorted(list(self.data_dir.glob('dataset_chunk_*.npz')))
+        if not self.file_paths:
+            raise FileNotFoundError(f"No dataset chunks found in {data_dir}. Did you run generate_offline_dataset.py?")
+        
+        self.norm_stats = norm_stats
+        self.num_plds = len(norm_stats.get('pcasl_mean', []))
+
+        # --- Pre-calculate a map from a global index to a (file_idx, in_file_idx) pair ---
+        self.chunk_sizes = [int(np.load(f)['signals'].shape[0]) for f in self.file_paths]
+        self.cumulative_sizes = np.cumsum(self.chunk_sizes)
+        self.total_samples = self.cumulative_sizes[-1]
+
+    def __len__(self):
+        return self.total_samples
+
+    def __getitem__(self, idx):
+        # Find which chunk the index belongs to
+        chunk_idx = np.searchsorted(self.cumulative_sizes, idx, side='right')
+        if chunk_idx == 0:
+            local_idx = idx
+        else:
+            local_idx = idx - self.cumulative_sizes[chunk_idx - 1]
+
+        # Load the correct chunk and get the sample
+        with np.load(self.file_paths[chunk_idx]) as data:
+            signal_unnorm = data['signals'][local_idx]
+            params_unnorm = data['params'][local_idx]
+        
+        # --- Apply Normalization during loading ---
+        # Raw signals
+        pcasl_raw = signal_unnorm[:self.num_plds]
+        vsasl_raw = signal_unnorm[self.num_plds:self.num_plds*2]
+        
+        # Engineered features are already part of the signal vector
+        eng_features = signal_unnorm[self.num_plds*2:]
+
+        # Normalize signals
+        pcasl_mean = np.array(self.norm_stats['pcasl_mean'])
+        pcasl_std = np.array(self.norm_stats['pcasl_std'])
+        vsasl_mean = np.array(self.norm_stats['vsasl_mean'])
+        vsasl_std = np.array(self.norm_stats['vsasl_std'])
+
+        pcasl_norm = (pcasl_raw - pcasl_mean) / (pcasl_std + 1e-6)
+        vsasl_norm = (vsasl_raw - vsasl_mean) / (vsasl_std + 1e-6)
+        
+        final_input = np.concatenate([pcasl_norm, vsasl_norm, eng_features])
+        
+        # Normalize target parameters
+        cbf_norm = (params_unnorm[0] - self.norm_stats['y_mean_cbf']) / self.norm_stats['y_std_cbf']
+        att_norm = (params_unnorm[1] - self.norm_stats['y_mean_att']) / self.norm_stats['y_std_att']
+        params_norm = np.array([cbf_norm, att_norm])
+
+        return torch.from_numpy(final_input.astype(np.float32)), torch.from_numpy(params_norm.astype(np.float32))
