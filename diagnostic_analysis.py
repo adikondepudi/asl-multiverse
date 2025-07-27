@@ -9,7 +9,7 @@ import inspect
 from pathlib import Path
 
 # --- Configuration: SET THIS PATH ---
-RESULTS_DIR = "./comprehensive_results/asl_research_20250616_175302/"  # <-- Edit this line!
+RESULTS_DIR = "./final_training_run_v2/"  # <-- Edit this line!
 # --- End Configuration ---
 
 # Import your project's custom modules
