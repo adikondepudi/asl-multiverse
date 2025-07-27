@@ -337,6 +337,28 @@ class EnhancedASLNet(nn.Module):
         else:
             print(f"Warning: Unknown normalization type '{norm_type}'. Using BatchNorm1d.")
             return nn.BatchNorm1d(size)
+        
+    def get_param_groups(self):
+        """
+        Separates model parameters into two groups for differential learning rates.
+        - 'cbf_stream' for the simpler MLP-based CBF prediction.
+        - 'att_stream' for the complex Transformer-based ATT prediction.
+        """
+        # --- Parameters for the CBF stream ---
+        cbf_params = list(self.cbf_mlp.parameters()) + list(self.cbf_uncertainty.parameters())
+        
+        # --- All other parameters belong to the ATT stream ---
+        all_param_ids = set(id(p) for p in self.parameters())
+        cbf_param_ids = set(id(p) for p in cbf_params)
+        att_param_ids = all_param_ids - cbf_param_ids
+        
+        att_params = [p for p in self.parameters() if id(p) in att_param_ids]
+        
+        # Return a list of dictionaries, as expected by the PyTorch optimizer
+        return [
+            {'params': cbf_params, 'name': 'cbf_stream'},
+            {'params': att_params, 'name': 'att_stream'}
+        ]
 
 def torch_kinetic_model(pred_cbf_norm: torch.Tensor, pred_att_norm: torch.Tensor,
                         norm_stats: Dict, model_params: Dict) -> torch.Tensor:
@@ -439,7 +461,7 @@ class CustomLoss(nn.Module):
             
         # --- Physics-Informed (PINN) Regularization ---
         pinn_loss = torch.tensor(0.0, device=total_param_loss.device)
-        if self.pinn_weight > 0 and self.norm_stats and self.model_params and global_epoch > 10:
+        if self.pinn_weight > 0 and self.norm_stats and self.model_params:
             reconstructed_signal_norm = torch_kinetic_model(cbf_pred_norm, att_pred_norm, self.norm_stats, self.model_params)
             num_raw_signal_feats = len(self.model_params.get('pld_values', [])) * 2
             input_signal_norm = normalized_input_signal[:, :num_raw_signal_feats]

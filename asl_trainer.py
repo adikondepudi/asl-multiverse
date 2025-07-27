@@ -277,6 +277,12 @@ class EnhancedASLTrainer:
         self.n_plds_for_model = n_plds_for_model
         self.m0_input_feature_model = m0_input_feature_model
         self.input_size_model = input_size
+
+        self.lr_cbf = model_config.get('learning_rate_cbf', learning_rate)
+        self.lr_att = model_config.get('learning_rate_att', learning_rate)
+        self.lr_stage2_cbf = model_config.get('learning_rate_stage2_cbf', self.lr_cbf / 10.0)
+        self.lr_stage2_att = model_config.get('learning_rate_stage2_att', self.lr_att / 10.0)
+
         self.learning_rate = learning_rate
         self.weight_decay = weight_decay
         self.model_config = model_config
@@ -285,7 +291,15 @@ class EnhancedASLTrainer:
 
         self.models = [model_class(**model_config).to(self.device) for _ in range(n_ensembles)]
         self.best_states = [None] * self.n_ensembles
-        self.optimizers = [torch.optim.Adam(model.parameters(), lr=learning_rate, weight_decay=self.weight_decay) for model in self.models]
+        self.optimizers = []
+        for model in self.models:
+            param_groups = model.get_param_groups() # Use the new method from Change 2
+            # Create a list of parameter groups for the optimizer
+            optimizer_param_groups = [
+                {'params': group['params'], 'lr': self.lr_cbf if group['name'] == 'cbf_stream' else self.lr_att}
+                for group in param_groups
+            ]
+            self.optimizers.append(torch.optim.Adam(optimizer_param_groups, weight_decay=self.weight_decay))
         self.schedulers = [] 
         
         loss_params = {
@@ -325,19 +339,28 @@ class EnhancedASLTrainer:
             if stage_idx == 0:
                 self.custom_loss_fn.pinn_weight = self.model_config.get('loss_pinn_weight_stage1', 1.0)
                 self.custom_loss_fn.pre_estimator_loss_weight = self.model_config.get('pre_estimator_loss_weight_stage1', 1.0)
-                stage_lr = self.learning_rate
+                
+                # Define the different max LRs for each parameter group for Stage 1
+                stage_max_lrs = [self.lr_cbf, self.lr_att]
+
                 logger.info(f"--- STAGE 1: Foundational Pre-training ({n_epochs_stage} epochs) ---")
-                logger.info(f"  PINN Weight: {self.custom_loss_fn.pinn_weight}, Pre-Estimator Weight: {self.custom_loss_fn.pre_estimator_loss_weight}, Max LR: {stage_lr}")
+                logger.info(f"  PINN Weight: {self.custom_loss_fn.pinn_weight}, Pre-Estimator Weight: {self.custom_loss_fn.pre_estimator_loss_weight}")
+                logger.info(f"  Max LRs: CBF={stage_max_lrs[0]}, ATT={stage_max_lrs[1]}")
             
             elif stage_idx == 1:
                 self.custom_loss_fn.pinn_weight = self.model_config.get('loss_pinn_weight_stage2', 0.1)
                 self.custom_loss_fn.pre_estimator_loss_weight = self.model_config.get('pre_estimator_loss_weight_stage2', 0.0)
-                stage_lr = self.model_config.get('learning_rate_stage2', self.learning_rate / 10.0)
-                logger.info(f"--- STAGE 2: Full-Spectrum Fine-tuning ({n_epochs_stage} epochs) ---")
-                logger.info(f"  PINN Weight: {self.custom_loss_fn.pinn_weight}, Pre-Estimator Weight: {self.custom_loss_fn.pre_estimator_loss_weight}, Max LR: {stage_lr}")
+                
+                # Define the different max LRs for each parameter group for Stage 2
+                stage_max_lrs = [self.lr_stage2_cbf, self.lr_stage2_att]
 
+                logger.info(f"--- STAGE 2: Full-Spectrum Fine-tuning ({n_epochs_stage} epochs) ---")
+                logger.info(f"  PINN Weight: {self.custom_loss_fn.pinn_weight}, Pre-Estimator Weight: {self.custom_loss_fn.pre_estimator_loss_weight}")
+                logger.info(f"  Max LRs: CBF={stage_max_lrs[0]}, ATT={stage_max_lrs[1]}")
+
+            # This single scheduler creation now works for both stages
             self.schedulers = [
-                torch.optim.lr_scheduler.OneCycleLR(opt, max_lr=stage_lr, total_steps=total_steps_stage)
+                torch.optim.lr_scheduler.OneCycleLR(opt, max_lr=stage_max_lrs, total_steps=total_steps_stage)
                 for opt in self.optimizers
             ]
 
