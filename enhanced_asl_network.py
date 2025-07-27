@@ -467,9 +467,11 @@ class CustomLoss(nn.Module):
             input_signal_norm = normalized_input_signal[:, :num_raw_signal_feats]
             pinn_loss = self.mse_loss(reconstructed_signal_norm, input_signal_norm)
 
-        # --- Auxiliary Loss for Pre-Estimator (in NORMALIZED space) ---
+        # --- Auxiliary Loss for Pre-Estimator (in NORMALIZED space for stability) ---
         pre_estimator_loss = torch.tensor(0.0, device=total_param_loss.device)
         if self.pre_estimator_loss_weight > 0 and self.norm_stats:
+            # Normalize the rough physical estimates before calculating loss.
+            # This makes the loss scale-invariant and removes the need for manual scaling factors.
             cbf_rough_norm = (cbf_rough_physical - self.norm_stats['y_mean_cbf']) / (self.norm_stats['y_std_cbf'] + 1e-6)
             att_rough_norm = (att_rough_physical - self.norm_stats['y_mean_att']) / (self.norm_stats['y_std_att'] + 1e-6)
             

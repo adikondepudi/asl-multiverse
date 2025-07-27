@@ -29,7 +29,7 @@ from enhanced_asl_network import EnhancedASLNet
 from asl_simulation import ASLParameters
 from enhanced_simulation import RealisticASLSimulator
 from asl_trainer import EnhancedASLTrainer, ASLIterableDataset, ASLInMemoryDataset
-from torch.utils.data import DataLoader
+from torch.utils.data import DataLoader, WeightedRandomSampler
 from comparison_framework import ComprehensiveComparison
 from performance_metrics import ProposalEvaluator
 from single_repeat_validation import SingleRepeatValidator, run_single_repeat_validation_main
@@ -88,6 +88,30 @@ class ResearchConfig:
     clinical_scenario_definitions: Dict[str, Dict[str, Any]] = field(default_factory=lambda: {'healthy_adult': {'cbf_range': (50.0, 80.0), 'att_range': (800.0, 1800.0), 'snr': 8.0},'elderly_patient': {'cbf_range': (30.0, 60.0), 'att_range': (1500.0, 3000.0), 'snr': 5.0},'stroke_patient': {'cbf_range': (10.0, 40.0), 'att_range': (2000.0, 4000.0), 'snr': 3.0},'tumor_patient': {'cbf_range': (20.0, 120.0), 'att_range': (1000.0, 3000.0), 'snr': 6.0}})
     wandb_project: str = "asl-multiverse-project"
     wandb_entity: Optional[str] = None
+
+def create_att_weighted_sampler(dataset: ASLInMemoryDataset) -> WeightedRandomSampler:
+    """Creates a sampler that over-samples the tails of the ATT distribution."""
+    script_logger.info("Creating attribute-weighted sampler to focus on ATT extremes...")
+    params = dataset.params_unnormalized
+    atts = params[:, 1]
+    
+    # Define "easy" vs "hard" ATT ranges
+    # We'll up-weight samples outside the "easy" middle range
+    easy_att_min, easy_att_max = 1500.0, 2500.0
+    
+    # Assign weights: higher weight for hard samples
+    sample_weights = np.ones(len(atts))
+    hard_sample_mask = (atts < easy_att_min) | (atts > easy_att_max)
+    sample_weights[hard_sample_mask] = 4.0 # Make hard samples 4x more likely to be picked
+    
+    script_logger.info(f"Up-weighting {np.sum(hard_sample_mask)}/{len(atts)} samples for training.")
+    
+    sampler = WeightedRandomSampler(
+        weights=torch.DoubleTensor(sample_weights),
+        num_samples=len(sample_weights),
+        replacement=True
+    )
+    return sampler
 
 def objective(trial: optuna.Trial, base_config: ResearchConfig, output_dir: Path, norm_stats: Dict) -> float:
     """
@@ -218,29 +242,39 @@ def run_comprehensive_asl_research(config: ResearchConfig, output_dir: Path, nor
     use_offline = data_config.get('use_offline_dataset', False)
     offline_path = data_config.get('offline_dataset_path', None)
     
-    # +++ THIS IS THE FIX +++
-    # Cap the number of workers to a reasonable maximum to avoid resource exhaustion.
-    # 16 is a safe and effective number for a high-performance system.
     num_workers = min(os.cpu_count() or 1, 16)
     script_logger.info(f"Using a capped number of {num_workers} CPU cores for data loading.")
 
+    train_loaders, epoch_schedule, steps_per_epoch_schedule = [], [], []
+
     if use_offline and offline_path:
-        script_logger.info(f"Using OFFLINE In-Memory dataset from: {offline_path}")
-        train_dataset = ASLInMemoryDataset(data_dir=offline_path, norm_stats=norm_stats)
-        val_dataset = ASLIterableDataset(simulator, plds_np, config.training_noise_levels_stage1, norm_stats=norm_stats)
-        shuffle_train = True 
-        steps_s1 = None 
-        steps_s2 = None
+        script_logger.info(f"Using OFFLINE In-Memory dataset with Attribute-Weighted Sampling from: {offline_path}")
+        full_dataset = ASLInMemoryDataset(data_dir=offline_path, norm_stats=norm_stats)
+        att_sampler = create_att_weighted_sampler(full_dataset)
+        
+        # Sampler is incompatible with shuffle=True. The sampler handles random sampling.
+        train_loader = DataLoader(full_dataset, batch_size=config.batch_size, num_workers=num_workers,
+                                  pin_memory=True, persistent_workers=(num_workers > 0), sampler=att_sampler)
+        
+        # When using a sampler with replacement, an epoch is defined by a fixed number of steps.
+        epoch_schedule = [config.n_epochs_stage1, config.n_epochs_stage2]
+        steps_per_epoch_schedule = [config.steps_per_epoch_stage1, config.steps_per_epoch_stage2]
+        train_loaders = [train_loader, train_loader]
+
     else:
         script_logger.info("Using ON-THE-FLY IterableDataset for training.")
-        train_dataset = ASLIterableDataset(simulator, plds_np, config.training_noise_levels_stage1, norm_stats=norm_stats)
-        val_dataset = ASLIterableDataset(simulator, plds_np, config.training_noise_levels_stage1, norm_stats=norm_stats)
-        shuffle_train = False
-        steps_s1 = config.steps_per_epoch_stage1
-        steps_s2 = config.steps_per_epoch_stage2
+        train_dataset_s1 = ASLIterableDataset(simulator, plds_np, config.training_noise_levels_stage1, norm_stats=norm_stats)
+        train_dataset_s2 = ASLIterableDataset(simulator, plds_np, config.training_noise_levels_stage2, norm_stats=norm_stats)
+        
+        train_loader_s1 = DataLoader(train_dataset_s1, batch_size=config.batch_size, num_workers=num_workers, pin_memory=True, persistent_workers=(num_workers > 0), prefetch_factor=4 if num_workers > 0 else None)
+        train_loader_s2 = DataLoader(train_dataset_s2, batch_size=config.batch_size, num_workers=num_workers, pin_memory=True, persistent_workers=(num_workers > 0), prefetch_factor=4 if num_workers > 0 else None)
+        
+        train_loaders = [train_loader_s1, train_loader_s2]
+        epoch_schedule = [config.n_epochs_stage1, config.n_epochs_stage2]
+        steps_per_epoch_schedule = [config.steps_per_epoch_stage1, config.steps_per_epoch_stage2]
 
-    train_loader_s1 = DataLoader(train_dataset, batch_size=config.batch_size, num_workers=num_workers, pin_memory=True, persistent_workers=(num_workers > 0), prefetch_factor=4 if num_workers > 0 else None, shuffle=shuffle_train)
-    train_loader_s2 = DataLoader(train_dataset, batch_size=config.batch_size, num_workers=num_workers, pin_memory=True, persistent_workers=(num_workers > 0), prefetch_factor=4 if num_workers > 0 else None, shuffle=shuffle_train)
+    # For validation, always use an unbiased, on-the-fly iterable dataset
+    val_dataset = ASLIterableDataset(simulator, plds_np, config.training_noise_levels_stage1, norm_stats=norm_stats)
     val_loader = DataLoader(val_dataset, batch_size=config.batch_size * 2, num_workers=num_workers, pin_memory=True, persistent_workers=(num_workers > 0), prefetch_factor=4 if num_workers > 0 else None)
     
     base_input_size_nn = num_plds * 2 + 4
@@ -258,10 +292,10 @@ def run_comprehensive_asl_research(config: ResearchConfig, output_dir: Path, nor
     training_start_time = time.time()
     
     trainer.train_ensemble(
-        train_loaders=[train_loader_s1, train_loader_s2],
-        val_loaders=[val_loader, val_loader],
-        epoch_schedule=[config.n_epochs_stage1, config.n_epochs_stage2],
-        steps_per_epoch_schedule=[steps_s1, steps_s2],
+        train_loaders=train_loaders,
+        val_loaders=[val_loader] * len(epoch_schedule), # Use the same validation loader for all stages
+        epoch_schedule=epoch_schedule,
+        steps_per_epoch_schedule=steps_per_epoch_schedule,
         early_stopping_patience=25 
     )
 

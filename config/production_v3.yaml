@@ -1,0 +1,87 @@
+training:
+  # --- HPO values for architecture ---
+  hidden_sizes: [512, 256, 128]
+  dropout_rate: 0.0878
+  weight_decay: 0.0000138 # For AdamW
+  
+  # --- V3 Loss Weights ---
+  loss_weight_cbf: 1.0
+  loss_weight_att: 4.0 
+  loss_pinn_weight_stage1: 1.45
+  loss_pinn_weight_stage2: 0.45 
+  pre_estimator_loss_weight_stage1: 1.0 
+  pre_estimator_loss_weight_stage2: 0.0
+
+  # --- V3 3-Stage Training Schedule ---
+  # The trainer code will need to be adapted to handle three stages.
+  # The expectation is:
+  # - Stage 0 (pre-train): Uses learning_rate
+  # - Stage 1 (foundational): Uses learning_rate
+  # - Stage 2 (fine-tune): Uses learning_rate_stage2
+  n_epochs_stage0_pretrain: 50
+  steps_per_epoch_stage0_pretrain: 1000
+  n_epochs_stage1: 80
+  steps_per_epoch_stage1: 1000
+  n_epochs_stage2: 40
+  steps_per_epoch_stage2: 500
+  
+  # --- Other Production Parameters ---
+  learning_rate: 0.0025
+  learning_rate_stage2: 0.0001
+  batch_size: 8192
+  n_ensembles: 5
+  validation_steps_per_epoch: 50
+  norm_type: "batch"
+  use_transformer_temporal_model: true
+  m0_input_feature_model: false
+  use_focused_transformer_model: true
+  transformer_d_model_focused: 32
+  transformer_nhead_model: 4
+  transformer_nlayers_model: 2
+  log_var_cbf_min: -6.0
+  log_var_cbf_max: 7.0
+  log_var_att_min: -2.0
+  log_var_att_max: 14.0
+  loss_log_var_reg_lambda: 0.0
+
+data:
+  # The attribute-weighted sampler requires the ASLInMemoryDataset, loaded from this path.
+  use_offline_dataset: true
+  offline_dataset_path: "asl_offline_dataset_10M"
+
+  # --- Standard data parameters ---
+  pld_values: [500, 1000, 1500, 2000, 2500, 3000]
+  att_ranges_config:
+    - [500, 1500, "Short ATT"]
+    - [1500, 2500, "Medium ATT"]
+    - [2500, 4000, "Long ATT"]
+  include_m0_in_training_data: false
+
+simulation:
+  T1_artery: 1850.0
+  T2_factor: 1.0
+  alpha_BS1: 1.0
+  alpha_PCASL: 0.85
+  alpha_VSASL: 0.56
+  T_tau: 1800.0
+  reference_CBF: 60.0
+
+# Optuna section is not needed for the final training run.
+optuna:
+  optuna_n_trials: 0
+
+evaluation:
+  n_test_subjects_per_att_range: 200
+  n_clinical_scenario_subjects: 100
+  clinical_scenario_definitions:
+    healthy_adult: {cbf_range: [50.0, 80.0], att_range: [800.0, 1800.0], snr: 8.0}
+    elderly_patient: {cbf_range: [30.0, 60.0], att_range: [1500.0, 3000.0], snr: 5.0}
+    stroke_patient: {cbf_range: [10.0, 40.0], att_range: [2000.0, 4000.0], snr: 3.0}
+    tumor_patient: {cbf_range: [20.0, 120.0], att_range: [1000.0, 3000.0], snr: 6.0}
+
+logging:
+  level: "INFO"
+
+wandb:
+  wandb_project: "asl-multiverse-production-v3"
+  wandb_entity: null

@@ -299,7 +299,7 @@ class EnhancedASLTrainer:
                 {'params': group['params'], 'lr': self.lr_cbf if group['name'] == 'cbf_stream' else self.lr_att}
                 for group in param_groups
             ]
-            self.optimizers.append(torch.optim.Adam(optimizer_param_groups, weight_decay=self.weight_decay))
+            self.optimizers.append(torch.optim.AdamW(optimizer_param_groups, weight_decay=self.weight_decay))
         self.schedulers = [] 
         
         loss_params = {
