@@ -1,8 +1,8 @@
 # config/production_final.yaml
 #
 # The definitive configuration for the final production run.
-# Parameters are from the successful HPO Trial #34, with a safety-factored learning rate.
-# This config is set up to use the new OFFLINE dataset for maximum speed.
+# Incorporates HPO-optimized parameters, differential learning rates, a rebalanced
+# training curriculum, and uses the high-performance offline dataset.
 
 training:
   # --- HPO values for architecture and regularization ---
@@ -12,17 +12,20 @@ training:
   loss_pinn_weight_stage1: 1.449542754902142
   loss_pinn_weight_stage2: 0.4527734124202008
   
-  # --- Production-safe learning rates ---
-  learning_rate: 0.0025
-  learning_rate_stage2: 0.0001
+  # --- NEW: Differential Learning Rates for Stability ---
+  learning_rate_cbf: 0.0025          # Higher LR for the stable MLP stream
+  learning_rate_att: 0.0005          # Lower LR for the sensitive Transformer stream
+  learning_rate_stage2_cbf: 0.0001
+  learning_rate_stage2_att: 0.00005
 
   # --- Production run parameters ---
   batch_size: 8192
   n_ensembles: 5
-  steps_per_epoch_stage1: 1000
-  steps_per_epoch_stage2: 500
-  n_epochs_stage1: 80
-  n_epochs_stage2: 40
+  
+  # --- NEW: Rebalanced Training Schedule for Better Curriculum ---
+  n_epochs_stage1: 20  # A short, physics-guided "warm-up"
+  n_epochs_stage2: 80  # The main, long fine-tuning phase
+  
   validation_steps_per_epoch: 50
   norm_type: "batch"
   pre_estimator_loss_weight_stage1: 1.0 
@@ -42,9 +45,9 @@ training:
   loss_log_var_reg_lambda: 0.0
 
 data:
-  # --- NEW: Controls for using the offline dataset ---
+  # --- Controls for using the offline dataset ---
   use_offline_dataset: true
-  offline_dataset_path: "asl_offline_dataset_10M"  # <-- IMPORTANT: Change this if you use a different name!
+  offline_dataset_path: "asl_offline_dataset_10M"
 
   # --- Standard data parameters ---
   pld_values: [500, 1000, 1500, 2000, 2500, 3000]
