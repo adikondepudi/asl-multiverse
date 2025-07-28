@@ -11,7 +11,7 @@ training:
   hidden_sizes: [512, 256, 128]
   dropout_rate: 0.0878
   weight_decay: 0.0000138
-  
+
   # --- Differential Learning Rates for Stability ---
   learning_rate_cbf: 0.0025          # LR for foundational stages (0 & 1)
   learning_rate_att: 0.0005          # LR for foundational stages (0 & 1)
@@ -27,7 +27,7 @@ training:
   # ==========================================================
   # --- NEW 3-STAGE CURRICULUM DEFINITION ---
   # ==========================================================
-  
+
   # Stage 0: Physics-Driven Stabilization (Unbiased Sampler)
   n_epochs_stage0_pretrain: 25
   loss_pinn_weight_stage0: 2.0
@@ -48,10 +48,12 @@ training:
   # --- Default Loss Weights (used unless overridden by a stage) ---
   loss_weight_cbf: 1.0
   loss_weight_att: 1.0
-  
+
   # --- Other Model/Loss Parameters ---
-  log_var_cbf_min: -6.0; log_var_cbf_max: 7.0
-  log_var_att_min: -2.0; log_var_att_max: 14.0
+  log_var_cbf_min: -6.0
+  log_var_cbf_max: 7.0
+  log_var_att_min: -2.0
+  log_var_att_max: 14.0
   loss_log_var_reg_lambda: 0.0
   use_transformer_temporal_model: true
   use_focused_transformer_model: true
@@ -70,7 +72,10 @@ simulation:
   T1_artery: 1850.0
   T_tau: 1800.0
   # other sim params are not strictly needed here but are good for record-keeping
-  T2_factor: 1.0; alpha_BS1: 1.0; alpha_PCASL: 0.85; alpha_VSASL: 0.56
+  T2_factor: 1.0
+  alpha_BS1: 1.0
+  alpha_PCASL: 0.85
+  alpha_VSASL: 0.56
 
 wandb:
   wandb_project: "asl-multiverse-production-final"
