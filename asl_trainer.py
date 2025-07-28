@@ -470,17 +470,46 @@ class EnhancedASLTrainer:
         total_loss = 0.0
         total_components = defaultdict(float)
         
+        # --- CUDA Graph Setup ---
+        graph = None
+        static_signals, static_params_norm = None, None
+        
         pbar = tqdm(islice(train_loader_iter, steps_per_epoch), total=steps_per_epoch, desc=f"Epoch {current_global_epoch+1} Training", leave=False, ncols=100)
         
         for i, (signals, params_norm) in enumerate(pbar):
             signals, params_norm = signals.to(self.device), params_norm.to(self.device)
-            optimizer.zero_grad(set_to_none=True)
-            with torch.amp.autocast(device_type=self.device.type, dtype=torch.bfloat16):
-                outputs = model(signals)
-                cbf_mean_norm, att_mean_norm, cbf_log_var, att_log_var, cbf_rough, att_rough = outputs
-                loss, loss_components = self.custom_loss_fn(signals, cbf_mean_norm, att_mean_norm, params_norm[:, 0:1], params_norm[:, 1:2], cbf_log_var, att_log_var, cbf_rough, att_rough, current_global_epoch)
+
+            if graph is None: # First few steps are for warmup and capture
+                # --- Warmup ---
+                for _ in range(3):
+                    optimizer.zero_grad(set_to_none=True)
+                    with torch.amp.autocast(device_type=self.device.type, dtype=torch.bfloat16):
+                        outputs = model(signals)
+                        cbf_mean_norm, att_mean_norm, cbf_log_var, att_log_var, cbf_rough, att_rough = outputs
+                        loss, _ = self.custom_loss_fn(signals, cbf_mean_norm, att_mean_norm, params_norm[:, 0:1], params_norm[:, 1:2], cbf_log_var, att_log_var, cbf_rough, att_rough, current_global_epoch)
+                    scaler.scale(loss).backward()
+                    scaler.step(optimizer)
+                    scaler.update()
+
+                # --- Capture ---
+                graph = torch.cuda.CUDAGraph()
+                static_signals = signals.clone()
+                static_params_norm = params_norm.clone()
+                
+                optimizer.zero_grad(set_to_none=True)
+                with torch.cuda.graph(graph):
+                    with torch.amp.autocast(device_type=self.device.type, dtype=torch.bfloat16):
+                        outputs_static = model(static_signals)
+                        cbf_mean_norm_s, att_mean_norm_s, cbf_log_var_s, att_log_var_s, cbf_rough_s, att_rough_s = outputs_static
+                        loss_static, _ = self.custom_loss_fn(static_signals, cbf_mean_norm_s, att_mean_norm_s, static_params_norm[:, 0:1], static_params_norm[:, 1:2], cbf_log_var_s, att_log_var_s, cbf_rough_s, att_rough_s, current_global_epoch)
+                    scaler.scale(loss_static).backward()
+                
+            # --- Replay ---
+            static_signals.copy_(signals)
+            static_params_norm.copy_(params_norm)
+            graph.replay()
             
-            scaler.scale(loss).backward()
+            # Unscale and step outside the graph
             scaler.unscale_(optimizer)
             torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
             scaler.step(optimizer)
@@ -488,6 +517,13 @@ class EnhancedASLTrainer:
 
             if scheduler: scheduler.step()
             if wandb.run and scheduler: wandb.log({'lr': scheduler.get_last_lr()[0]}, step=self.global_step)
+            
+            # We need to get the loss value for logging. Re-calculating it outside the graph is cheap.
+            with torch.no_grad():
+                with torch.amp.autocast(device_type=self.device.type, dtype=torch.bfloat16):
+                    outputs = model(signals)
+                    cbf_mean_norm, att_mean_norm, cbf_log_var, att_log_var, cbf_rough, att_rough = outputs
+                    loss, loss_components = self.custom_loss_fn(signals, cbf_mean_norm, att_mean_norm, params_norm[:, 0:1], params_norm[:, 1:2], cbf_log_var, att_log_var, cbf_rough, att_rough, current_global_epoch)
             
             total_loss += loss.item()
             for key, value in loss_components.items():

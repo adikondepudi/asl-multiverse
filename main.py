@@ -258,20 +258,38 @@ def run_comprehensive_asl_research(config: ResearchConfig, output_dir: Path, nor
         ('n_epochs_stage1', 'steps_per_epoch_stage1', 'training_noise_levels_stage1'),
         ('n_epochs_stage2', 'steps_per_epoch_stage2', 'training_noise_levels_stage2')
     ]
-
+    
     if use_offline and offline_path:
-        script_logger.info(f"Using OFFLINE In-Memory dataset with Attribute-Weighted Sampling from: {offline_path}")
+        script_logger.info(f"Using OFFLINE In-Memory dataset from: {offline_path}")
         full_dataset = ASLInMemoryDataset(data_dir=offline_path, norm_stats=norm_stats)
-        att_sampler = create_att_weighted_sampler(full_dataset)
-        train_loader = DataLoader(full_dataset, batch_size=config.batch_size, num_workers=num_workers,
-                                  pin_memory=True, persistent_workers=(num_workers > 0), sampler=att_sampler)
         
+        # --- Create TWO data loaders for the new curriculum ---
+        
+        # Loader 1: Standard shuffling for initial, unbiased training
+        script_logger.info("... creating standard loader for Stage 0/1 (unbiased learning).")
+        standard_loader = DataLoader(full_dataset, batch_size=config.batch_size, num_workers=num_workers,
+                                     pin_memory=True, persistent_workers=(num_workers > 0), shuffle=True)
+                                     
+        # Loader 2: Weighted sampler for fine-tuning on hard examples
+        script_logger.info("... creating weighted sampler loader for Stage 2 (fine-tuning).")
+        att_sampler = create_att_weighted_sampler(full_dataset)
+        weighted_loader = DataLoader(full_dataset, batch_size=config.batch_size, num_workers=num_workers,
+                                     pin_memory=True, persistent_workers=(num_workers > 0), sampler=att_sampler)
+        
+        # Map stages from config to the correct loader
+        stage_loader_map = {
+            'n_epochs_stage0_pretrain': standard_loader,
+            'n_epochs_stage1': standard_loader,
+            'n_epochs_stage2': weighted_loader 
+        }
+
         for n_epochs_key, steps_key, _ in stage_configs:
             n_epochs = getattr(config, n_epochs_key, 0)
             if n_epochs > 0:
                 epoch_schedule.append(n_epochs)
-                steps_per_epoch_schedule.append(getattr(config, steps_key))
-                train_loaders.append(train_loader)
+                steps_per_epoch_schedule.append(None) # Use full dataset for offline mode
+                train_loaders.append(stage_loader_map[n_epochs_key])
+                script_logger.info(f"Scheduled stage '{n_epochs_key}' for {n_epochs} epochs with '{'weighted' if stage_loader_map[n_epochs_key] == weighted_loader else 'standard'}' loader.")
 
     else:
         script_logger.info("Using ON-THE-FLY IterableDataset for training.")

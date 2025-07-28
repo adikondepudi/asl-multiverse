@@ -21,28 +21,30 @@ def engineer_signal_features(raw_signal: np.ndarray, num_plds: int) -> np.ndarra
         - PCASL center-of-mass
         - VSASL center-of-mass
     """
-    if raw_signal.ndim == 1:
-        raw_signal = raw_signal.reshape(1, -1) # Ensure 2D for processing
+    is_1d = raw_signal.ndim == 1
+    if is_1d:
+        raw_signal = raw_signal.reshape(1, -1)  # Ensure 2D for processing
 
-    num_samples = raw_signal.shape[0]
-    engineered_features = np.zeros((num_samples, 4))
+    pcasl_curves = raw_signal[:, :num_plds]
+    vsasl_curves = raw_signal[:, num_plds:]
     plds_indices = np.arange(num_plds)
 
-    for i in range(num_samples):
-        pcasl_curve = raw_signal[i, :num_plds]
-        vsasl_curve = raw_signal[i, num_plds:]
+    # Feature 1: Time to peak (vectorized)
+    pcasl_ttp = np.argmax(pcasl_curves, axis=1)
+    vsasl_ttp = np.argmax(vsasl_curves, axis=1)
 
-        # Feature 1: Time to peak (index of max signal)
-        engineered_features[i, 0] = np.argmax(pcasl_curve)
-        engineered_features[i, 1] = np.argmax(vsasl_curve)
+    # Feature 2: Center of mass (vectorized)
+    pcasl_sum = np.sum(pcasl_curves, axis=1) + 1e-6
+    vsasl_sum = np.sum(vsasl_curves, axis=1) + 1e-6
+    pcasl_com = np.sum(pcasl_curves * plds_indices, axis=1) / pcasl_sum
+    vsasl_com = np.sum(vsasl_curves * plds_indices, axis=1) / vsasl_sum
+    
+    engineered_features = np.stack([pcasl_ttp, vsasl_ttp, pcasl_com, vsasl_com], axis=1)
 
-        # Feature 2: Center of mass (temporal)
-        pcasl_sum = np.sum(pcasl_curve) + 1e-6
-        vsasl_sum = np.sum(vsasl_curve) + 1e-6
-        engineered_features[i, 2] = np.sum(pcasl_curve * plds_indices) / pcasl_sum
-        engineered_features[i, 3] = np.sum(vsasl_curve * plds_indices) / vsasl_sum
-
-    return engineered_features.astype(np.float32)
+    if is_1d:
+        return engineered_features.flatten().astype(np.float32)
+    else:
+        return engineered_features.astype(np.float32)
 
 # Top-level worker function for multiprocessing to be able to pickle it.
 def _worker_generate_sample(args_tuple):

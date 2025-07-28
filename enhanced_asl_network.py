@@ -112,8 +112,7 @@ def _torch_physical_kinetic_model(
 
     return pcasl_sig, vsasl_sig
 
-_compiled_torch_physical_kinetic_model = torch.compile(_torch_physical_kinetic_model, mode="reduce-overhead")
-
+@torch.compile(mode="reduce-overhead")
 def _torch_analytic_gradients(
     pred_cbf: torch.Tensor, pred_att: torch.Tensor,
     plds: torch.Tensor, model_params: Dict[str, Any]
