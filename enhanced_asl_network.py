@@ -132,7 +132,6 @@ def _torch_physical_kinetic_model(
 
     return pcasl_sig, vsasl_sig
 
-@torch.compile(mode="reduce-overhead")
 def _torch_analytic_gradients(
     pred_cbf: torch.Tensor, pred_att: torch.Tensor,
     plds: torch.Tensor, model_params: Dict[str, Any]
@@ -385,7 +384,6 @@ class EnhancedASLNet(nn.Module):
             {'params': att_params, 'name': 'att_stream'}
         ]
 
-@torch.compile(mode="reduce-overhead")
 def torch_kinetic_model(pred_cbf_norm: torch.Tensor, pred_att_norm: torch.Tensor,
                         norm_stats: Dict, model_params: Dict) -> torch.Tensor:
     """

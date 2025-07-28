@@ -302,6 +302,13 @@ class EnhancedASLTrainer:
         self.scalers = [torch.cuda.amp.GradScaler() for _ in range(self.n_ensembles)]
 
         self.models = [model_class(**model_config).to(self.device) for _ in range(n_ensembles)]
+
+        # Compile each model in the ensemble
+        print("INFO: Compiling models with torch.compile() for optimized performance...")
+        self.models = [torch.compile(m, mode="max-autotune") for m in self.models]
+        print("INFO: Model compilation complete.")
+
+
         self.best_states = [None] * self.n_ensembles
         self.optimizers = []
         for model in self.models:
@@ -466,71 +473,65 @@ class EnhancedASLTrainer:
         return {'final_mean_val_loss': final_mean_val_loss_overall, 'all_histories': histories}
 
     def _train_epoch(self, model, train_loader_iter, optimizer, scaler, scheduler, current_global_epoch: int, steps_per_epoch: int) -> Tuple[float, Dict[str, float]]:
+        """
+        Training epoch loop, optimized for use with torch.compile().
+        """
         model.train()
         total_loss = 0.0
         total_components = defaultdict(float)
         
-        # --- CUDA Graph Setup ---
-        graph = None
-        static_signals, static_params_norm = None, None
-        
+        # The progress bar setup remains the same
         pbar = tqdm(islice(train_loader_iter, steps_per_epoch), total=steps_per_epoch, desc=f"Epoch {current_global_epoch+1} Training", leave=False, ncols=100)
         
+        # Standard training loop
         for i, (signals, params_norm) in enumerate(pbar):
             signals, params_norm = signals.to(self.device), params_norm.to(self.device)
 
-            if graph is None: # First few steps are for warmup and capture
-                # --- Warmup ---
-                for _ in range(3):
-                    optimizer.zero_grad(set_to_none=True)
-                    with torch.amp.autocast(device_type=self.device.type, dtype=torch.bfloat16):
-                        outputs = model(signals)
-                        cbf_mean_norm, att_mean_norm, cbf_log_var, att_log_var, cbf_rough, att_rough = outputs
-                        loss, _ = self.custom_loss_fn(signals, cbf_mean_norm, att_mean_norm, params_norm[:, 0:1], params_norm[:, 1:2], cbf_log_var, att_log_var, cbf_rough, att_rough, current_global_epoch)
-                    scaler.scale(loss).backward()
-                    scaler.step(optimizer)
-                    scaler.update()
+            # 1. Zero gradients
+            optimizer.zero_grad(set_to_none=True)
 
-                # --- Capture ---
-                graph = torch.cuda.CUDAGraph()
-                static_signals = signals.clone()
-                static_params_norm = params_norm.clone()
-                
-                optimizer.zero_grad(set_to_none=True)
-                with torch.cuda.graph(graph):
-                    with torch.amp.autocast(device_type=self.device.type, dtype=torch.bfloat16):
-                        outputs_static = model(static_signals)
-                        cbf_mean_norm_s, att_mean_norm_s, cbf_log_var_s, att_log_var_s, cbf_rough_s, att_rough_s = outputs_static
-                        loss_static, _ = self.custom_loss_fn(static_signals, cbf_mean_norm_s, att_mean_norm_s, static_params_norm[:, 0:1], static_params_norm[:, 1:2], cbf_log_var_s, att_log_var_s, cbf_rough_s, att_rough_s, current_global_epoch)
-                    scaler.scale(loss_static).backward()
-                
-            # --- Replay ---
-            static_signals.copy_(signals)
-            static_params_norm.copy_(params_norm)
-            graph.replay()
-            
-            # Unscale and step outside the graph
-            scaler.unscale_(optimizer)
+            # 2. Forward pass with mixed precision
+            # The compiled model will run its optimized code here.
+            with torch.amp.autocast(device_type=self.device.type, dtype=torch.bfloat16):
+                outputs = model(signals)
+                cbf_mean_norm, att_mean_norm, cbf_log_var, att_log_var, cbf_rough, att_rough = outputs
+                loss, loss_components = self.custom_loss_fn(
+                    signals, cbf_mean_norm, att_mean_norm, 
+                    params_norm[:, 0:1], params_norm[:, 1:2], 
+                    cbf_log_var, att_log_var, 
+                    cbf_rough, att_rough, 
+                    current_global_epoch
+                )
+
+            # 3. Scaled backward pass
+            scaler.scale(loss).backward()
+
+            # 4. Optimizer step
+            # Unscale gradients just before the step.
+            scaler.unscale_(optimizer) 
+            # Clip gradients for stability.
             torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
             scaler.step(optimizer)
+
+            # 5. Update the scale factor for the next iteration
             scaler.update()
 
-            if scheduler: scheduler.step()
-            if wandb.run and scheduler: wandb.log({'lr': scheduler.get_last_lr()[0]}, step=self.global_step)
+            # 6. Update the learning rate scheduler
+            if scheduler:
+                scheduler.step()
             
-            # We need to get the loss value for logging. Re-calculating it outside the graph is cheap.
-            with torch.no_grad():
-                with torch.amp.autocast(device_type=self.device.type, dtype=torch.bfloat16):
-                    outputs = model(signals)
-                    cbf_mean_norm, att_mean_norm, cbf_log_var, att_log_var, cbf_rough, att_rough = outputs
-                    loss, loss_components = self.custom_loss_fn(signals, cbf_mean_norm, att_mean_norm, params_norm[:, 0:1], params_norm[:, 1:2], cbf_log_var, att_log_var, cbf_rough, att_rough, current_global_epoch)
-            
+            # Log and update progress
             total_loss += loss.item()
             for key, value in loss_components.items():
                 total_components[key] += value.item()
-                
-            pbar.set_postfix(loss=loss.item()); self.global_step += 1
+            
+            if wandb.run and scheduler:
+                wandb.log({'lr': scheduler.get_last_lr()[0]}, step=self.global_step)
+            
+            pbar.set_postfix(loss=loss.item())
+            self.global_step += 1
         
+        # Calculate and return average losses for the epoch
         num_steps = i + 1
         mean_total_loss = total_loss / num_steps if num_steps > 0 else 0.0
         mean_components = {key: val / num_steps for key, val in total_components.items()} if num_steps > 0 else {}
