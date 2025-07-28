@@ -36,6 +36,14 @@ script_logger = logging.getLogger(__name__)
 class ResearchConfig:
     hidden_sizes: List[int] = field(default_factory=lambda: [256, 128, 64])
     learning_rate: float = 0.001
+    use_offline_dataset: bool = False
+    offline_dataset_path: Optional[str] = None
+    n_epochs_stage0_pretrain: int = 0
+    steps_per_epoch_stage0_pretrain: int = 0
+    learning_rate_cbf: Optional[float] = None
+    learning_rate_att: Optional[float] = None
+    learning_rate_stage2_cbf: Optional[float] = None
+    learning_rate_stage2_att: Optional[float] = None
     weight_decay: float = 1e-5
     batch_size: int = 256
     steps_per_epoch_stage1: int = 20
@@ -287,8 +295,7 @@ def run_comprehensive_asl_research(config: ResearchConfig, output_dir: Path, nor
     # Note: Pass the entire config dict here so the trainer can access all LR keys
     trainer = EnhancedASLTrainer(model_config=model_creation_config, model_class=create_main_model_closure, 
                                  input_size=base_input_size_nn, 
-                                 # These are now just fallbacks if specific keys aren't in the config
-                                 learning_rate=config.learning_rate, 
+                                 # The trainer will now pull ALL params from model_config
                                  weight_decay=config.weight_decay, 
                                  batch_size=config.batch_size, 
                                  n_ensembles=config.n_ensembles, 
@@ -354,12 +361,21 @@ if __name__ == "__main__":
 
     config_obj = ResearchConfig()
     if Path(args.config_file).exists():
-        with open(args.config_file, 'r') as f_yaml: config_from_yaml = yaml.safe_load(f_yaml) or {}
+        with open(args.config_file, 'r') as f_yaml:
+            config_from_yaml = yaml.safe_load(f_yaml) or {}
+        
+        # Flatten the nested YAML dictionary into a single level
+        flat_config = {}
         for section, params in config_from_yaml.items():
             if isinstance(params, dict):
-                for key, value in params.items():
-                    if hasattr(config_obj, key): setattr(config_obj, key, value)
-    
+                flat_config.update(params)
+        
+        # Now, iterate through the flat dictionary and set attributes
+        for key, value in flat_config.items():
+            if hasattr(config_obj, key):
+                setattr(config_obj, key, value)
+            # Silently ignore keys from YAML that aren't in the dataclass
+
     if args.output_dir:
         output_path = Path(args.output_dir)
     else:

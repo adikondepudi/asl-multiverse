@@ -268,12 +268,23 @@ class ASLIterableDataset(IterableDataset):
 
 class EnhancedASLTrainer:
     def __init__(self,
-                 model_config: Dict, model_class: callable, input_size: int, learning_rate: float = 0.001,
+                 model_config: Dict, model_class: callable, input_size: int,
                  weight_decay: float = 1e-5, batch_size: int = 256, n_ensembles: int = 5,
                  device: str = 'cuda' if torch.cuda.is_available() else 'cpu',
                  n_plds_for_model: Optional[int] = None, m0_input_feature_model: bool = False):
         self.device = torch.device(device) # Ensure device is a torch.device object
         self.batch_size = batch_size
+
+        learning_rate = model_config.get('learning_rate', 0.001)
+
+        self.lr_cbf = model_config.get('learning_rate_cbf', learning_rate)
+        self.lr_att = model_config.get('learning_rate_att', learning_rate)
+        self.lr_stage2_cbf = model_config.get('learning_rate_stage2_cbf', self.lr_cbf / 10.0)
+        self.lr_stage2_att = model_config.get('learning_rate_stage2_att', self.lr_att / 10.0)
+
+        self.learning_rate = learning_rate # Keep this for backward compatibility if needed elsewhere
+        self.weight_decay = weight_decay
+
         self.n_ensembles = n_ensembles
         self.n_plds_for_model = n_plds_for_model
         self.m0_input_feature_model = m0_input_feature_model
@@ -288,7 +299,7 @@ class EnhancedASLTrainer:
         self.weight_decay = weight_decay
         self.model_config = model_config
         self.validation_steps_per_epoch = model_config.get('validation_steps_per_epoch', 50)
-        self.scalers = [torch.amp.GradScaler(device_type=self.device.type) for _ in range(self.n_ensembles)]
+        self.scalers = [torch.cuda.amp.GradScaler() for _ in range(self.n_ensembles)]
 
         self.models = [model_class(**model_config).to(self.device) for _ in range(n_ensembles)]
         self.best_states = [None] * self.n_ensembles
