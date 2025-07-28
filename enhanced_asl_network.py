@@ -21,6 +21,26 @@ class ResidualBlock(nn.Module):
         
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         return F.relu(x + self.layers(x))
+    
+class AttentionPooling(nn.Module):
+    """
+    Attention-based pooling to create a learned weighted average of sequence features.
+    """
+    def __init__(self, d_model):
+        super().__init__()
+        self.attention_net = nn.Sequential(
+            nn.Linear(d_model, d_model // 2),
+            nn.Tanh(),
+            nn.Linear(d_model // 2, 1)
+        )
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        # x shape: (batch, seq_len, d_model)
+        attn_weights = self.attention_net(x)  # (batch, seq_len, 1)
+        attn_weights = torch.softmax(attn_weights, dim=1) # Normalize weights across sequence
+        # Weighted sum: (batch, 1, seq_len) @ (batch, seq_len, d_model) -> (batch, 1, d_model)
+        pooled = torch.bmm(attn_weights.transpose(1, 2), x)
+        return pooled.squeeze(1) # (batch, d_model)
 
 class CrossAttentionBlock(nn.Module):
     """
@@ -121,7 +141,7 @@ def _torch_analytic_gradients(
     Computes analytical gradients of the physical ASL signals with respect to CBF and ATT.
     This is the core of the Differentiable Physics-Encoder.
     """
-    pcasl_sig, vsasl_sig = _compiled_torch_physical_kinetic_model(pred_cbf, pred_att, plds, model_params)
+    pcasl_sig, vsasl_sig = _torch_physical_kinetic_model(pred_cbf, pred_att, plds, model_params)
     
     # 1. dS/dCBF is simple due to linear relationship
     # Add a small epsilon to avoid division by zero if cbf is zero
@@ -231,15 +251,18 @@ class EnhancedASLNet(nn.Module):
         self.pcasl_to_vsasl_cross_attn = CrossAttentionBlock(self.att_d_model, transformer_nhead, dropout_rate)
         self.vsasl_to_pcasl_cross_attn = CrossAttentionBlock(self.att_d_model, transformer_nhead, dropout_rate)
 
+        self.pool_long = AttentionPooling(self.att_d_model)
+        self.pool_short = AttentionPooling(self.att_d_model)
+
         att_mlp_input_size = self.att_d_model * 4
         self.att_mlp = nn.Sequential(
             nn.Linear(att_mlp_input_size, hidden_sizes[0]),
             self._get_norm_layer(hidden_sizes[0], norm_type),
             nn.ReLU(),
             nn.Dropout(dropout_rate),
-            nn.Linear(hidden_sizes[0], hidden_sizes[1]),
-            self._get_norm_layer(hidden_sizes[1], norm_type),
-            nn.ReLU()
+            nn.Linear(hidden_sizes[0], hidden_sizes[1] * 2), # Double the output for the gate
+            self._get_norm_layer(hidden_sizes[1] * 2, norm_type),
+            nn.GLU(dim=1)  # GLU halves the dimension, resulting in size hidden_sizes[1]
         )
         self.att_uncertainty = UncertaintyHead(hidden_sizes[1], 1, log_var_min=log_var_att_min, log_var_max=log_var_att_max)
         
@@ -249,7 +272,8 @@ class EnhancedASLNet(nn.Module):
             nn.ReLU(),
             self._get_norm_layer(64, norm_type),
             nn.Dropout(dropout_rate),
-            nn.Linear(64, 32)
+            nn.Linear(64, 32 * 2),
+            nn.GLU(dim=1)
         )
         self.cbf_uncertainty = UncertaintyHead(32, 1, log_var_min=log_var_cbf_min, log_var_max=log_var_cbf_max)
 
@@ -320,8 +344,10 @@ class EnhancedASLNet(nn.Module):
         pcasl_fused_long = self.pcasl_to_vsasl_cross_attn(query=pcasl_long_out, key_value=vsasl_long_out)
         vsasl_fused_long = self.vsasl_to_pcasl_cross_attn(query=vsasl_long_out, key_value=pcasl_long_out)
 
-        pcasl_feat_long, vsasl_feat_long = torch.mean(pcasl_fused_long, dim=1), torch.mean(vsasl_fused_long, dim=1)
-        pcasl_feat_short, vsasl_feat_short = torch.mean(pcasl_short_out, dim=1), torch.mean(vsasl_short_out, dim=1)
+        # pcasl_feat_long, vsasl_feat_long = torch.mean(pcasl_fused_long, dim=1), torch.mean(vsasl_fused_long, dim=1)
+        pcasl_feat_long, vsasl_feat_long = self.pool_long(pcasl_fused_long), self.pool_long(vsasl_fused_long)
+        # pcasl_feat_short, vsasl_feat_short = torch.mean(pcasl_short_out, dim=1), torch.mean(vsasl_short_out, dim=1)
+        pcasl_feat_short, vsasl_feat_short = self.pool_short(pcasl_short_out), self.pool_short(vsasl_short_out)
 
         att_stream_features = torch.cat([pcasl_feat_long, vsasl_feat_long, pcasl_feat_short, vsasl_feat_short], dim=1)
         att_final_features = self.att_mlp(att_stream_features)
@@ -359,6 +385,7 @@ class EnhancedASLNet(nn.Module):
             {'params': att_params, 'name': 'att_stream'}
         ]
 
+@torch.compile(mode="reduce-overhead")
 def torch_kinetic_model(pred_cbf_norm: torch.Tensor, pred_att_norm: torch.Tensor,
                         norm_stats: Dict, model_params: Dict) -> torch.Tensor:
     """
@@ -370,7 +397,7 @@ def torch_kinetic_model(pred_cbf_norm: torch.Tensor, pred_att_norm: torch.Tensor
     pred_att = pred_att_norm * norm_stats['y_std_att'] + norm_stats['y_mean_att']
     plds = torch.tensor(model_params['pld_values'], device=device, dtype=torch.float32)
 
-    pcasl_sig, vsasl_sig = _compiled_torch_physical_kinetic_model(pred_cbf, pred_att, plds, model_params)
+    pcasl_sig, vsasl_sig = _torch_physical_kinetic_model(pred_cbf, pred_att, plds, model_params)
 
     reconstructed_signal = torch.cat([pcasl_sig, vsasl_sig], dim=1)
 
