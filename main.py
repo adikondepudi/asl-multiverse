@@ -226,7 +226,9 @@ def run_comprehensive_asl_research(config: ResearchConfig, output_dir: Path, nor
     output_dir.mkdir(parents=True, exist_ok=True)
     torch.backends.cudnn.benchmark = True
 
-    wandb_run = wandb.init(project=config.wandb_project, entity=config.wandb_entity, config=asdict(config), name=f"run_{output_dir.name}", job_type="research_pipeline")
+    # Use a more descriptive run name based on the output directory
+    run_name = f"run_{output_dir.name}"
+    wandb_run = wandb.init(project=config.wandb_project, entity=config.wandb_entity, config=asdict(config), name=run_name, job_type="research_pipeline")
     if wandb_run: script_logger.info(f"W&B Run URL: {wandb_run.url}")
 
     with open(output_dir / 'research_config.json', 'w') as f: json.dump(asdict(config), f, indent=2)
@@ -236,12 +238,10 @@ def run_comprehensive_asl_research(config: ResearchConfig, output_dir: Path, nor
     asl_params_sim = ASLParameters(**{k:v for k,v in asdict(config).items() if k in ASLParameters.__annotations__})
     simulator = RealisticASLSimulator(params=asl_params_sim)
 
-    script_logger.info("Starting multi-stage ensemble training...") # <-- CORRECTED LOG MESSAGE
+    script_logger.info("Starting multi-stage ensemble training...")
     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
     script_logger.info(f"Using device: {device}")
     
-    # This block was removed as it's redundant and buggy.
-    # The 'config' object already contains these values.
     use_offline = config.use_offline_dataset
     offline_path = config.offline_dataset_path
     
@@ -252,11 +252,11 @@ def run_comprehensive_asl_research(config: ResearchConfig, output_dir: Path, nor
     epoch_schedule = []
     steps_per_epoch_schedule = []
 
-    # Dynamically build the schedule from the config file
-    stage_configs = [
-        ('n_epochs_stage0_pretrain', 'steps_per_epoch_stage0_pretrain', 'training_noise_levels_stage1'),
-        ('n_epochs_stage1', 'steps_per_epoch_stage1', 'training_noise_levels_stage1'),
-        ('n_epochs_stage2', 'steps_per_epoch_stage2', 'training_noise_levels_stage2')
+    # Define the stages based on the new curriculum
+    stage_definitions = [
+        ('n_epochs_stage0_pretrain', 'steps_per_epoch_stage0_pretrain', 'standard'),
+        ('n_epochs_stage1', 'steps_per_epoch_stage1', 'standard'),
+        ('n_epochs_stage2', 'steps_per_epoch_stage2', 'weighted')
     ]
     
     if use_offline and offline_path:
@@ -264,40 +264,38 @@ def run_comprehensive_asl_research(config: ResearchConfig, output_dir: Path, nor
         full_dataset = ASLInMemoryDataset(data_dir=offline_path, norm_stats=norm_stats)
         
         # --- Create TWO data loaders for the new curriculum ---
-        
-        # Loader 1: Standard shuffling for initial, unbiased training
-        script_logger.info("... creating standard loader for Stage 0/1 (unbiased learning).")
+        script_logger.info("... creating standard loader for unbiased learning (Stages 0 & 1).")
         standard_loader = DataLoader(full_dataset, batch_size=config.batch_size, num_workers=num_workers,
                                      pin_memory=True, persistent_workers=(num_workers > 0), shuffle=True)
                                      
-        # Loader 2: Weighted sampler for fine-tuning on hard examples
-        script_logger.info("... creating weighted sampler loader for Stage 2 (fine-tuning).")
+        script_logger.info("... creating weighted sampler loader for hard-case fine-tuning (Stage 2).")
         att_sampler = create_att_weighted_sampler(full_dataset)
         weighted_loader = DataLoader(full_dataset, batch_size=config.batch_size, num_workers=num_workers,
                                      pin_memory=True, persistent_workers=(num_workers > 0), sampler=att_sampler)
         
-        # Map stages from config to the correct loader
-        stage_loader_map = {
-            'n_epochs_stage0_pretrain': standard_loader,
-            'n_epochs_stage1': standard_loader,
-            'n_epochs_stage2': weighted_loader 
-        }
+        loader_map = {"standard": standard_loader, "weighted": weighted_loader}
 
-        for n_epochs_key, steps_key, _ in stage_configs:
+        for n_epochs_key, _, sampler_type in stage_definitions:
             n_epochs = getattr(config, n_epochs_key, 0)
             if n_epochs > 0:
                 epoch_schedule.append(n_epochs)
                 steps_per_epoch_schedule.append(None) # Use full dataset for offline mode
-                train_loaders.append(stage_loader_map[n_epochs_key])
-                script_logger.info(f"Scheduled stage '{n_epochs_key}' for {n_epochs} epochs with '{'weighted' if stage_loader_map[n_epochs_key] == weighted_loader else 'standard'}' loader.")
+                train_loaders.append(loader_map[sampler_type])
+                script_logger.info(f"Scheduled stage '{n_epochs_key}' for {n_epochs} epochs with '{sampler_type}' loader.")
 
     else:
-        script_logger.info("Using ON-THE-FLY IterableDataset for training.")
-        for n_epochs_key, steps_key, noise_key in stage_configs:
+        # Fallback to on-the-fly generation if not using the offline dataset
+        script_logger.info("Using ON-THE-FLY IterableDataset for all training stages.")
+        # This part remains as a useful fallback, but the new curriculum is designed for the offline dataset.
+        stage_noise_levels = [
+            config.training_noise_levels_stage1,
+            config.training_noise_levels_stage1,
+            config.training_noise_levels_stage2
+        ]
+        for i, (n_epochs_key, steps_key, _) in enumerate(stage_definitions):
             n_epochs = getattr(config, n_epochs_key, 0)
             if n_epochs > 0:
-                noise_levels = getattr(config, noise_key)
-                iterable_dataset = ASLIterableDataset(simulator, plds_np, noise_levels, norm_stats=norm_stats)
+                iterable_dataset = ASLIterableDataset(simulator, plds_np, stage_noise_levels[i], norm_stats=norm_stats)
                 loader = DataLoader(iterable_dataset, batch_size=config.batch_size, num_workers=num_workers, pin_memory=True, persistent_workers=(num_workers > 0))
                 
                 epoch_schedule.append(n_epochs)
@@ -311,14 +309,11 @@ def run_comprehensive_asl_research(config: ResearchConfig, output_dir: Path, nor
     model_creation_config = asdict(config)
     def create_main_model_closure(**kwargs): return EnhancedASLNet(input_size=base_input_size_nn, **kwargs)
 
-    # Note: Pass the entire config dict here so the trainer can access all LR keys
     trainer = EnhancedASLTrainer(model_config=model_creation_config, model_class=create_main_model_closure, 
                                  input_size=base_input_size_nn, 
-                                 # The trainer will now pull ALL params from model_config
-                                 weight_decay=config.weight_decay, 
-                                 batch_size=config.batch_size, 
-                                 n_ensembles=config.n_ensembles, 
-                                 device=device, n_plds_for_model=num_plds)
+                                 weight_decay=config.weight_decay, batch_size=config.batch_size, 
+                                 n_ensembles=config.n_ensembles, device=device, 
+                                 n_plds_for_model=num_plds)
     
     trainer.norm_stats = norm_stats
     trainer.custom_loss_fn.norm_stats = norm_stats
@@ -329,9 +324,10 @@ def run_comprehensive_asl_research(config: ResearchConfig, output_dir: Path, nor
     script_logger.info(f"Training {config.n_ensembles}-model ensemble over {len(epoch_schedule)} stages...")
     training_start_time = time.time()
     
+    # The train_ensemble method will now handle the dynamic parameter changes
     trainer.train_ensemble(
         train_loaders=train_loaders,
-        val_loaders=[val_loader] * len(epoch_schedule),
+        val_loaders=[val_loader] * len(epoch_schedule), # Use the same validation loader for all stages
         epoch_schedule=epoch_schedule,
         steps_per_epoch_schedule=steps_per_epoch_schedule,
         early_stopping_patience=25 

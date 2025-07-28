@@ -1,87 +1,77 @@
 # config/production_final.yaml
 #
-# The definitive configuration for the final production run.
-# Incorporates HPO-optimized parameters, differential learning rates, a rebalanced
-# training curriculum, and uses the high-performance offline dataset.
+# The definitive configuration for the final, efficient production run.
+# Implements a 3-stage curriculum learning strategy:
+#   1. Physics-driven stabilization.
+#   2. Broad data-driven generalization.
+#   3. Targeted fine-tuning on hard cases (high/low ATT).
 
 training:
   # --- HPO values for architecture and regularization ---
   hidden_sizes: [512, 256, 128]
-  dropout_rate: 0.08782614465960897
-  weight_decay: 0.000013881673000805048
-  loss_pinn_weight_stage1: 1.449542754902142
-  loss_pinn_weight_stage2: 0.4527734124202008
+  dropout_rate: 0.0878
+  weight_decay: 0.0000138
   
-  # --- NEW: Differential Learning Rates for Stability ---
-  learning_rate_cbf: 0.0025          # Higher LR for the stable MLP stream
-  learning_rate_att: 0.0005          # Lower LR for the sensitive Transformer stream
-  learning_rate_stage2_cbf: 0.0001
-  learning_rate_stage2_att: 0.00005
+  # --- Differential Learning Rates for Stability ---
+  learning_rate_cbf: 0.0025          # LR for foundational stages (0 & 1)
+  learning_rate_att: 0.0005          # LR for foundational stages (0 & 1)
+  learning_rate_stage2_cbf: 0.0001   # Reduced LR for fine-tuning (Stage 2)
+  learning_rate_stage2_att: 0.00005  # Reduced LR for fine-tuning (Stage 2)
 
   # --- Production run parameters ---
   batch_size: 8192
   n_ensembles: 5
-  
-  # --- NEW: Rebalanced Training Schedule for Better Curriculum ---
-  n_epochs_stage1: 20  # A short, physics-guided "warm-up"
-  n_epochs_stage2: 80  # The main, long fine-tuning phase
-  
   validation_steps_per_epoch: 50
   norm_type: "batch"
-  pre_estimator_loss_weight_stage1: 1.0 
+
+  # ==========================================================
+  # --- NEW 3-STAGE CURRICULUM DEFINITION ---
+  # ==========================================================
+  
+  # Stage 0: Physics-Driven Stabilization (Unbiased Sampler)
+  n_epochs_stage0_pretrain: 25
+  loss_pinn_weight_stage0: 2.0
+  pre_estimator_loss_weight_stage0: 1.0
+
+  # Stage 1: Data-Driven Generalization (Unbiased Sampler)
+  n_epochs_stage1: 75
+  loss_pinn_weight_stage1: 0.1
+  pre_estimator_loss_weight_stage1: 0.0
+
+  # Stage 2: Hard-Case Fine-Tuning (Weighted Sampler)
+  n_epochs_stage2: 30
+  loss_pinn_weight_stage2: 0.1
   pre_estimator_loss_weight_stage2: 0.0
+  loss_weight_att_stage2: 8.0 # Override default ATT weight for this stage
+  # ==========================================================
+
+  # --- Default Loss Weights (used unless overridden by a stage) ---
+  loss_weight_cbf: 1.0
+  loss_weight_att: 1.0
+  
+  # --- Other Model/Loss Parameters ---
+  log_var_cbf_min: -6.0; log_var_cbf_max: 7.0
+  log_var_att_min: -2.0; log_var_att_max: 14.0
+  loss_log_var_reg_lambda: 0.0
   use_transformer_temporal_model: true
-  m0_input_feature_model: false
   use_focused_transformer_model: true
   transformer_d_model_focused: 32
   transformer_nhead_model: 4
   transformer_nlayers_model: 2
-  log_var_cbf_min: -6.0
-  log_var_cbf_max: 7.0
-  log_var_att_min: -2.0
-  log_var_att_max: 14.0
-  loss_weight_cbf: 1.0
-  loss_weight_att: 2.0
-  loss_log_var_reg_lambda: 0.0
 
 data:
-  # --- Controls for using the offline dataset ---
+  # This curriculum requires the offline dataset for the weighted sampler
   use_offline_dataset: true
   offline_dataset_path: "asl_offline_dataset_10M"
-
-  # --- Standard data parameters ---
   pld_values: [500, 1000, 1500, 2000, 2500, 3000]
-  att_ranges_config:
-    - [500, 1500, "Short ATT"]
-    - [1500, 2500, "Medium ATT"]
-    - [2500, 4000, "Long ATT"]
-  include_m0_in_training_data: false
+  num_samples: 1000000 # for norm_stats calculation
 
 simulation:
   T1_artery: 1850.0
-  T2_factor: 1.0
-  alpha_BS1: 1.0
-  alpha_PCASL: 0.85
-  alpha_VSASL: 0.56
   T_tau: 1800.0
-  reference_CBF: 60.0
-
-# Optuna section is not needed for the final training run.
-optuna:
-  optuna_n_trials: 0
-
-evaluation:
-  n_test_subjects_per_att_range: 200
-  n_clinical_scenario_subjects: 100
-  clinical_scenario_definitions:
-    healthy_adult: {cbf_range: [50.0, 80.0], att_range: [800.0, 1800.0], snr: 8.0}
-    elderly_patient: {cbf_range: [30.0, 60.0], att_range: [1500.0, 3000.0], snr: 5.0}
-    stroke_patient: {cbf_range: [10.0, 40.0], att_range: [2000.0, 4000.0], snr: 3.0}
-    tumor_patient: {cbf_range: [20.0, 120.0], att_range: [1000.0, 3000.0], snr: 6.0}
-
-logging:
-  level: "INFO"
+  # other sim params are not strictly needed here but are good for record-keeping
+  T2_factor: 1.0; alpha_BS1: 1.0; alpha_PCASL: 0.85; alpha_VSASL: 0.56
 
 wandb:
-  wandb_project: "asl-multiverse-production"
+  wandb_project: "asl-multiverse-production-final"
   wandb_entity: null

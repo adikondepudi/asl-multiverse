@@ -272,70 +272,58 @@ class EnhancedASLTrainer:
                  weight_decay: float = 1e-5, batch_size: int = 256, n_ensembles: int = 5,
                  device: str = 'cuda' if torch.cuda.is_available() else 'cpu',
                  n_plds_for_model: Optional[int] = None, m0_input_feature_model: bool = False):
-        self.device = torch.device(device) # Ensure device is a torch.device object
+        self.device = torch.device(device)
         self.batch_size = batch_size
+        self.model_config = model_config # Store the full config
 
-        learning_rate = model_config.get('learning_rate', 0.001)
+        # Extract base learning rates for foundational stages
+        self.lr_cbf_base = model_config.get('learning_rate_cbf', 0.001)
+        self.lr_att_base = model_config.get('learning_rate_att', 0.001)
+        # Extract learning rates for the fine-tuning stage
+        self.lr_stage2_cbf = model_config.get('learning_rate_stage2_cbf', self.lr_cbf_base / 10.0)
+        self.lr_stage2_att = model_config.get('learning_rate_stage2_att', self.lr_att_base / 10.0)
 
-        self.lr_cbf = model_config.get('learning_rate_cbf', learning_rate)
-        self.lr_att = model_config.get('learning_rate_att', learning_rate)
-        self.lr_stage2_cbf = model_config.get('learning_rate_stage2_cbf', self.lr_cbf / 10.0)
-        self.lr_stage2_att = model_config.get('learning_rate_stage2_att', self.lr_att / 10.0)
-
-        self.learning_rate = learning_rate # Keep this for backward compatibility if needed elsewhere
         self.weight_decay = weight_decay
-
         self.n_ensembles = n_ensembles
-        self.n_plds_for_model = n_plds_for_model
-        self.m0_input_feature_model = m0_input_feature_model
-        self.input_size_model = input_size
-
-        self.lr_cbf = model_config.get('learning_rate_cbf', learning_rate)
-        self.lr_att = model_config.get('learning_rate_att', learning_rate)
-        self.lr_stage2_cbf = model_config.get('learning_rate_stage2_cbf', self.lr_cbf / 10.0)
-        self.lr_stage2_att = model_config.get('learning_rate_stage2_att', self.lr_att / 10.0)
-
-        self.learning_rate = learning_rate
-        self.weight_decay = weight_decay
-        self.model_config = model_config
         self.validation_steps_per_epoch = model_config.get('validation_steps_per_epoch', 50)
         self.scalers = [torch.cuda.amp.GradScaler() for _ in range(self.n_ensembles)]
 
         self.models = [model_class(**model_config).to(self.device) for _ in range(n_ensembles)]
-
-        # Compile each model in the ensemble
         print("INFO: Compiling models with torch.compile() for optimized performance...")
         self.models = [torch.compile(m, mode="max-autotune") for m in self.models]
         print("INFO: Model compilation complete.")
 
-
         self.best_states = [None] * self.n_ensembles
+        
+        # Optimizers will be created just-in-time for each stage
         self.optimizers = []
-        for model in self.models:
-            param_groups = model.get_param_groups() # Use the new method from Change 2
-            # Create a list of parameter groups for the optimizer
-            optimizer_param_groups = [
-                {'params': group['params'], 'lr': self.lr_cbf if group['name'] == 'cbf_stream' else self.lr_att}
-                for group in param_groups
-            ]
-            self.optimizers.append(torch.optim.AdamW(optimizer_param_groups, weight_decay=self.weight_decay))
         self.schedulers = [] 
         
+        # Initialize the loss function with default weights from config
         loss_params = {
-            'w_cbf': model_config.get('loss_weight_cbf', 1.0), 'w_att': model_config.get('loss_weight_att', 1.0),
-            'log_var_reg_lambda': model_config.get('loss_log_var_reg_lambda', 0.0), 'focal_gamma': model_config.get('focal_gamma', 1.5),
-            'pinn_weight': model_config.get('loss_pinn_weight_stage1', model_config.get('loss_pinn_weight', 0.0)),
-            'model_params': model_config, 'pre_estimator_loss_weight': model_config.get('pre_estimator_loss_weight', 0.5)}
+            'w_cbf': model_config.get('loss_weight_cbf', 1.0), 
+            'w_att': model_config.get('loss_weight_att', 1.0),
+            'log_var_reg_lambda': model_config.get('loss_log_var_reg_lambda', 0.0), 
+            'focal_gamma': model_config.get('focal_gamma', 1.5),
+            'model_params': model_config,
+            # PINN/Pre-est weights will be set dynamically per stage
+        }
         self.custom_loss_fn = CustomLoss(**loss_params)
 
-        self.train_losses = defaultdict(list); self.val_metrics = defaultdict(list); self.global_step = 0; self.norm_stats = None
+        self.train_losses = defaultdict(list)
+        self.val_metrics = defaultdict(list)
+        self.global_step = 0
+        self.norm_stats = None
 
     def train_ensemble(self,
                    train_loaders: List[DataLoader], val_loaders: List[Optional[DataLoader]],
                    epoch_schedule: List[int], steps_per_epoch_schedule: List[Optional[int]],
                    early_stopping_patience: int = 20, optuna_trial: Optional[Any] = None) -> Dict[str, Any]:
         
-        histories = defaultdict(lambda: defaultdict(list)); self.global_step = 0; global_epoch_counter = 0 
+        histories = defaultdict(lambda: defaultdict(list))
+        self.global_step = 0
+        global_epoch_counter = 0 
+        
         if not train_loaders:
             logger.error("train_loaders is empty. Aborting training.")
             return {'final_mean_train_loss': float('nan'), 'final_mean_val_loss': float('nan'), 'all_histories': histories}
@@ -345,46 +333,59 @@ class EnhancedASLTrainer:
         num_stages = len(epoch_schedule)
 
         for stage_idx, train_loader in enumerate(train_loaders):
-            steps_per_epoch = steps_per_epoch_schedule[stage_idx]
             n_epochs_stage = epoch_schedule[stage_idx]
+            steps_per_epoch = steps_per_epoch_schedule[stage_idx]
             
             if steps_per_epoch is None:
                 steps_per_epoch = len(train_loader)
                 logger.info(f"  Using map-style dataset. One epoch will be {steps_per_epoch} steps (full dataset).")
-
-            total_steps_stage = steps_per_epoch * n_epochs_stage
             
-            # All stages except the last one are 'foundational'. The last one is 'fine-tuning'.
-            is_fine_tuning_stage = (stage_idx == num_stages - 1) and num_stages > 1
-
-            if not is_fine_tuning_stage:
-                # Apply settings for foundational stages (stage 1 config keys)
-                stage_title = f"Foundational Training (Stage {stage_idx + 1}/{num_stages})"
-                pinn_weight = self.model_config.get('loss_pinn_weight_stage1', 1.0)
-                pre_est_weight = self.model_config.get('pre_estimator_loss_weight_stage1', 1.0)
-                stage_max_lrs = [self.lr_cbf, self.lr_att]
-            else:
-                # Apply settings for the final, fine-tuning stage (stage 2 config keys)
-                stage_title = f"Fine-tuning (Stage {stage_idx + 1}/{num_stages})"
+            # --- DYNAMIC STAGE CONFIGURATION ---
+            if stage_idx == 0: # Physics Stabilization
+                stage_title = f"Curriculum Stage 0: Physics Stabilization ({n_epochs_stage} epochs)"
+                pinn_weight = self.model_config.get('loss_pinn_weight_stage0', 2.0)
+                pre_est_weight = self.model_config.get('pre_estimator_loss_weight_stage0', 1.0)
+                self.custom_loss_fn.w_att = self.model_config.get('loss_weight_att', 1.0) # Reset to default
+                stage_max_lrs = [self.lr_cbf_base, self.lr_att_base]
+            elif stage_idx == 1: # Data Generalization
+                stage_title = f"Curriculum Stage 1: Data Generalization ({n_epochs_stage} epochs)"
+                pinn_weight = self.model_config.get('loss_pinn_weight_stage1', 0.1)
+                pre_est_weight = self.model_config.get('pre_estimator_loss_weight_stage1', 0.0)
+                self.custom_loss_fn.w_att = self.model_config.get('loss_weight_att', 1.0) # Reset to default
+                stage_max_lrs = [self.lr_cbf_base, self.lr_att_base]
+            else: # Stage 2: Hard-Case Fine-Tuning
+                stage_title = f"Curriculum Stage 2: Hard-Case Fine-Tuning ({n_epochs_stage} epochs)"
                 pinn_weight = self.model_config.get('loss_pinn_weight_stage2', 0.1)
                 pre_est_weight = self.model_config.get('pre_estimator_loss_weight_stage2', 0.0)
+                # Override the ATT loss weight for this stage only
+                self.custom_loss_fn.w_att = self.model_config.get('loss_weight_att_stage2', 8.0)
                 stage_max_lrs = [self.lr_stage2_cbf, self.lr_stage2_att]
 
+            # Update the loss function with the parameters for the current stage
             self.custom_loss_fn.pinn_weight = pinn_weight
             self.custom_loss_fn.pre_estimator_loss_weight = pre_est_weight
 
-            logger.info(f"--- {stage_title}: {n_epochs_stage} epochs ---")
-            logger.info(f"  PINN Weight: {pinn_weight}, Pre-Estimator Weight: {pre_est_weight}")
-            logger.info(f"  Max LRs: CBF={stage_max_lrs[0]}, ATT={stage_max_lrs[1]}")
+            logger.info(f"--- {stage_title} ---")
+            logger.info(f"  PINN Weight: {pinn_weight}, Pre-Estimator Weight: {pre_est_weight}, ATT Loss Weight: {self.custom_loss_fn.w_att}")
+            logger.info(f"  Max LRs: CBF={stage_max_lrs[0]:.6f}, ATT={stage_max_lrs[1]:.6f}")
 
-            # This single scheduler creation now works for all stages
+            # Re-create optimizers and schedulers for the current stage with the correct LRs and total steps
+            self.optimizers = []
+            for model in self.models:
+                param_groups = model.get_param_groups()
+                optimizer_param_groups = [
+                    {'params': group['params'], 'lr': stage_max_lrs[0] if group['name'] == 'cbf_stream' else stage_max_lrs[1]}
+                    for group in param_groups
+                ]
+                self.optimizers.append(torch.optim.AdamW(optimizer_param_groups, weight_decay=self.weight_decay))
+            
+            total_steps_stage = steps_per_epoch * n_epochs_stage
             self.schedulers = [
                 torch.optim.lr_scheduler.OneCycleLR(opt, max_lr=stage_max_lrs, total_steps=total_steps_stage)
                 for opt in self.optimizers
             ]
 
             current_val_loader = val_loaders[stage_idx] if stage_idx < len(val_loaders) else None
-            logger.info(f"  Training for {n_epochs_stage} epochs with {steps_per_epoch} train batches per epoch.")
             best_val_losses_stage = [float('inf')] * self.n_ensembles
             patience_counters_stage = [0] * self.n_ensembles
             
