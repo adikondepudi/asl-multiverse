@@ -1,5 +1,3 @@
-# main.py
-
 import torch
 import numpy as np
 from pathlib import Path
@@ -30,9 +28,6 @@ from asl_simulation import ASLParameters
 from enhanced_simulation import RealisticASLSimulator
 from asl_trainer import EnhancedASLTrainer, ASLIterableDataset, ASLInMemoryDataset
 from torch.utils.data import DataLoader, WeightedRandomSampler
-from comparison_framework import ComprehensiveComparison
-from performance_metrics import ProposalEvaluator
-from single_repeat_validation import SingleRepeatValidator, run_single_repeat_validation_main
 from utils import engineer_signal_features, ParallelStreamingStatsCalculator
 
 script_logger = logging.getLogger(__name__)

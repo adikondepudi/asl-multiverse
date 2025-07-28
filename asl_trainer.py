@@ -322,43 +322,43 @@ class EnhancedASLTrainer:
             return {'final_mean_train_loss': float('nan'), 'final_mean_val_loss': float('nan'), 'all_histories': histories}
         
         self.overall_best_val_losses = [float('inf')] * self.n_ensembles
+        
+        num_stages = len(epoch_schedule)
 
         for stage_idx, train_loader in enumerate(train_loaders):
             steps_per_epoch = steps_per_epoch_schedule[stage_idx]
             n_epochs_stage = epoch_schedule[stage_idx]
             
-            # +++ THIS IS THE FIX +++
             if steps_per_epoch is None:
-                # This occurs when using an in-memory map-style dataset.
-                # One epoch means a full pass over the data.
                 steps_per_epoch = len(train_loader)
                 logger.info(f"  Using map-style dataset. One epoch will be {steps_per_epoch} steps (full dataset).")
 
             total_steps_stage = steps_per_epoch * n_epochs_stage
-
-            if stage_idx == 0:
-                self.custom_loss_fn.pinn_weight = self.model_config.get('loss_pinn_weight_stage1', 1.0)
-                self.custom_loss_fn.pre_estimator_loss_weight = self.model_config.get('pre_estimator_loss_weight_stage1', 1.0)
-                
-                # Define the different max LRs for each parameter group for Stage 1
-                stage_max_lrs = [self.lr_cbf, self.lr_att]
-
-                logger.info(f"--- STAGE 1: Foundational Pre-training ({n_epochs_stage} epochs) ---")
-                logger.info(f"  PINN Weight: {self.custom_loss_fn.pinn_weight}, Pre-Estimator Weight: {self.custom_loss_fn.pre_estimator_loss_weight}")
-                logger.info(f"  Max LRs: CBF={stage_max_lrs[0]}, ATT={stage_max_lrs[1]}")
             
-            elif stage_idx == 1:
-                self.custom_loss_fn.pinn_weight = self.model_config.get('loss_pinn_weight_stage2', 0.1)
-                self.custom_loss_fn.pre_estimator_loss_weight = self.model_config.get('pre_estimator_loss_weight_stage2', 0.0)
-                
-                # Define the different max LRs for each parameter group for Stage 2
+            # All stages except the last one are 'foundational'. The last one is 'fine-tuning'.
+            is_fine_tuning_stage = (stage_idx == num_stages - 1) and num_stages > 1
+
+            if not is_fine_tuning_stage:
+                # Apply settings for foundational stages (stage 1 config keys)
+                stage_title = f"Foundational Training (Stage {stage_idx + 1}/{num_stages})"
+                pinn_weight = self.model_config.get('loss_pinn_weight_stage1', 1.0)
+                pre_est_weight = self.model_config.get('pre_estimator_loss_weight_stage1', 1.0)
+                stage_max_lrs = [self.lr_cbf, self.lr_att]
+            else:
+                # Apply settings for the final, fine-tuning stage (stage 2 config keys)
+                stage_title = f"Fine-tuning (Stage {stage_idx + 1}/{num_stages})"
+                pinn_weight = self.model_config.get('loss_pinn_weight_stage2', 0.1)
+                pre_est_weight = self.model_config.get('pre_estimator_loss_weight_stage2', 0.0)
                 stage_max_lrs = [self.lr_stage2_cbf, self.lr_stage2_att]
 
-                logger.info(f"--- STAGE 2: Full-Spectrum Fine-tuning ({n_epochs_stage} epochs) ---")
-                logger.info(f"  PINN Weight: {self.custom_loss_fn.pinn_weight}, Pre-Estimator Weight: {self.custom_loss_fn.pre_estimator_loss_weight}")
-                logger.info(f"  Max LRs: CBF={stage_max_lrs[0]}, ATT={stage_max_lrs[1]}")
+            self.custom_loss_fn.pinn_weight = pinn_weight
+            self.custom_loss_fn.pre_estimator_loss_weight = pre_est_weight
 
-            # This single scheduler creation now works for both stages
+            logger.info(f"--- {stage_title}: {n_epochs_stage} epochs ---")
+            logger.info(f"  PINN Weight: {pinn_weight}, Pre-Estimator Weight: {pre_est_weight}")
+            logger.info(f"  Max LRs: CBF={stage_max_lrs[0]}, ATT={stage_max_lrs[1]}")
+
+            # This single scheduler creation now works for all stages
             self.schedulers = [
                 torch.optim.lr_scheduler.OneCycleLR(opt, max_lr=stage_max_lrs, total_steps=total_steps_stage)
                 for opt in self.optimizers
