@@ -245,7 +245,7 @@ def run_comprehensive_asl_research(config: ResearchConfig, output_dir: Path, nor
     use_offline = config.use_offline_dataset
     offline_path = config.offline_dataset_path
     
-    num_workers = min(os.cpu_count() or 1, 16)
+    num_workers = min(os.cpu_count() or 1, 32)
     script_logger.info(f"Using a capped number of {num_workers} CPU cores for data loading.")
 
     train_loaders = []
