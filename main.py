@@ -91,6 +91,7 @@ class ResearchConfig:
     clinical_scenario_definitions: Dict[str, Dict[str, Any]] = field(default_factory=lambda: {'healthy_adult': {'cbf_range': (50.0, 80.0), 'att_range': (800.0, 1800.0), 'snr': 8.0},'elderly_patient': {'cbf_range': (30.0, 60.0), 'att_range': (1500.0, 3000.0), 'snr': 5.0},'stroke_patient': {'cbf_range': (10.0, 40.0), 'att_range': (2000.0, 4000.0), 'snr': 3.0},'tumor_patient': {'cbf_range': (20.0, 120.0), 'att_range': (1000.0, 3000.0), 'snr': 6.0}})
     wandb_project: str = "asl-multiverse-project"
     wandb_entity: Optional[str] = None
+    num_samples: int = 1000000
 
 def create_att_weighted_sampler(dataset: ASLInMemoryDataset) -> WeightedRandomSampler:
     """Creates a sampler that over-samples the tails of the ATT distribution."""
@@ -401,7 +402,7 @@ if __name__ == "__main__":
         num_stat_workers = os.cpu_count() or 1
 
         stats_calculator = ParallelStreamingStatsCalculator(
-            simulator=simulator, plds=plds_np, num_samples=1000000, num_workers=num_stat_workers
+            simulator=simulator, plds=plds_np, num_samples=config_obj.num_samples, num_workers=num_stat_workers
         )
         norm_stats = stats_calculator.calculate()
         

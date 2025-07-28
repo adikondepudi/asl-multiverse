@@ -61,6 +61,7 @@ data:
     - [1500, 2500, "Medium ATT"]
     - [2500, 4000, "Long ATT"]
   include_m0_in_training_data: false
+  num_samples: 1000000
 
 simulation:
   T1_artery: 1850.0
