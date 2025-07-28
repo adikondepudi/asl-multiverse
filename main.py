@@ -368,7 +368,7 @@ if __name__ == "__main__":
         num_stat_workers = os.cpu_count() or 1
 
         stats_calculator = ParallelStreamingStatsCalculator(
-            simulator=simulator, plds=plds_np, num_samples=20000, num_workers=num_stat_workers
+            simulator=simulator, plds=plds_np, num_samples=1000000, num_workers=num_stat_workers
         )
         norm_stats = stats_calculator.calculate()
         
