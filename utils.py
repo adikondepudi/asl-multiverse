@@ -115,7 +115,7 @@ class ParallelStreamingStatsCalculator:
             # Use imap_unordered for efficiency, as order doesn't matter for stats
             results_iterator = pool.imap_unordered(_worker_generate_sample, worker_args)
             
-            for pcasl, vsasl, cbf, att, amp in tqdm(results_iterator, total=self.num_samples, desc="Streaming Stats"):
+            for pcasl, vsasl, cbf, att, amp in tqdm(results_iterator, total=len(worker_args), desc="Streaming Stats"):
                 self.count += 1
                 self.pcasl_mean, self.pcasl_m2 = self._update_stats((self.pcasl_mean, self.pcasl_m2), pcasl)
                 self.vsasl_mean, self.vsasl_m2 = self._update_stats((self.vsasl_mean, self.vsasl_m2), vsasl)

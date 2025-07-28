@@ -18,6 +18,13 @@ training:
   # - Stage 0 (pre-train): Uses learning_rate
   # - Stage 1 (foundational): Uses learning_rate
   # - Stage 2 (fine-tune): Uses learning_rate_stage2
+
+  # --- Learning Rates ---
+  learning_rate_cbf: 0.0025
+  learning_rate_att: 0.0005
+  learning_rate_stage2_cbf: 0.0001
+  learning_rate_stage2_att: 0.00005
+
   n_epochs_stage0_pretrain: 50
   steps_per_epoch_stage0_pretrain: 1000
   n_epochs_stage1: 80
@@ -26,8 +33,6 @@ training:
   steps_per_epoch_stage2: 500
   
   # --- Other Production Parameters ---
-  learning_rate: 0.0025
-  learning_rate_stage2: 0.0001
   batch_size: 8192
   n_ensembles: 5
   validation_steps_per_epoch: 50

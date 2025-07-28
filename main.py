@@ -227,68 +227,85 @@ def run_comprehensive_asl_research(config: ResearchConfig, output_dir: Path, nor
     asl_params_sim = ASLParameters(**{k:v for k,v in asdict(config).items() if k in ASLParameters.__annotations__})
     simulator = RealisticASLSimulator(params=asl_params_sim)
 
-    script_logger.info("Starting two-stage ensemble training")
+    script_logger.info("Starting multi-stage ensemble training...") # <-- CORRECTED LOG MESSAGE
     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
     script_logger.info(f"Using device: {device}")
-
-    with open(args.config_file, 'r') as f_yaml:
-        config_from_yaml = yaml.safe_load(f_yaml) or {}
-    data_config = config_from_yaml.get('data', {})
-    use_offline = data_config.get('use_offline_dataset', False)
-    offline_path = data_config.get('offline_dataset_path', None)
+    
+    # This block was removed as it's redundant and buggy.
+    # The 'config' object already contains these values.
+    use_offline = config.use_offline_dataset
+    offline_path = config.offline_dataset_path
     
     num_workers = min(os.cpu_count() or 1, 16)
     script_logger.info(f"Using a capped number of {num_workers} CPU cores for data loading.")
 
-    train_loaders, epoch_schedule, steps_per_epoch_schedule = [], [], []
+    train_loaders = []
+    epoch_schedule = []
+    steps_per_epoch_schedule = []
+
+    # Dynamically build the schedule from the config file
+    stage_configs = [
+        ('n_epochs_stage0_pretrain', 'steps_per_epoch_stage0_pretrain', 'training_noise_levels_stage1'),
+        ('n_epochs_stage1', 'steps_per_epoch_stage1', 'training_noise_levels_stage1'),
+        ('n_epochs_stage2', 'steps_per_epoch_stage2', 'training_noise_levels_stage2')
+    ]
 
     if use_offline and offline_path:
         script_logger.info(f"Using OFFLINE In-Memory dataset with Attribute-Weighted Sampling from: {offline_path}")
         full_dataset = ASLInMemoryDataset(data_dir=offline_path, norm_stats=norm_stats)
         att_sampler = create_att_weighted_sampler(full_dataset)
-        
-        # Sampler is incompatible with shuffle=True. The sampler handles random sampling.
         train_loader = DataLoader(full_dataset, batch_size=config.batch_size, num_workers=num_workers,
                                   pin_memory=True, persistent_workers=(num_workers > 0), sampler=att_sampler)
         
-        # When using a sampler with replacement, an epoch is defined by a fixed number of steps.
-        epoch_schedule = [config.n_epochs_stage1, config.n_epochs_stage2]
-        steps_per_epoch_schedule = [config.steps_per_epoch_stage1, config.steps_per_epoch_stage2]
-        train_loaders = [train_loader, train_loader]
+        for n_epochs_key, steps_key, _ in stage_configs:
+            n_epochs = getattr(config, n_epochs_key, 0)
+            if n_epochs > 0:
+                epoch_schedule.append(n_epochs)
+                steps_per_epoch_schedule.append(getattr(config, steps_key))
+                train_loaders.append(train_loader)
 
     else:
         script_logger.info("Using ON-THE-FLY IterableDataset for training.")
-        train_dataset_s1 = ASLIterableDataset(simulator, plds_np, config.training_noise_levels_stage1, norm_stats=norm_stats)
-        train_dataset_s2 = ASLIterableDataset(simulator, plds_np, config.training_noise_levels_stage2, norm_stats=norm_stats)
-        
-        train_loader_s1 = DataLoader(train_dataset_s1, batch_size=config.batch_size, num_workers=num_workers, pin_memory=True, persistent_workers=(num_workers > 0), prefetch_factor=4 if num_workers > 0 else None)
-        train_loader_s2 = DataLoader(train_dataset_s2, batch_size=config.batch_size, num_workers=num_workers, pin_memory=True, persistent_workers=(num_workers > 0), prefetch_factor=4 if num_workers > 0 else None)
-        
-        train_loaders = [train_loader_s1, train_loader_s2]
-        epoch_schedule = [config.n_epochs_stage1, config.n_epochs_stage2]
-        steps_per_epoch_schedule = [config.steps_per_epoch_stage1, config.steps_per_epoch_stage2]
+        for n_epochs_key, steps_key, noise_key in stage_configs:
+            n_epochs = getattr(config, n_epochs_key, 0)
+            if n_epochs > 0:
+                noise_levels = getattr(config, noise_key)
+                iterable_dataset = ASLIterableDataset(simulator, plds_np, noise_levels, norm_stats=norm_stats)
+                loader = DataLoader(iterable_dataset, batch_size=config.batch_size, num_workers=num_workers, pin_memory=True, persistent_workers=(num_workers > 0))
+                
+                epoch_schedule.append(n_epochs)
+                steps_per_epoch_schedule.append(getattr(config, steps_key))
+                train_loaders.append(loader)
 
-    # For validation, always use an unbiased, on-the-fly iterable dataset
     val_dataset = ASLIterableDataset(simulator, plds_np, config.training_noise_levels_stage1, norm_stats=norm_stats)
-    val_loader = DataLoader(val_dataset, batch_size=config.batch_size * 2, num_workers=num_workers, pin_memory=True, persistent_workers=(num_workers > 0), prefetch_factor=4 if num_workers > 0 else None)
+    val_loader = DataLoader(val_dataset, batch_size=config.batch_size * 2, num_workers=num_workers, pin_memory=True, persistent_workers=(num_workers > 0))
     
     base_input_size_nn = num_plds * 2 + 4
     model_creation_config = asdict(config)
     def create_main_model_closure(**kwargs): return EnhancedASLNet(input_size=base_input_size_nn, **kwargs)
 
-    trainer = EnhancedASLTrainer(model_config=model_creation_config, model_class=create_main_model_closure, input_size=base_input_size_nn, learning_rate=config.learning_rate, weight_decay=config.weight_decay, batch_size=config.batch_size, n_ensembles=config.n_ensembles, device=device, n_plds_for_model=num_plds)
+    # Note: Pass the entire config dict here so the trainer can access all LR keys
+    trainer = EnhancedASLTrainer(model_config=model_creation_config, model_class=create_main_model_closure, 
+                                 input_size=base_input_size_nn, 
+                                 # These are now just fallbacks if specific keys aren't in the config
+                                 learning_rate=config.learning_rate, 
+                                 weight_decay=config.weight_decay, 
+                                 batch_size=config.batch_size, 
+                                 n_ensembles=config.n_ensembles, 
+                                 device=device, n_plds_for_model=num_plds)
+    
     trainer.norm_stats = norm_stats
     trainer.custom_loss_fn.norm_stats = norm_stats
     for model in trainer.models: 
         model.to(device)
         model.set_norm_stats(norm_stats)
     
-    script_logger.info(f"Training {config.n_ensembles}-model ensemble...")
+    script_logger.info(f"Training {config.n_ensembles}-model ensemble over {len(epoch_schedule)} stages...")
     training_start_time = time.time()
     
     trainer.train_ensemble(
         train_loaders=train_loaders,
-        val_loaders=[val_loader] * len(epoch_schedule), # Use the same validation loader for all stages
+        val_loaders=[val_loader] * len(epoch_schedule),
         epoch_schedule=epoch_schedule,
         steps_per_epoch_schedule=steps_per_epoch_schedule,
         early_stopping_patience=25 

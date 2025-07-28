@@ -3,6 +3,7 @@ import torch
 import torch.nn as nn
 import torch.optim as optim
 from torch.utils.data import Dataset, DataLoader, WeightedRandomSampler, IterableDataset
+from torch.amp.autocast_mode import autocast
 import numpy as np
 from typing import Dict, List, Tuple, Optional, Union, Any
 from dataclasses import dataclass
@@ -287,7 +288,7 @@ class EnhancedASLTrainer:
         self.weight_decay = weight_decay
         self.model_config = model_config
         self.validation_steps_per_epoch = model_config.get('validation_steps_per_epoch', 50)
-        self.scalers = [torch.cuda.amp.GradScaler() for _ in range(self.n_ensembles)]
+        self.scalers = [torch.amp.GradScaler(device_type=self.device.type) for _ in range(self.n_ensembles)]
 
         self.models = [model_class(**model_config).to(self.device) for _ in range(n_ensembles)]
         self.best_states = [None] * self.n_ensembles
