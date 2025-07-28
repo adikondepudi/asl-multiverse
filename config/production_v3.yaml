@@ -6,7 +6,7 @@ training:
   
   # --- V3 Loss Weights ---
   loss_weight_cbf: 1.0
-  loss_weight_att: 4.0 
+  loss_weight_att: 8.0 
   loss_pinn_weight_stage1: 1.45
   loss_pinn_weight_stage2: 0.45 
   pre_estimator_loss_weight_stage1: 1.0 
@@ -25,9 +25,9 @@ training:
   learning_rate_stage2_cbf: 0.0001
   learning_rate_stage2_att: 0.00005
 
-  n_epochs_stage0_pretrain: 50
+  n_epochs_stage0_pretrain: 70
   steps_per_epoch_stage0_pretrain: 1000
-  n_epochs_stage1: 80
+  n_epochs_stage1: 60
   steps_per_epoch_stage1: 1000
   n_epochs_stage2: 40
   steps_per_epoch_stage2: 500
