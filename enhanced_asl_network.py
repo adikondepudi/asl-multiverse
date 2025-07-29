@@ -443,7 +443,6 @@ class CustomLoss(nn.Module):
         self.pinn_att_weighting_sigma = pinn_att_weighting_sigma
         self.mse_loss = nn.MSELoss()
 
-    # --- DEEPMIND FIX: Return a dictionary of loss components for detailed logging ---
     def forward(self,
                 normalized_input_signal: torch.Tensor,
                 cbf_pred_norm: torch.Tensor, att_pred_norm: torch.Tensor, 
@@ -452,14 +451,14 @@ class CustomLoss(nn.Module):
                 cbf_rough_physical: torch.Tensor, att_rough_physical: torch.Tensor,
                 global_epoch: int) -> Tuple[torch.Tensor, Dict[str, torch.Tensor]]:
         
-        # --- Standard NLL calculation (Aleatoric Uncertainty Loss) ---
-        # cbf_nll_loss = 0.5 * (torch.exp(-cbf_log_var) * (cbf_pred_norm - cbf_true_norm)**2 + cbf_log_var)
-        # att_nll_loss = 0.5 * (torch.exp(-att_log_var) * (att_pred_norm - att_true_norm)**2 + att_log_var)
+        # Prevents both exploding precision and pathologically negative loss.
+        cbf_log_var = torch.clamp(cbf_log_var, min=-10.0, max=10.0)
+        att_log_var = torch.clamp(att_log_var, min=-10.0, max=10.0)
 
-        # Clamp log_var to prevent the precision term (exp(-log_var)) from exploding.
-        # A max of 10 means the precision can't be more than exp(-10), which is still huge but not infinite.
-        cbf_precision = torch.exp(-torch.clamp(cbf_log_var, max=10.0))
-        att_precision = torch.exp(-torch.clamp(att_log_var, max=10.0))
+        # --- Standard NLL calculation (Aleatoric Uncertainty Loss) ---
+        # Now, all uses of cbf_log_var and att_log_var are guaranteed to be within a safe range.
+        cbf_precision = torch.exp(-cbf_log_var)
+        att_precision = torch.exp(-att_log_var)
 
         cbf_nll_loss = 0.5 * (cbf_precision * (cbf_pred_norm - cbf_true_norm)**2 + cbf_log_var)
         att_nll_loss = 0.5 * (att_precision * (att_pred_norm - att_true_norm)**2 + att_log_var)
@@ -474,10 +473,10 @@ class CustomLoss(nn.Module):
 
         # --- Apply weights and combine losses ---
         weighted_cbf_loss = self.w_cbf * cbf_nll_loss
-        att_epoch_weight_factor = self.att_epoch_weight_schedule(global_epoch) 
+        att_epoch_weight_factor = self.att_epoch_weight_schedule(global_epoch)
         weighted_att_loss = self.w_att * att_nll_loss * focal_weight * att_epoch_weight_factor
         total_param_loss = torch.mean(weighted_cbf_loss + weighted_att_loss)
-        
+
         # --- Optional regularization on the magnitude of predicted uncertainty ---
         log_var_regularization = torch.tensor(0.0, device=total_param_loss.device)
         if self.log_var_reg_lambda > 0:
