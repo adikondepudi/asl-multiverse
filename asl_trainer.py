@@ -467,9 +467,22 @@ class EnhancedASLTrainer:
                     logger.info(f"Stage {stage_idx+1}, Epoch {epoch + 1}/{n_epochs_stage}: Mean Active Train Loss = {mean_train_loss_console:.6f}, Mean Active Val Loss (Stage) = {mean_val_loss_console_stage:.6f}")
                 global_epoch_counter += 1
 
+        # for model_idx, state in enumerate(self.best_states):
+        #     if state is not None: self.models[model_idx].load_state_dict(state); logger.info(f"Loaded best overall state for model {model_idx} (Overall Val Loss: {self.overall_best_val_losses[model_idx]:.4f})")
+        #     else: logger.warning(f"No best overall state found for model {model_idx}. Using final state from last trained stage.")
+
         for model_idx, state in enumerate(self.best_states):
-            if state is not None: self.models[model_idx].load_state_dict(state); logger.info(f"Loaded best overall state for model {model_idx} (Overall Val Loss: {self.overall_best_val_losses[model_idx]:.4f})")
-            else: logger.warning(f"No best overall state found for model {model_idx}. Using final state from last trained stage.")
+            if state is not None:
+                # Get the original model from underneath the torch.compile wrapper
+                unwrapped_model = self.models[model_idx]
+                if hasattr(unwrapped_model, '_orig_mod'):
+                    unwrapped_model = unwrapped_model._orig_mod
+                
+                # Load the state_dict into the unwrapped model
+                unwrapped_model.load_state_dict(state)
+                logger.info(f"Loaded best overall state for model {model_idx} (Overall Val Loss: {self.overall_best_val_losses[model_idx]:.4f})")
+            else:
+                logger.warning(f"No best overall state found for model {model_idx}. Using final state from last trained stage.")
 
         final_val_losses_list_overall = [loss for loss in self.overall_best_val_losses if loss != float('inf')]
         final_mean_val_loss_overall = np.nanmean(final_val_losses_list_overall) if final_val_losses_list_overall else float('nan')
