@@ -81,12 +81,17 @@ class ASLSimulator:
         current_alpha_vsasl = alpha_vsasl_val if alpha_vsasl_val is not None else self.params.alpha_VSASL
 
         # Reference signal level for noise calculation (uses potentially overridden params for consistency)
-        sig_level = self._compute_reference_signal(
-            cbf_val=current_cbf, 
-            t1_artery_val=current_t1_artery, 
-            t_tau_val=current_t_tau,
-            alpha_pcasl_val=current_alpha_pcasl
-        )
+        # sig_level = self._compute_reference_signal(
+        #     cbf_val=current_cbf, 
+        #     t1_artery_val=current_t1_artery, 
+        #     t_tau_val=current_t_tau,
+        #     alpha_pcasl_val=current_alpha_pcasl
+        # )
+        # noise_sd = sig_level / tsnr
+
+        # Reference signal level for noise calculation. 
+        # MUST be calculated using the FIXED, base parameters from self.params
+        sig_level = self._compute_reference_signal() # No arguments passed!
         noise_sd = sig_level / tsnr
         
         # Compute noise scaling factors (uses instance params for TR definitions)
