@@ -60,6 +60,14 @@ training:
   transformer_nhead_model: 4
   transformer_nlayers_model: 2
 
+    # --- Other Model/Loss Parameters ---
+  log_var_cbf_min: 0.0
+  log_var_cbf_max: 7.0
+  log_var_att_min: 0.0
+  log_var_att_max: 14.0
+
+  loss_log_var_reg_lambda: 0.001
+
 data:
   # CRITICAL: We need the offline dataset for the Stage 2 weighted sampler to work.
   # The run will fail if this is set to false.

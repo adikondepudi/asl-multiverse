@@ -197,9 +197,9 @@ class EnhancedASLNet(nn.Module):
                  
                  m0_input_feature: bool = False,
                  
-                 log_var_cbf_min: float = -6.0,
+                 log_var_cbf_min: float = 0.0,
                  log_var_cbf_max: float = 7.0,
-                 log_var_att_min: float = -2.0,
+                 log_var_att_min: float = 0.0,
                  log_var_att_max: float = 14.0,
                  **kwargs
                 ):
