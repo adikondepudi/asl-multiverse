@@ -50,7 +50,7 @@ def load_artifacts(results_dir: Path) -> tuple:
     logging.info("Loaded norm_stats.json")
 
     # Load all models in the ensemble
-    models_dir = results_dir / 'trained_models_fixed'
+    models_dir = results_dir / 'trained_models'
     ensemble_models = []
     num_plds = len(config.get('pld_values', []))
     base_input_size = num_plds * 2 + 4
