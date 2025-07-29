@@ -1,3 +1,4 @@
+// FILE: enhanced_asl_network.py
 # enhanced_asl_network.py
 
 import torch
@@ -181,6 +182,7 @@ class EnhancedASLNet(nn.Module):
     - Differentiable Physics-Encoder: Enriches input features with signal sensitivities (dS/dCBF, dS/dATT).
     - Multi-Scale Transformer: Processes temporal information at short and long scales for robust ATT estimation.
     - Cross-Attention: Fuses information between the PCASL and VSASL streams.
+    - NEW: ATT-to-CBF Stream Fusion: Conditions CBF estimation on rich timing features.
     """
     def __init__(self, 
                  input_size: int,
@@ -265,7 +267,9 @@ class EnhancedASLNet(nn.Module):
         )
         self.att_uncertainty = UncertaintyHead(hidden_sizes[1], 1, log_var_min=log_var_att_min, log_var_max=log_var_att_max)
         
-        cbf_mlp_input_size = 1 + self.num_engineered_features
+        # --- CBF Stream Architecture (REVISED with Stream Fusion) ---
+        att_final_feature_size = hidden_sizes[1]
+        cbf_mlp_input_size = 1 + self.num_engineered_features + att_final_feature_size
         self.cbf_mlp = nn.Sequential(
             nn.Linear(cbf_mlp_input_size, 64),
             nn.ReLU(),
@@ -310,12 +314,7 @@ class EnhancedASLNet(nn.Module):
         pcasl_shape_seq = normalized_signal[:, :self.n_plds]
         vsasl_shape_seq = normalized_signal[:, self.n_plds:self.num_raw_signal_features]
 
-        # --- 4. CBF Stream Processing ---
-        cbf_stream_input = torch.cat([amplitude_norm, engineered_features], dim=1)
-        cbf_final_features = self.cbf_mlp(cbf_stream_input)
-        cbf_mean, cbf_log_var = self.cbf_uncertainty(cbf_final_features)
-
-        # --- 5. ATT Stream Processing (with Differentiable Physics-Encoder) ---
+        # --- 4. ATT Stream Processing (with Differentiable Physics-Encoder) ---
         pre_estimator_input = torch.cat([amplitude_physical.detach(), engineered_features], dim=1)
         rough_params = F.softplus(self.pre_estimator(pre_estimator_input))
         cbf_rough, att_rough = rough_params[:, 0:1], rough_params[:, 1:2]
@@ -343,14 +342,20 @@ class EnhancedASLNet(nn.Module):
         pcasl_fused_long = self.pcasl_to_vsasl_cross_attn(query=pcasl_long_out, key_value=vsasl_long_out)
         vsasl_fused_long = self.vsasl_to_pcasl_cross_attn(query=vsasl_long_out, key_value=pcasl_long_out)
 
-        # pcasl_feat_long, vsasl_feat_long = torch.mean(pcasl_fused_long, dim=1), torch.mean(vsasl_fused_long, dim=1)
         pcasl_feat_long, vsasl_feat_long = self.pool_long(pcasl_fused_long), self.pool_long(vsasl_fused_long)
-        # pcasl_feat_short, vsasl_feat_short = torch.mean(pcasl_short_out, dim=1), torch.mean(vsasl_short_out, dim=1)
         pcasl_feat_short, vsasl_feat_short = self.pool_short(pcasl_short_out), self.pool_short(vsasl_short_out)
 
         att_stream_features = torch.cat([pcasl_feat_long, vsasl_feat_long, pcasl_feat_short, vsasl_feat_short], dim=1)
         att_final_features = self.att_mlp(att_stream_features)
         att_mean, att_log_var = self.att_uncertainty(att_final_features)
+        
+        # --- 5. CBF Stream Processing (REVISED with ATT Stream Fusion) ---
+        # Fuse the final features from the ATT stream into the CBF stream.
+        # Use .detach() so that the CBF loss doesn't backpropagate through the entire ATT transformer,
+        # keeping the streams mostly independent but allowing for one-way information flow.
+        cbf_stream_input = torch.cat([amplitude_norm, engineered_features, att_final_features.detach()], dim=1)
+        cbf_final_features = self.cbf_mlp(cbf_stream_input)
+        cbf_mean, cbf_log_var = self.cbf_uncertainty(cbf_final_features)
         
         # Return final predictions AND the rough estimates for the auxiliary loss
         return cbf_mean, att_mean, cbf_log_var, att_log_var, cbf_rough, att_rough
