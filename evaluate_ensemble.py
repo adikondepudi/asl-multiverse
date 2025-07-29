@@ -50,7 +50,7 @@ def load_artifacts(results_dir: Path) -> tuple:
     logging.info("Loaded norm_stats.json")
 
     # Load all models in the ensemble
-    models_dir = results_dir / 'trained_models'
+    models_dir = results_dir / 'trained_models_fixed'
     ensemble_models = []
     num_plds = len(config.get('pld_values', []))
     base_input_size = num_plds * 2 + 4
@@ -163,11 +163,11 @@ def run_evaluation(models: list, config: dict, norm_stats: dict):
         cbf_ls_1, att_ls_1 = fit_conventional(single_signal_ls, plds_np, simulator.params)
         results_collector['LS (1-repeat)'].append([cbf_ls_1, att_ls_1])
         
-        avg_signal_nn = np.mean(repeats_data, axis=0).flatten()
+        avg_signal_nn = np.mean(repeats_data, axis=0).flatten(order='F')
         cbf_nn_4, att_nn_4 = predict_nn(models, avg_signal_nn, num_plds, norm_stats, device)
         results_collector['NN (4-repeat)'].append([cbf_nn_4, att_nn_4])
 
-        single_signal_nn = repeats_data[0].flatten()
+        single_signal_nn = repeats_data[0].flatten(order='F')
         cbf_nn_1, att_nn_1 = predict_nn(models, single_signal_nn, num_plds, norm_stats, device)
         results_collector['NN (1-repeat)'].append([cbf_nn_1, att_nn_1])
 

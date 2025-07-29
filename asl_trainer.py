@@ -421,7 +421,11 @@ class EnhancedASLTrainer:
                             patience_counters_stage[model_idx] = 0
                             if val_loss_for_es < self.overall_best_val_losses[model_idx]:
                                 self.overall_best_val_losses[model_idx] = val_loss_for_es
-                                self.best_states[model_idx] = self.models[model_idx].state_dict()
+                                # self.best_states[model_idx] = self.models[model_idx].state_dict() <-- old way before torch.compile
+                                unwrapped_model = self.models[model_idx]
+                                if hasattr(unwrapped_model, '_orig_mod'):
+                                    unwrapped_model = unwrapped_model._orig_mod
+                                self.best_states[model_idx] = unwrapped_model.state_dict()
                                 logger.debug(f"Model {model_idx} new overall best state saved (Val loss: {val_loss_for_es:.4f})")
                         else:
                             patience_counters_stage[model_idx] += 1

@@ -54,9 +54,9 @@ class ASLSimulator:
         reference_scan_time_single_pld = self.params.TR_PCASL 
 
         return {
-            'VSASL': np.sqrt(total_time_VSASL / reference_scan_time_single_pld),
-            'PCASL': np.sqrt(total_time_PCASL / reference_scan_time_single_pld),
-            'MULTIVERSE': np.sqrt(total_time_MULTIVERSE / reference_scan_time_single_pld)
+            'VSASL': np.sqrt(reference_scan_time_single_pld / total_time_VSASL),
+            'PCASL': np.sqrt(reference_scan_time_single_pld / total_time_PCASL),
+            'MULTIVERSE': np.sqrt(reference_scan_time_single_pld / total_time_MULTIVERSE)
         }
     
     def generate_synthetic_data(self, 
@@ -112,9 +112,9 @@ class ASLSimulator:
             for n in range(n_noise):
                 signals['VSASL'][n,i] = vsasl_sig + noise_sd * noise_scaling['VSASL'] * np.random.randn(n_plds_len)
                 signals['PCASL'][n,i] = pcasl_sig + noise_sd * noise_scaling['PCASL'] * np.random.randn(n_plds_len)
-                # For MULTIVERSE, noise is added to PCASL and VSASL components individually, scaled by MULTIVERSE factor
-                signals['MULTIVERSE'][n,i,:,0] = pcasl_sig + noise_sd * noise_scaling['MULTIVERSE'] * np.random.randn(n_plds_len)
-                signals['MULTIVERSE'][n,i,:,1] = vsasl_sig + noise_sd * noise_scaling['MULTIVERSE'] * np.random.randn(n_plds_len)
+                # For MULTIVERSE, noise is added to PCASL and VSASL components using their respective, correct scaling factors.
+                signals['MULTIVERSE'][n,i,:,0] = pcasl_sig + noise_sd * noise_scaling['PCASL'] * np.random.randn(n_plds_len)
+                signals['MULTIVERSE'][n,i,:,1] = vsasl_sig + noise_sd * noise_scaling['VSASL'] * np.random.randn(n_plds_len)
         
         return signals
     
