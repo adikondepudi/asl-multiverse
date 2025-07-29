@@ -1,5 +1,3 @@
-# adikondepudi-asl-multiverse/run_all_evaluations.py
-
 import nibabel as nib
 import numpy as np
 from pathlib import Path

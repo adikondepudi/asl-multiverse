@@ -1,5 +1,3 @@
-# predict_on_invivo.py
-
 import torch
 import numpy as np
 import nibabel as nib
@@ -13,7 +11,6 @@ from typing import Dict, List, Tuple
 from joblib import Parallel, delayed
 import multiprocessing
 
-# --- Import/Include Necessary Functions from Your Project ---
 from enhanced_asl_network import EnhancedASLNet
 from multiverse_functions import fit_PCVSASL_misMatchPLD_vectInit_pep
 from utils import engineer_signal_features
@@ -42,7 +39,7 @@ def batch_predict_nn(signals_masked: np.ndarray, subject_plds: np.ndarray, model
     This function now pads/resamples the input signal to match the PLD structure
     the neural network was trained on.
     """
-    # --- FIX: Resample subject signal to match model's expected PLDs for robustness ---
+    # Resample subject signal to match model's expected PLDs for robustness
     model_plds_list = config['pld_values']
     num_model_plds = len(model_plds_list)
     num_subject_plds = len(subject_plds)
@@ -86,7 +83,7 @@ def batch_predict_nn(signals_masked: np.ndarray, subject_plds: np.ndarray, model
     cbf_norm_ensemble, att_norm_ensemble = np.mean(cbf_preds_norm, axis=0), np.mean(att_preds_norm, axis=0)
     return denormalize_predictions(cbf_norm_ensemble.squeeze(), att_norm_ensemble.squeeze(), norm_stats)
 
-# --- OPTIMIZATION: Helper function for parallel LS fitting ---
+# Helper function for parallel LS fitting
 def _fit_single_voxel_ls(signal_reshaped, pldti, ls_params, init_guess):
     """Helper function to fit a single voxel, designed for use with joblib."""
     try:
@@ -95,7 +92,7 @@ def _fit_single_voxel_ls(signal_reshaped, pldti, ls_params, init_guess):
     except Exception:
         return np.nan, np.nan
 
-# --- OPTIMIZATION: Rewritten to use joblib for parallel processing ---
+# Rewritten to use joblib for parallel processing 
 def fit_ls_robust(signals_masked: np.ndarray, plds: np.ndarray, config: Dict) -> Tuple[np.ndarray, np.ndarray]:
     """Runs a robust, parallelized LS fit for each voxel in the masked data."""
     pldti = np.column_stack([plds, plds])
@@ -173,7 +170,7 @@ if __name__ == '__main__':
 
     print("--- Loading Model Artifacts ---")
     try:
-        # --- FIX: Robustly load config for potentially Optuna-tuned models ---
+        # Robustly load config for potentially Optuna-tuned models
         with open(model_results_root / 'research_config.json', 'r') as f:
             config = json.load(f)
         
