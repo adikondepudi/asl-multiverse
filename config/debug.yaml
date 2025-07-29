@@ -36,14 +36,14 @@ training:
 
   # Stage 1: Data Generalization (10-15 mins)
   # Goal: See if the model learns from the broader data distribution.
-  n_epochs_stage1: 20
+  n_epochs_stage1: 10
   steps_per_epoch_stage1: 50
   loss_pinn_weight_stage1: 0.1
   pre_estimator_loss_weight_stage1: 0.0
 
   # Stage 2: Hard-Case Fine-Tuning (5-10 mins)
   # Goal: See if the model can adapt to a different data sampling strategy.
-  n_epochs_stage2: 10
+  n_epochs_stage2: 5
   steps_per_epoch_stage2: 50
   loss_pinn_weight_stage2: 0.1
   pre_estimator_loss_weight_stage2: 0.0
