@@ -1,4 +1,3 @@
-// FILE: enhanced_asl_network.py
 # enhanced_asl_network.py
 
 import torch
