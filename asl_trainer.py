@@ -1,3 +1,4 @@
+# FILE: asl_trainer.py
 import torch
 import torch.nn as nn
 import torch.optim as optim
@@ -275,11 +276,11 @@ class EnhancedASLTrainer:
         self.batch_size = batch_size
         self.model_config = model_config # Store the full config
 
-        # Extract base learning rates for foundational stages
-        self.lr_cbf_base = model_config.get('learning_rate_cbf', 0.001)
+        # --- CORRECTED: Directly read LRs from config without calculation ---
+        # The trainer should not derive config values; it should consume them.
+        self.lr_cbf_base = model_config.get('learning_rate_cbf', 0.0) # Default to 0, as it's unused in new arch
         self.lr_att_base = model_config.get('learning_rate_att', 0.001)
-        # Extract learning rates for the fine-tuning stage
-        self.lr_stage2_cbf = model_config.get('learning_rate_stage2_cbf', self.lr_cbf_base / 10.0)
+        self.lr_stage2_cbf = model_config.get('learning_rate_stage2_cbf', 0.0) # Default to 0
         self.lr_stage2_att = model_config.get('learning_rate_stage2_att', self.lr_att_base / 10.0)
 
         self.weight_decay = weight_decay
