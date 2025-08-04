@@ -341,25 +341,23 @@ class EnhancedASLTrainer:
                 logger.info(f"  Using map-style dataset. One epoch will be {steps_per_epoch} steps (full dataset).")
             
             # --- DYNAMIC STAGE CONFIGURATION ---
-            if stage_idx == 0: # Physics Stabilization
-                stage_title = f"Curriculum Stage 0: Physics Stabilization ({n_epochs_stage} epochs)"
-                pinn_weight = self.model_config.get('loss_pinn_weight_stage0', 2.0)
-                pre_est_weight = self.model_config.get('pre_estimator_loss_weight_stage0', 1.0)
+            # --- CORRECTED: Single learning rate setup ---
+            stage_max_lr = 0.0
+            if stage_idx < 2: # Stages 0 and 1
+                stage_title = f"Curriculum Stage {stage_idx}: {'Physics Stabilization' if stage_idx == 0 else 'Data Generalization'} ({n_epochs_stage} epochs)"
+                pinn_weight = self.model_config.get(f'loss_pinn_weight_stage{stage_idx}', 1.0)
+                pre_est_weight = self.model_config.get(f'pre_estimator_loss_weight_stage{stage_idx}', 1.0)
                 self.custom_loss_fn.w_att = self.model_config.get('loss_weight_att', 1.0) # Reset to default
-                stage_max_lrs = [self.lr_cbf_base, self.lr_att_base]
-            elif stage_idx == 1: # Data Generalization
-                stage_title = f"Curriculum Stage 1: Data Generalization ({n_epochs_stage} epochs)"
-                pinn_weight = self.model_config.get('loss_pinn_weight_stage1', 0.1)
-                pre_est_weight = self.model_config.get('pre_estimator_loss_weight_stage1', 0.0)
-                self.custom_loss_fn.w_att = self.model_config.get('loss_weight_att', 1.0) # Reset to default
-                stage_max_lrs = [self.lr_cbf_base, self.lr_att_base]
+                stage_max_lr = self.lr_att_base
             else: # Stage 2: Hard-Case Fine-Tuning
                 stage_title = f"Curriculum Stage 2: Hard-Case Fine-Tuning ({n_epochs_stage} epochs)"
                 pinn_weight = self.model_config.get('loss_pinn_weight_stage2', 0.1)
                 pre_est_weight = self.model_config.get('pre_estimator_loss_weight_stage2', 0.0)
-                # Override the ATT loss weight for this stage only
                 self.custom_loss_fn.w_att = self.model_config.get('loss_weight_att_stage2', 8.0)
-                stage_max_lrs = [self.lr_stage2_cbf, self.lr_stage2_att]
+                stage_max_lr = self.lr_stage2_att
+
+            # This list is now used by the scheduler. Both groups get the same LR.
+            stage_max_lrs = [stage_max_lr, stage_max_lr]
 
             # Update the loss function with the parameters for the current stage
             self.custom_loss_fn.pinn_weight = pinn_weight
@@ -367,14 +365,16 @@ class EnhancedASLTrainer:
 
             logger.info(f"--- {stage_title} ---")
             logger.info(f"  PINN Weight: {pinn_weight}, Pre-Estimator Weight: {pre_est_weight}, ATT Loss Weight: {self.custom_loss_fn.w_att}")
-            logger.info(f"  Max LRs: CBF={stage_max_lrs[0]:.6f}, ATT={stage_max_lrs[1]:.6f}")
+            logger.info(f"  Max LR (for all params): {stage_max_lr:.6f}")
 
             # Re-create optimizers and schedulers for the current stage with the correct LRs and total steps
             self.optimizers = []
             for model in self.models:
+                # With the unified architecture, all params are in the 'att_stream'.
+                # The optimizer setup correctly handles the empty 'cbf_stream'.
                 param_groups = model.get_param_groups()
                 optimizer_param_groups = [
-                    {'params': group['params'], 'lr': stage_max_lrs[0] if group['name'] == 'cbf_stream' else stage_max_lrs[1]}
+                    {'params': group['params'], 'lr': stage_max_lr}
                     for group in param_groups
                 ]
                 self.optimizers.append(torch.optim.AdamW(
