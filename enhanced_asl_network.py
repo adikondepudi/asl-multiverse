@@ -3,7 +3,7 @@
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-from typing import List, Tuple, Optional, Dict, Any
+from typing import List, Tuple, Optional, Dict, Any, Union
 import math
 
 class ResidualBlock(nn.Module):
@@ -69,19 +69,35 @@ class CrossAttentionBlock(nn.Module):
 
 class UncertaintyHead(nn.Module):
     """Uncertainty estimation head with bounded log_var output."""
-    def __init__(self, input_dim: int, output_dim: int, log_var_min: float = -7.0, log_var_max: float = 7.0):
+    def __init__(self, 
+                 input_dim: int, 
+                 output_dim: int, 
+                 log_var_min: Union[float, List[float]] = -7.0, 
+                 log_var_max: Union[float, List[float]] = 7.0):
         super().__init__()
         self.mean = nn.Linear(input_dim, output_dim)
         self.log_var_raw = nn.Linear(input_dim, output_dim) # Predicts raw value for log_var
-        self.log_var_min = log_var_min
-        self.log_var_max = log_var_max
+
+        # Register min/max as buffers so they move to the correct device and are saved with the state_dict
+        if isinstance(log_var_min, list):
+            assert len(log_var_min) == output_dim, "log_var_min list must match output_dim"
+            self.register_buffer('log_var_min_val', torch.tensor(log_var_min, dtype=torch.float32))
+        else:
+            self.register_buffer('log_var_min_val', torch.tensor([log_var_min] * output_dim, dtype=torch.float32))
+
+        if isinstance(log_var_max, list):
+            assert len(log_var_max) == output_dim, "log_var_max list must match output_dim"
+            self.register_buffer('log_var_max_val', torch.tensor(log_var_max, dtype=torch.float32))
+        else:
+            self.register_buffer('log_var_max_val', torch.tensor([log_var_max] * output_dim, dtype=torch.float32))
         
     def forward(self, x: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor]:
         mean = self.mean(x)
         raw_log_var = self.log_var_raw(x)
-        # Scale tanh output to [log_var_min, log_var_max]
-        log_var_range = self.log_var_max - self.log_var_min
-        log_var = self.log_var_min + (torch.tanh(raw_log_var) + 1.0) * 0.5 * log_var_range
+        
+        # Scale tanh output to [log_var_min, log_var_max] for each dimension
+        log_var_range = self.log_var_max_val - self.log_var_min_val
+        log_var = self.log_var_min_val + (torch.tanh(raw_log_var) + 1.0) * 0.5 * log_var_range
         return mean, log_var
 
 def _torch_physical_kinetic_model(
@@ -181,7 +197,7 @@ class EnhancedASLNet(nn.Module):
     - Differentiable Physics-Encoder: Enriches input features with signal sensitivities (dS/dCBF, dS/dATT).
     - Multi-Scale Transformer: Processes temporal information at short and long scales for robust ATT estimation.
     - Cross-Attention: Fuses information between the PCASL and VSASL streams.
-    - NEW: ATT-to-CBF Stream Fusion: Conditions CBF estimation on rich timing features.
+    - REFACTORED: Unified Regression Head: Predicts CBF and ATT jointly from a final, shared feature representation.
     """
     def __init__(self, 
                  input_size: int,
@@ -254,30 +270,27 @@ class EnhancedASLNet(nn.Module):
         self.pool_long = AttentionPooling(self.att_d_model)
         self.pool_short = AttentionPooling(self.att_d_model)
 
-        att_mlp_input_size = self.att_d_model * 4
-        self.att_mlp = nn.Sequential(
-            nn.Linear(att_mlp_input_size, hidden_sizes[0]),
+        # --- REFACTORED: Unified Regression Head ---
+        # This takes the rich temporal features as input.
+        joint_mlp_input_size = self.att_d_model * 4
+        self.joint_mlp = nn.Sequential(
+            nn.Linear(joint_mlp_input_size, hidden_sizes[0]),
             self._get_norm_layer(hidden_sizes[0], norm_type),
             nn.ReLU(),
             nn.Dropout(dropout_rate),
-            nn.Linear(hidden_sizes[0], hidden_sizes[1] * 2), # Double the output for the gate
+            nn.Linear(hidden_sizes[0], hidden_sizes[1] * 2),
             self._get_norm_layer(hidden_sizes[1] * 2, norm_type),
             nn.GLU(dim=1)  # GLU halves the dimension, resulting in size hidden_sizes[1]
         )
-        self.att_uncertainty = UncertaintyHead(hidden_sizes[1], 1, log_var_min=log_var_att_min, log_var_max=log_var_att_max)
-        
-        # --- CBF Stream Architecture (REVISED with Stream Fusion) ---
-        att_final_feature_size = hidden_sizes[1]
-        cbf_mlp_input_size = 1 + self.num_engineered_features + att_final_feature_size
-        self.cbf_mlp = nn.Sequential(
-            nn.Linear(cbf_mlp_input_size, 64),
-            nn.ReLU(),
-            self._get_norm_layer(64, norm_type),
-            nn.Dropout(dropout_rate),
-            nn.Linear(64, 32 * 2),
-            nn.GLU(dim=1)
+
+        # This single head predicts CBF and ATT means and uncertainties from the shared features.
+        # We predict CBF first (dim 0), then ATT (dim 1).
+        self.final_uncertainty_head = UncertaintyHead(
+            input_dim=hidden_sizes[1], 
+            output_dim=2, # For CBF and ATT
+            log_var_min=[log_var_cbf_min, log_var_att_min],
+            log_var_max=[log_var_cbf_max, log_var_att_max]
         )
-        self.cbf_uncertainty = UncertaintyHead(32, 1, log_var_min=log_var_cbf_min, log_var_max=log_var_cbf_max)
 
     def set_norm_stats(self, norm_stats: Dict):
         """A helper method to set the normalization statistics from a dictionary."""
@@ -345,17 +358,18 @@ class EnhancedASLNet(nn.Module):
         pcasl_feat_short, vsasl_feat_short = self.pool_short(pcasl_short_out), self.pool_short(vsasl_short_out)
 
         att_stream_features = torch.cat([pcasl_feat_long, vsasl_feat_long, pcasl_feat_short, vsasl_feat_short], dim=1)
-        att_final_features = self.att_mlp(att_stream_features)
-        att_mean, att_log_var = self.att_uncertainty(att_final_features)
         
-        # --- 5. CBF Stream Processing (REVISED with ATT Stream Fusion) ---
-        # Fuse the final features from the ATT stream into the CBF stream.
-        # Use .detach() so that the CBF loss doesn't backpropagate through the entire ATT transformer,
-        # keeping the streams mostly independent but allowing for one-way information flow.
-        cbf_stream_input = torch.cat([amplitude_norm, engineered_features, att_final_features.detach()], dim=1)
-        cbf_final_features = self.cbf_mlp(cbf_stream_input)
-        cbf_mean, cbf_log_var = self.cbf_uncertainty(cbf_final_features)
+        # --- 5. REFACTORED: Joint Prediction from Unified Features ---
+        joint_features = self.joint_mlp(att_stream_features)
+        # The head returns tensors of shape (batch, 2)
+        all_means, all_log_vars = self.final_uncertainty_head(joint_features)
         
+        # Unpack into separate variables for clarity and to maintain (B, 1) shape
+        cbf_mean = all_means[:, 0:1]
+        att_mean = all_means[:, 1:2]
+        cbf_log_var = all_log_vars[:, 0:1]
+        att_log_var = all_log_vars[:, 1:2]
+
         # Return final predictions AND the rough estimates for the auxiliary loss
         return cbf_mean, att_mean, cbf_log_var, att_log_var, cbf_rough, att_rough
 
@@ -368,21 +382,22 @@ class EnhancedASLNet(nn.Module):
         
     def get_param_groups(self):
         """
-        Separates model parameters into two groups for differential learning rates.
-        - 'cbf_stream' for the simpler MLP-based CBF prediction.
-        - 'att_stream' for the complex Transformer-based ATT prediction.
+        Separates model parameters into groups for differential learning rates.
+        With the new unified architecture, the concept of a separate 'cbf_stream' is
+        obsolete as both parameters are predicted from a shared trunk. We assign all
+        parameters to the 'att_stream' and leave the 'cbf_stream' empty for
+        compatibility with the existing trainer which expects both groups.
         """
-        # --- Parameters for the CBF stream ---
-        cbf_params = list(self.cbf_mlp.parameters()) + list(self.cbf_uncertainty.parameters())
+        # --- 'cbf_stream' is now conceptually empty ---
+        cbf_params = []
         
-        # --- All other parameters belong to the ATT stream ---
+        # --- All other parameters belong to the main 'att_stream' ---
         all_param_ids = set(id(p) for p in self.parameters())
         cbf_param_ids = set(id(p) for p in cbf_params)
         att_param_ids = all_param_ids - cbf_param_ids
         
         att_params = [p for p in self.parameters() if id(p) in att_param_ids]
         
-        # Return a list of dictionaries, as expected by the PyTorch optimizer
         return [
             {'params': cbf_params, 'name': 'cbf_stream'},
             {'params': att_params, 'name': 'att_stream'}

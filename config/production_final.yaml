@@ -1,10 +1,7 @@
 # config/production_final.yaml
 #
 # The definitive configuration for the final, efficient production run.
-# Implements a 3-stage curriculum learning strategy:
-#   1. Physics-driven stabilization.
-#   2. Broad data-driven generalization.
-#   3. Targeted fine-tuning on hard cases (high/low ATT).
+# Implements a 3-stage curriculum learning strategy with a UNIFIED regression head.
 
 training:
   # --- HPO values for architecture and regularization ---
@@ -13,9 +10,9 @@ training:
   weight_decay: 0.0000138
 
   # --- Differential Learning Rates for Stability ---
-  learning_rate_cbf: 0.0025          # LR for foundational stages (0 & 1)
+  # REVISED: With the unified head, only the 'att' LR is used for all parameters.
+  # The 'cbf' LR is now obsolete and has been removed for clarity.
   learning_rate_att: 0.0005          # LR for foundational stages (0 & 1)
-  learning_rate_stage2_cbf: 0.0001   # Reduced LR for fine-tuning (Stage 2)
   learning_rate_stage2_att: 0.00005  # Reduced LR for fine-tuning (Stage 2)
 
   # --- Production run parameters ---
