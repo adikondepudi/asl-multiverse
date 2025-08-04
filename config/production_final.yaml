@@ -51,7 +51,7 @@ training:
   log_var_cbf_max: 7.0
   log_var_att_min: -2.0
   log_var_att_max: 14.0
-  loss_log_var_reg_lambda: 0.0
+  loss_log_var_reg_lambda: 0.001
   use_transformer_temporal_model: true
   use_focused_transformer_model: true
   transformer_d_model_focused: 32

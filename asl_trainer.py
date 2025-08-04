@@ -1,4 +1,3 @@
-# FILE: asl_trainer.py
 import torch
 import torch.nn as nn
 import torch.optim as optim
@@ -377,7 +376,11 @@ class EnhancedASLTrainer:
                     {'params': group['params'], 'lr': stage_max_lrs[0] if group['name'] == 'cbf_stream' else stage_max_lrs[1]}
                     for group in param_groups
                 ]
-                self.optimizers.append(torch.optim.AdamW(optimizer_param_groups, weight_decay=self.weight_decay))
+                self.optimizers.append(torch.optim.AdamW(
+                    optimizer_param_groups, 
+                    weight_decay=self.weight_decay,
+                    betas=(0.9, 0.98) # Default is (0.9, 0.999). Lowering beta2 for faster adaptation.
+                ))
             
             total_steps_stage = steps_per_epoch * n_epochs_stage
             self.schedulers = [
@@ -409,7 +412,7 @@ class EnhancedASLTrainer:
                     # If using map-style, we need a fresh iterator for each model in the same epoch
                     if model_idx < self.n_ensembles - 1: train_loader_iter = iter(train_loader)
 
-                if current_val_loader is not None and current_val_loader.dataset is not None:
+                if current_val_loader is not None and len(current_val_loader.dataset) > 0:
                     for model_idx in range(self.n_ensembles):
                         val_metrics_dict = self._validate(self.models[model_idx], current_val_loader, global_epoch_counter)
                         epoch_val_metrics_all_models.append(val_metrics_dict)
@@ -559,8 +562,14 @@ class EnhancedASLTrainer:
         all_cbf_preds_norm, all_att_preds_norm = [], []; all_cbf_trues_norm, all_att_trues_norm = [], []
         all_cbf_log_vars, all_att_log_vars = [], []
 
+        # For iterable datasets, validation_steps_per_epoch is used.
+        # For map-style datasets, we iterate through the whole thing.
+        is_iterable = isinstance(val_loader.dataset, IterableDataset)
+        val_iterator = islice(val_loader, self.validation_steps_per_epoch) if is_iterable else val_loader
+        total_steps = self.validation_steps_per_epoch if is_iterable else len(val_loader)
+
         with torch.no_grad():
-            pbar_val = tqdm(islice(val_loader, self.validation_steps_per_epoch), total=self.validation_steps_per_epoch, desc=f"Epoch {current_global_epoch+1} Validation", leave=False, ncols=100)
+            pbar_val = tqdm(val_iterator, total=total_steps, desc=f"Epoch {current_global_epoch+1} Validation", leave=False, ncols=100)
             for signals, params_norm in pbar_val:
                 signals, params_norm = signals.to(self.device), params_norm.to(self.device)
                 with torch.amp.autocast(device_type=self.device.type, dtype=torch.bfloat16):
@@ -572,7 +581,7 @@ class EnhancedASLTrainer:
                 all_cbf_trues_norm.append(params_norm[:, 0:1].cpu()); all_att_trues_norm.append(params_norm[:, 1:2].cpu())
                 all_cbf_log_vars.append(cbf_log_var.cpu()); all_att_log_vars.append(att_log_var.cpu())
         
-        avg_loss_val = total_loss_val / self.validation_steps_per_epoch if self.validation_steps_per_epoch > 0 else float('inf')
+        avg_loss_val = total_loss_val / total_steps if total_steps > 0 else float('inf')
         metrics_dict = {'val_loss': avg_loss_val}
 
         if all_cbf_preds_norm and self.norm_stats:
@@ -635,38 +644,48 @@ class EnhancedASLTrainer:
 class ASLInMemoryDataset(torch.utils.data.Dataset):
     """
     A high-performance PyTorch Dataset that pre-loads and pre-processes the
-    entire offline dataset into RAM. This eliminates I/O bottlenecks during training.
+    entire offline dataset into RAM. Can also be used with pre-loaded in-memory data.
     """
-    def __init__(self, data_dir: str, norm_stats: dict):
-        self.data_dir = Path(data_dir)
+    def __init__(self, data_dir: Optional[str], norm_stats: dict):
+        self.data_dir = Path(data_dir) if data_dir else None
         self.norm_stats = norm_stats
         self.num_plds = len(norm_stats.get('pcasl_mean', []))
 
-        # --- HEAVY LIFTING: Load all data chunks into memory ONCE ---
-        logger.info(f"Loading all dataset chunks from {self.data_dir} into RAM...")
-        file_paths = sorted(list(self.data_dir.glob('dataset_chunk_*.npz')))
-        if not file_paths:
-            raise FileNotFoundError(f"No dataset chunks found in {data_dir}. Run generate_offline_dataset.py first.")
-        
-        all_signals = []
-        all_params = []
-        for f in tqdm(file_paths, desc="Loading data chunks"):
-            with np.load(f) as data:
-                all_signals.append(data['signals'])
-                all_params.append(data['params'])
-        
-        self.signals_unnormalized = np.concatenate(all_signals, axis=0)
-        self.params_unnormalized = np.concatenate(all_params, axis=0)
-        logger.info(f"Loaded {len(self.signals_unnormalized)} samples into memory.")
+        if self.data_dir:
+            # --- HEAVY LIFTING: Load all data chunks into memory ONCE ---
+            logger.info(f"Loading all dataset chunks from {self.data_dir} into RAM...")
+            file_paths = sorted(list(self.data_dir.glob('dataset_chunk_*.npz')))
+            if not file_paths:
+                raise FileNotFoundError(f"No dataset chunks found in {data_dir}. Run generate_offline_dataset.py first.")
+            
+            all_signals = []
+            all_params = []
+            for f in tqdm(file_paths, desc="Loading data chunks"):
+                with np.load(f) as data:
+                    all_signals.append(data['signals'])
+                    all_params.append(data['params'])
+            
+            self.signals_unnormalized = np.concatenate(all_signals, axis=0)
+            self.params_unnormalized = np.concatenate(all_params, axis=0)
+            logger.info(f"Loaded {len(self.signals_unnormalized)} samples into memory.")
 
-        # --- ONE-SHOT NORMALIZATION: Process the entire dataset at once ---
-        logger.info("Performing one-shot vectorized normalization on the entire dataset...")
-        self.signals_normalized = self._normalize_signals(self.signals_unnormalized)
-        self.params_normalized = self._normalize_params(self.params_unnormalized)
-        logger.info("Normalization complete. Dataset is ready.")
+            # --- ONE-SHOT NORMALIZATION: Process the entire dataset at once ---
+            logger.info("Performing one-shot vectorized normalization on the entire dataset...")
+            self.signals_normalized = self._normalize_signals(self.signals_unnormalized)
+            self.params_normalized = self._normalize_params(self.params_unnormalized)
+            logger.info("Normalization complete. Dataset is ready.")
 
-        self.signals_tensor = torch.from_numpy(self.signals_normalized.astype(np.float32))
-        self.params_tensor = torch.from_numpy(self.params_normalized.astype(np.float32))
+            self.signals_tensor = torch.from_numpy(self.signals_normalized.astype(np.float32))
+            self.params_tensor = torch.from_numpy(self.params_normalized.astype(np.float32))
+        else:
+            # If no data_dir, initialize empty. Data must be populated manually.
+            logger.info("ASLInMemoryDataset initialized in manual mode. Populate tensors directly.")
+            self.signals_unnormalized = np.array([])
+            self.params_unnormalized = np.array([])
+            self.signals_normalized = np.array([])
+            self.params_normalized = np.array([])
+            self.signals_tensor = torch.empty(0)
+            self.params_tensor = torch.empty(0)
 
     def _normalize_signals(self, signals_unnorm: np.ndarray) -> np.ndarray:
         pcasl_raw = signals_unnorm[:, :self.num_plds]

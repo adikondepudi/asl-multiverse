@@ -241,6 +241,27 @@ def run_comprehensive_asl_research(config: ResearchConfig, output_dir: Path, nor
     script_logger.info("Starting multi-stage ensemble training...")
     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
     script_logger.info(f"Using device: {device}")
+
+    # --- Create a fixed, diverse validation set for stable evaluation ---
+    script_logger.info("Generating a fixed validation dataset for stable evaluation metrics...")
+    validation_data_dict = simulator.generate_diverse_dataset(
+        plds=plds_np, n_subjects=200, 
+        conditions=['healthy', 'stroke', 'tumor', 'elderly'], 
+        noise_levels=[5.0, 10.0, 15.0]
+    )
+    val_signals_raw = validation_data_dict['signals']
+    val_features_eng = engineer_signal_features(val_signals_raw, num_plds)
+    val_signals_full = np.concatenate([val_signals_raw, val_features_eng], axis=1)
+    
+    # Use ASLInMemoryDataset, populated manually
+    val_dataset = ASLInMemoryDataset(data_dir=None, norm_stats=norm_stats)
+    val_dataset.signals_unnormalized = val_signals_full
+    val_dataset.params_unnormalized = validation_data_dict['parameters']
+    val_dataset.signals_normalized = val_dataset._normalize_signals(val_dataset.signals_unnormalized)
+    val_dataset.params_normalized = val_dataset._normalize_params(val_dataset.params_unnormalized)
+    val_dataset.signals_tensor = torch.from_numpy(val_dataset.signals_normalized.astype(np.float32))
+    val_dataset.params_tensor = torch.from_numpy(val_dataset.params_normalized.astype(np.float32))
+    script_logger.info(f"Fixed validation dataset created with {len(val_dataset)} samples.")
     
     use_offline = config.use_offline_dataset
     offline_path = config.offline_dataset_path
@@ -252,7 +273,6 @@ def run_comprehensive_asl_research(config: ResearchConfig, output_dir: Path, nor
     epoch_schedule = []
     steps_per_epoch_schedule = []
 
-    # Define the stages based on the new curriculum
     stage_definitions = [
         ('n_epochs_stage0_pretrain', 'steps_per_epoch_stage0_pretrain', 'standard'),
         ('n_epochs_stage1', 'steps_per_epoch_stage1', 'standard'),
@@ -263,7 +283,6 @@ def run_comprehensive_asl_research(config: ResearchConfig, output_dir: Path, nor
         script_logger.info(f"Using OFFLINE In-Memory dataset from: {offline_path}")
         full_dataset = ASLInMemoryDataset(data_dir=offline_path, norm_stats=norm_stats)
         
-        # --- Create TWO data loaders for the new curriculum ---
         script_logger.info("... creating standard loader for unbiased learning (Stages 0 & 1).")
         standard_loader = DataLoader(full_dataset, batch_size=config.batch_size, num_workers=num_workers,
                                      pin_memory=True, persistent_workers=(num_workers > 0), shuffle=True)
@@ -284,9 +303,7 @@ def run_comprehensive_asl_research(config: ResearchConfig, output_dir: Path, nor
                 script_logger.info(f"Scheduled stage '{n_epochs_key}' for {n_epochs} epochs with '{sampler_type}' loader.")
 
     else:
-        # Fallback to on-the-fly generation if not using the offline dataset
         script_logger.info("Using ON-THE-FLY IterableDataset for all training stages.")
-        # This part remains as a useful fallback, but the new curriculum is designed for the offline dataset.
         stage_noise_levels = [
             config.training_noise_levels_stage1,
             config.training_noise_levels_stage1,
@@ -302,8 +319,8 @@ def run_comprehensive_asl_research(config: ResearchConfig, output_dir: Path, nor
                 steps_per_epoch_schedule.append(getattr(config, steps_key))
                 train_loaders.append(loader)
 
-    val_dataset = ASLIterableDataset(simulator, plds_np, config.training_noise_levels_stage1, norm_stats=norm_stats)
-    val_loader = DataLoader(val_dataset, batch_size=config.batch_size, num_workers=num_workers, pin_memory=True, persistent_workers=(num_workers > 0))
+    # Use the newly created fixed validation dataset for the loader
+    val_loader = DataLoader(val_dataset, batch_size=config.batch_size, num_workers=num_workers, pin_memory=True, shuffle=False)
     
     base_input_size_nn = num_plds * 2 + 4
     model_creation_config = asdict(config)
@@ -324,10 +341,9 @@ def run_comprehensive_asl_research(config: ResearchConfig, output_dir: Path, nor
     script_logger.info(f"Training {config.n_ensembles}-model ensemble over {len(epoch_schedule)} stages...")
     training_start_time = time.time()
     
-    # The train_ensemble method will now handle the dynamic parameter changes
     trainer.train_ensemble(
         train_loaders=train_loaders,
-        val_loaders=[val_loader] * len(epoch_schedule), # Use the same validation loader for all stages
+        val_loaders=[val_loader] * len(epoch_schedule), # Use the same fixed validation loader for all stages
         epoch_schedule=epoch_schedule,
         steps_per_epoch_schedule=steps_per_epoch_schedule,
         early_stopping_patience=25 
@@ -379,17 +395,14 @@ if __name__ == "__main__":
         with open(args.config_file, 'r') as f_yaml:
             config_from_yaml = yaml.safe_load(f_yaml) or {}
         
-        # Flatten the nested YAML dictionary into a single level
         flat_config = {}
         for section, params in config_from_yaml.items():
             if isinstance(params, dict):
                 flat_config.update(params)
         
-        # Now, iterate through the flat dictionary and set attributes
         for key, value in flat_config.items():
             if hasattr(config_obj, key):
                 setattr(config_obj, key, value)
-            # Silently ignore keys from YAML that aren't in the dataclass
 
     if args.output_dir:
         output_path = Path(args.output_dir)
