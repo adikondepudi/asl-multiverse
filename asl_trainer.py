@@ -435,26 +435,38 @@ class EnhancedASLTrainer:
                             patience_counters_stage[model_idx] += 1
                 
                 if wandb.run:
+                    # --- REFINED W&B LOGGING ---
                     log_dict = {'epoch': global_epoch_counter}
                     
+                    # Log mean training losses
                     for key, values in epoch_train_losses_all_models.items():
                         log_dict[f'train/mean_{key}'] = np.nanmean(values)
+                        log_dict[f'stage_{stage_idx}/train/mean_{key}'] = np.nanmean(values) # Per-stage logging
 
+                    # Log per-model training loss (still a useful diagnostic)
                     for i, loss_val in enumerate(epoch_train_losses_all_models['total_loss']):
                         log_dict[f'train/loss_model_{i}'] = loss_val
 
+                    # Aggregate and log validation metrics
                     if epoch_val_metrics_all_models:
+                        # Aggregate metrics across all models in the ensemble
                         aggregated_val_metrics = defaultdict(list)
-                        for i, m_dict in enumerate(epoch_val_metrics_all_models):
+                        for m_dict in epoch_val_metrics_all_models:
                             for key, value in m_dict.items():
                                 if value is not None and np.isfinite(value):
                                     aggregated_val_metrics[key].append(value)
-                                    log_dict[f'val/{key}_model_{i}'] = value
                         
+                        # Log the mean of each metric across the ensemble
                         for key, values in aggregated_val_metrics.items():
                             log_dict[f'val/mean_{key}'] = np.nanmean(values)
-                    
+                            log_dict[f'stage_{stage_idx}/val/mean_{key}'] = np.nanmean(values) # Per-stage logging
+                        
+                        # Log per-model validation loss (critical for diagnosing divergent models)
+                        for i, m_dict in enumerate(epoch_val_metrics_all_models):
+                            log_dict[f'val/val_loss_model_{i}'] = m_dict.get('val_loss')
+
                     wandb.log(log_dict, step=self.global_step)
+                    # --- END REFINED LOGGING ---
 
                 if optuna_trial:
                     mean_val_loss_for_pruning = np.nanmean([m.get('val_loss', np.nan) for m in epoch_val_metrics_all_models]) if epoch_val_metrics_all_models else float('inf')
@@ -601,6 +613,10 @@ class EnhancedASLTrainer:
                 metrics_dict['att_mae'] = mean_absolute_error(att_trues_denorm, att_preds_denorm)
                 metrics_dict['att_rmse'] = np.sqrt(mean_squared_error(att_trues_denorm, att_preds_denorm))
                 
+                # --- ADDED: Track MAE in the normalized space for cleaner signal ---
+                metrics_dict['cbf_mae_norm'] = mean_absolute_error(cbf_trues_norm_cat, cbf_preds_norm_cat)
+                metrics_dict['att_mae_norm'] = mean_absolute_error(att_trues_norm_cat, att_preds_norm_cat)
+
                 cbf_log_vars_cat = torch.cat(all_cbf_log_vars).float().numpy().squeeze(); att_log_vars_cat = torch.cat(all_att_log_vars).float().numpy().squeeze()
                 
                 metrics_dict['mean_cbf_log_var'] = np.mean(cbf_log_vars_cat); metrics_dict['mean_att_log_var'] = np.mean(att_log_vars_cat)

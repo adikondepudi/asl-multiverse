@@ -11,7 +11,7 @@ set -e # Exit immediately if a command exits with a non-zero status.
 
 # --- 1. Define Input Directories (THESE MUST EXIST) ---
 RAW_INVIVO_SOURCE_DIR="Multiverse"
-MODEL_ARTIFACTS_DIR="final_training_run_v6"
+MODEL_ARTIFACTS_DIR="final_training_run_v7"
 
 # --- 2. Define Output Directories (These will be created) ---
 VALIDATED_INVIVO_DIR="./data/invivo_validated"
