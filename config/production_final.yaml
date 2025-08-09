@@ -33,12 +33,12 @@ training:
   # Stage 1: Data-Driven Generalization (Unbiased Sampler)
   n_epochs_stage1: 75
   loss_pinn_weight_stage1: 0.1
-  pre_estimator_loss_weight_stage1: 0.0
+  pre_estimator_loss_weight_stage1: 0.1
 
   # Stage 2: Hard-Case Fine-Tuning (Weighted Sampler)
   n_epochs_stage2: 30
   loss_pinn_weight_stage2: 0.1
-  pre_estimator_loss_weight_stage2: 0.0
+  pre_estimator_loss_weight_stage2: 0.1
   loss_weight_att_stage2: 8.0 # Override default ATT weight for this stage
   # ==========================================================
 

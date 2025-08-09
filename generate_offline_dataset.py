@@ -29,6 +29,9 @@ def generate_and_save_chunk(args):
     params_chunk = []
     
     for _ in range(num_samples_per_chunk):
+        perturbed_t_tau = simulator.params.T_tau * (1 + np.random.uniform(*physio_var.t_tau_perturb_range))
+        perturbed_alpha_pcasl = np.clip(simulator.params.alpha_PCASL * (1 + np.random.uniform(*physio_var.alpha_perturb_range)), 0.1, 1.1)
+        perturbed_alpha_vsasl = np.clip(simulator.params.alpha_VSASL * (1 + np.random.uniform(*physio_var.alpha_perturb_range)), 0.1, 1.0)
         true_att = np.random.uniform(*physio_var.att_range)
         true_cbf = np.random.uniform(*physio_var.cbf_range)
         true_t1_artery = np.random.uniform(*physio_var.t1_artery_range)
@@ -36,7 +39,10 @@ def generate_and_save_chunk(args):
 
         data_dict = simulator.generate_synthetic_data(
             plds, att_values=np.array([true_att]), n_noise=1, tsnr=current_snr,
-            cbf_val=true_cbf, t1_artery_val=true_t1_artery
+            cbf_val=true_cbf, t1_artery_val=true_t1_artery,
+            t_tau_val=perturbed_t_tau,
+            alpha_pcasl_val=perturbed_alpha_pcasl,
+            alpha_vsasl_val=perturbed_alpha_vsasl
         )
         
         pcasl_noisy = data_dict['MULTIVERSE'][0, 0, :, 0]
