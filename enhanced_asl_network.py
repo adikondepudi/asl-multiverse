@@ -253,8 +253,8 @@ class EnhancedASLNet(nn.Module):
         self.grad_norm_vsasl_att = nn.LayerNorm(n_plds)
 
         self.att_d_model = transformer_d_model_focused
-        self.pcasl_input_proj_att = nn.Linear(3, self.att_d_model)
-        self.vsasl_input_proj_att = nn.Linear(3, self.att_d_model)
+        self.pcasl_input_proj_att = nn.Linear(1, self.att_d_model)
+        self.vsasl_input_proj_att = nn.Linear(1, self.att_d_model)
         
         encoder_long = nn.TransformerEncoderLayer(self.att_d_model, transformer_nhead, self.att_d_model * 2, dropout_rate, batch_first=True)
         self.pcasl_transformer_att_long = nn.TransformerEncoder(encoder_long, transformer_nlayers)
@@ -312,37 +312,32 @@ class EnhancedASLNet(nn.Module):
         normalized_signal = x[:, :self.num_raw_signal_features]
         engineered_features = x[:, self.num_raw_signal_features:]
 
-        # --- 2. Un-normalize to get physical signal ---
+        # --- 2. Un-normalize signal for the AUXILIARY pre-estimator loss ---
         pcasl_norm = normalized_signal[:, :self.n_plds]
         vsasl_norm = normalized_signal[:, self.n_plds:self.num_raw_signal_features]
         pcasl_raw = pcasl_norm * self.pcasl_std + self.pcasl_mean
         vsasl_raw = vsasl_norm * self.vsasl_std + self.vsasl_mean
         raw_signal = torch.cat([pcasl_raw, vsasl_raw], dim=1)
-
-        # --- 3. Extract physical features & re-normalize for network input ---
-        amplitude_physical = torch.linalg.norm(raw_signal, dim=1, keepdim=True)
-        amplitude_norm = (amplitude_physical - self.amplitude_mean) / (self.amplitude_std + 1e-6)
         
-        pcasl_shape_seq = normalized_signal[:, :self.n_plds]
-        vsasl_shape_seq = normalized_signal[:, self.n_plds:self.num_raw_signal_features]
-
-        # --- 4. ATT Stream Processing (with Differentiable Physics-Encoder) ---
+        # --- 3. PRE-ESTIMATOR RUNS FOR AUXILIARY LOSS ONLY ---
+        # Its output does NOT feed into the main network path.
+        amplitude_physical = torch.linalg.norm(raw_signal, dim=1, keepdim=True)
         pre_estimator_input = torch.cat([amplitude_physical.detach(), engineered_features], dim=1)
         rough_params = F.softplus(self.pre_estimator(pre_estimator_input))
         cbf_rough, att_rough = rough_params[:, 0:1], rough_params[:, 1:2]
         cbf_rough = torch.clamp(cbf_rough, min=1.0)
         att_rough = torch.clamp(att_rough, min=100.0)
 
-        dSdC_p, dSdA_p, dSdC_v, dSdA_v = _torch_analytic_gradients(
-            cbf_rough, att_rough, self.plds_tensor, self.model_params_for_physics
-        )
-        
-        pcasl_feature_seq = torch.stack([pcasl_shape_seq, self.grad_norm_pcasl_cbf(dSdC_p), self.grad_norm_pcasl_att(dSdA_p)], dim=-1)
-        vsasl_feature_seq = torch.stack([vsasl_shape_seq, self.grad_norm_vsasl_cbf(dSdC_v), self.grad_norm_vsasl_att(dSdA_v)], dim=-1)
+        # --- 4. MAIN NETWORK PATH: Learn Directly from Signal Shapes ---
+        # The physics gradients are GONE. We feed the signal shape directly.
+        pcasl_shape_seq = normalized_signal[:, :self.n_plds]
+        vsasl_shape_seq = normalized_signal[:, self.n_plds:self.num_raw_signal_features]
 
-        pcasl_in_att = self.pcasl_input_proj_att(pcasl_feature_seq)
-        vsasl_in_att = self.vsasl_input_proj_att(vsasl_feature_seq)
+        # Reshape from (Batch, PLDs) to (Batch, PLDs, 1) to match the Linear layer input
+        pcasl_in_att = self.pcasl_input_proj_att(pcasl_shape_seq.unsqueeze(-1))
+        vsasl_in_att = self.vsasl_input_proj_att(vsasl_shape_seq.unsqueeze(-1))
         
+        # --- 5. Transformer and Fusion Pipeline ---
         n_plds_short = self.n_plds // 2
         pcasl_in_att_short, vsasl_in_att_short = pcasl_in_att[:, :n_plds_short, :], vsasl_in_att[:, :n_plds_short, :]
         
@@ -359,12 +354,10 @@ class EnhancedASLNet(nn.Module):
 
         att_stream_features = torch.cat([pcasl_feat_long, vsasl_feat_long, pcasl_feat_short, vsasl_feat_short], dim=1)
         
-        # --- 5. REFACTORED: Joint Prediction from Unified Features ---
+        # --- 6. Unified Regression Head ---
         joint_features = self.joint_mlp(att_stream_features)
-        # The head returns tensors of shape (batch, 2)
         all_means, all_log_vars = self.final_uncertainty_head(joint_features)
         
-        # Unpack into separate variables for clarity and to maintain (B, 1) shape
         cbf_mean = all_means[:, 0:1]
         att_mean = all_means[:, 1:2]
         cbf_log_var = all_log_vars[:, 0:1]
@@ -372,7 +365,7 @@ class EnhancedASLNet(nn.Module):
 
         # Return final predictions AND the rough estimates for the auxiliary loss
         return cbf_mean, att_mean, cbf_log_var, att_log_var, cbf_rough, att_rough
-
+        
     def _get_norm_layer(self, size: int, norm_type: str) -> nn.Module:
         if norm_type == 'batch': return nn.BatchNorm1d(size)
         elif norm_type == 'layer': return nn.LayerNorm(size)
