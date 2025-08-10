@@ -70,43 +70,58 @@ class RealisticASLSimulator(ASLSimulator):
         super().__init__(params)
         self.physio_var = PhysiologicalVariation()
 
-    def add_realistic_noise(self, signal: np.ndarray, noise_type: str = 'gaussian', snr: float = 5.0,
-                          temporal_correlation: float = 0.3, include_spike_artifacts: bool = False,
-                          spike_probability: float = 0.01, spike_magnitude_factor: float = 5.0,
-                          include_baseline_drift: bool = False, drift_magnitude_factor: float = 0.1
-                          ) -> np.ndarray:
-        base_noise_level = np.mean(np.abs(signal)) / snr if snr > 0 else 0
-        if base_noise_level == 0 and np.all(signal == 0): base_noise_level = 1e-5
-        noise = np.zeros_like(signal)
-        if noise_type == 'gaussian':
-            noise = np.random.normal(0, base_noise_level, signal.shape)
-        elif noise_type == 'rician':
-            sigma_rician = base_noise_level / np.sqrt(2)
-            noise_real, noise_imag = np.random.normal(0, sigma_rician, signal.shape), np.random.normal(0, sigma_rician, signal.shape)
-            return np.sqrt((np.abs(signal) + noise_real)**2 + noise_imag**2)
-        elif noise_type == 'physiological':
-            if signal.ndim > 0 and signal.shape[-1] > 1:
-                t = np.linspace(0, signal.shape[-1], signal.shape[-1], endpoint=False)
-                cardiac = (base_noise_level*0.5) * np.sin(2*np.pi*1.0*t/(signal.shape[-1]/5) + np.random.rand()*np.pi)
-                respiratory = (base_noise_level*0.3) * np.sin(2*np.pi*0.25*t/(signal.shape[-1]/5) + np.random.rand()*np.pi)
-                noise += cardiac + respiratory
-            noise += np.random.normal(0, base_noise_level, signal.shape)
-        if temporal_correlation > 0 and signal.ndim > 0 and signal.shape[-1] > 1:
-            from scipy.ndimage import gaussian_filter1d
-            noise = gaussian_filter1d(noise, sigma=temporal_correlation, axis=-1)
-        noisy_signal_intermediate = signal + noise
-        if include_spike_artifacts and signal.ndim > 0:
-            for i in range(signal.shape[-1]):
-                if np.random.rand() < spike_probability:
-                    spike = (np.random.choice([-1,1])) * spike_magnitude_factor * base_noise_level
-                    if signal.ndim == 1: noisy_signal_intermediate[i] += spike
-                    elif signal.ndim == 2: noisy_signal_intermediate[:, i] += spike
+    def add_realistic_noise(self, signal: np.ndarray, snr: float = 5.0,
+                            temporal_correlation: float = 0.3, include_spike_artifacts: bool = True,
+                            spike_probability: float = 0.01, spike_magnitude_factor: float = 5.0,
+                            include_baseline_drift: bool = True, drift_magnitude_factor: float = 0.1,
+                            include_physiological: bool = True) -> np.ndarray:
+        """
+        Physiological fluctuations and drift are added to the clean signal.
+        Rician noise, the correct model for MR magnitude data, is applied.
+        Sporadic spike artifacts corrupt the final noisy signal.
+        """
+        
+        # Start with a copy of the clean signal.
+        signal_with_phys = signal.copy()
+        
+        # Calculate the base thermal noise level from SNR. Defensively handle zero-signal cases.
+        mean_abs_signal = np.mean(np.abs(signal))
+        base_noise_level = mean_abs_signal / snr if snr > 0 and mean_abs_signal > 0 else 1e-5
+
+        # Layer 1: Add structured physiological "noise" (signal fluctuations).
+        if include_physiological and signal.ndim > 0 and signal.shape[-1] > 1:
+            t = np.arange(signal.shape[-1])
+            # Cardiac component (higher frequency)
+            cardiac_freq = np.random.uniform(0.8, 1.2) # ~1 Hz
+            cardiac = (base_noise_level * 0.5) * np.sin(2 * np.pi * cardiac_freq * t / signal.shape[-1] * 5 + np.random.rand() * np.pi)
+            # Respiratory component (lower frequency)
+            respiratory_freq = np.random.uniform(0.2, 0.4) # ~0.3 Hz
+            respiratory = (base_noise_level * 0.3) * np.sin(2 * np.pi * respiratory_freq * t / signal.shape[-1] * 5 + np.random.rand() * np.pi)
+            signal_with_phys += cardiac + respiratory
+
+        # Layer 2: Add slow baseline drift.
         if include_baseline_drift and signal.ndim > 0 and signal.shape[-1] > 1:
-            max_signal_val = np.max(np.abs(signal)) if np.any(signal) else base_noise_level
-            drift_amp = drift_magnitude_factor * max_signal_val
-            drift = drift_amp * np.sin(2*np.pi*np.random.uniform(0.05,0.2)*np.arange(signal.shape[-1])/signal.shape[-1] + np.random.rand()*np.pi)
-            noisy_signal_intermediate += drift
-        return noisy_signal_intermediate
+            drift_freq = np.random.uniform(0.05, 0.2)
+            drift_amp = drift_magnitude_factor * (mean_abs_signal if mean_abs_signal > 0 else base_noise_level)
+            drift = drift_amp * np.sin(2 * np.pi * drift_freq * t / signal.shape[-1] + np.random.rand() * np.pi)
+            signal_with_phys += drift
+
+        # Layer 3: Apply complex thermal noise, resulting in a Rician distribution.
+        # This is the correct noise model for magnitude MR data.
+        sigma_rician = base_noise_level / np.sqrt(2)
+        noise_real = np.random.normal(0, sigma_rician, signal.shape)
+        noise_imag = np.random.normal(0, sigma_rician, signal.shape)
+        noisy_signal = np.sqrt((signal_with_phys + noise_real)**2 + noise_imag**2)
+
+        # Layer 4: Add sporadic spike artifacts (e.g., from motion).
+        if include_spike_artifacts and signal.ndim > 0:
+            num_spikes = np.random.poisson(signal.shape[-1] * spike_probability)
+            spike_indices = np.random.choice(signal.shape[-1], num_spikes, replace=False)
+            for i in spike_indices:
+                spike = (np.random.choice([-1, 1])) * spike_magnitude_factor * base_noise_level
+                noisy_signal[i] += spike
+        
+        return noisy_signal
 
     def generate_diverse_dataset(self, plds: np.ndarray, n_subjects: int = 100,
                                conditions: List[str] = ['healthy', 'stroke', 'tumor', 'elderly'],

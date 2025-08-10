@@ -7,7 +7,6 @@ import os
 import argparse
 import time
 
-# --- IMPORTANT: We need the simulation code ---
 from asl_simulation import ASLParameters
 from enhanced_simulation import RealisticASLSimulator, PhysiologicalVariation
 from utils import engineer_signal_features
@@ -27,26 +26,25 @@ def generate_and_save_chunk(args):
     
     signals_chunk = []
     params_chunk = []
-    
+        
     for _ in range(num_samples_per_chunk):
-        perturbed_t_tau = simulator.params.T_tau * (1 + np.random.uniform(*physio_var.t_tau_perturb_range))
-        perturbed_alpha_pcasl = np.clip(simulator.params.alpha_PCASL * (1 + np.random.uniform(*physio_var.alpha_perturb_range)), 0.1, 1.1)
-        perturbed_alpha_vsasl = np.clip(simulator.params.alpha_VSASL * (1 + np.random.uniform(*physio_var.alpha_perturb_range)), 0.1, 1.0)
         true_att = np.random.uniform(*physio_var.att_range)
         true_cbf = np.random.uniform(*physio_var.cbf_range)
         true_t1_artery = np.random.uniform(*physio_var.t1_artery_range)
         current_snr = np.random.choice([3.0, 5.0, 10.0, 15.0, 20.0])
 
-        data_dict = simulator.generate_synthetic_data(
-            plds, att_values=np.array([true_att]), n_noise=1, tsnr=current_snr,
-            cbf_val=true_cbf, t1_artery_val=true_t1_artery,
-            t_tau_val=perturbed_t_tau,
-            alpha_pcasl_val=perturbed_alpha_pcasl,
-            alpha_vsasl_val=perturbed_alpha_vsasl
-        )
-        
-        pcasl_noisy = data_dict['MULTIVERSE'][0, 0, :, 0]
-        vsasl_noisy = data_dict['MULTIVERSE'][0, 0, :, 1]
+        # Step 1: Generate the CLEAN signal, including scanner parameter perturbations.
+        perturbed_t_tau = simulator.params.T_tau * (1 + np.random.uniform(*physio_var.t_tau_perturb_range))
+        perturbed_alpha_pcasl = np.clip(simulator.params.alpha_PCASL * (1 + np.random.uniform(*physio_var.alpha_perturb_range)), 0.1, 1.1)
+        perturbed_alpha_vsasl = np.clip(simulator.params.alpha_VSASL * (1 + np.random.uniform(*physio_var.alpha_perturb_range)), 0.1, 1.0)
+
+        vsasl_clean = simulator._generate_vsasl_signal(plds, true_att, true_cbf, true_t1_artery, perturbed_alpha_vsasl)
+        pcasl_clean = simulator._generate_pcasl_signal(plds, true_att, true_cbf, true_t1_artery, perturbed_t_tau, perturbed_alpha_pcasl)
+
+        # Step 2: Apply the new, unified, and fully realistic noise model.
+        pcasl_noisy = simulator.add_realistic_noise(pcasl_clean, snr=current_snr)
+        vsasl_noisy = simulator.add_realistic_noise(vsasl_clean, snr=current_snr)
+
         raw_signal = np.concatenate([pcasl_noisy, vsasl_noisy])
         
         eng_features = engineer_signal_features(raw_signal.reshape(1, -1), num_plds)
