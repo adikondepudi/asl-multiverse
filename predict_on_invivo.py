@@ -1,3 +1,6 @@
+# predict_on_invivo.py
+# THIS VERSION USES A ROBUST, GRID-SEARCH-INITIALIZED LS BASELINE.
+
 import torch
 import numpy as np
 import nibabel as nib
@@ -13,7 +16,8 @@ import multiprocessing
 
 from enhanced_asl_network import EnhancedASLNet
 from multiverse_functions import fit_PCVSASL_misMatchPLD_vectInit_pep
-from utils import engineer_signal_features
+# --- MODIFIED: Import the robust initializer and other utils ---
+from utils import engineer_signal_features, get_grid_search_initial_guess
 
 def apply_normalization_vectorized(batch: np.ndarray, norm_stats: Dict, num_plds: int) -> np.ndarray:
     """Applies normalization to a batch of input signals for the NN."""
@@ -83,29 +87,37 @@ def batch_predict_nn(signals_masked: np.ndarray, subject_plds: np.ndarray, model
     cbf_norm_ensemble, att_norm_ensemble = np.mean(cbf_preds_norm, axis=0), np.mean(att_preds_norm, axis=0)
     return denormalize_predictions(cbf_norm_ensemble.squeeze(), att_norm_ensemble.squeeze(), norm_stats)
 
-# Helper function for parallel LS fitting
-def _fit_single_voxel_ls(signal_reshaped, pldti, ls_params, init_guess):
-    """Helper function to fit a single voxel, designed for use with joblib."""
+# === MODIFIED HELPER FUNCTION for parallel LS fitting ===
+def _fit_single_voxel_ls(signal_flat: np.ndarray, plds: np.ndarray, pldti: np.ndarray, ls_params: dict):
+    """
+    Helper function to fit a single voxel with robust grid-search initialization.
+    Designed for use with joblib.
+    """
     try:
+        # Get a robust initial guess for this specific voxel's signal
+        init_guess = get_grid_search_initial_guess(signal_flat, plds, ls_params)
+        
+        # Reshape the signal for the fitting function
+        signal_reshaped = signal_flat.reshape((len(plds), 2), order='F')
+        
         beta, _, _, _ = fit_PCVSASL_misMatchPLD_vectInit_pep(pldti, signal_reshaped, init_guess, **ls_params)
         return beta[0] * 6000.0, beta[1]
     except Exception:
         return np.nan, np.nan
 
-# Rewritten to use joblib for parallel processing 
+# === MODIFIED MAIN LS FUNCTION to use the new robust helper ===
 def fit_ls_robust(signals_masked: np.ndarray, plds: np.ndarray, config: Dict) -> Tuple[np.ndarray, np.ndarray]:
     """Runs a robust, parallelized LS fit for each voxel in the masked data."""
     pldti = np.column_stack([plds, plds])
     ls_params = {k:v for k,v in config.items() if k in ['T1_artery','T_tau','T2_factor','alpha_BS1','alpha_PCASL','alpha_VSASL']}
     num_voxels = signals_masked.shape[0]
-    signals_reshaped = signals_masked.reshape((num_voxels, len(plds), 2), order='F')
-    init_guess = [50.0 / 6000.0, 1500.0]
     
     num_cores = multiprocessing.cpu_count()
     
+    # The helper function now takes the flat signal for one voxel (signals_masked[i])
     results = Parallel(n_jobs=num_cores)(
-        delayed(_fit_single_voxel_ls)(signals_reshaped[i], pldti, ls_params, init_guess)
-        for i in tqdm(range(num_voxels), desc="  Fitting LS (Parallel)", leave=False, ncols=100)
+        delayed(_fit_single_voxel_ls)(signals_masked[i], plds, pldti, ls_params)
+        for i in tqdm(range(num_voxels), desc="  Fitting LS (Robust Initializer)", leave=False, ncols=100)
     )
     
     results_arr = np.array(results)

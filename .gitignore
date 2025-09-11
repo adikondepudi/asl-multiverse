@@ -20,3 +20,4 @@ __pycache__/
 /data/
 /final_training_run*/
 /final_benchmark_results/
+/results_all_versions/
