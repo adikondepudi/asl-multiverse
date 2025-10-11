@@ -617,13 +617,19 @@ class EnhancedASLTrainer:
     def _train_epoch(self, model, train_loader_iter, optimizer, scaler, scheduler, current_global_epoch: int, steps_per_epoch: int) -> Tuple[float, Dict[str, float]]:
         """
         Training epoch loop, optimized for use with torch.compile().
+        MODIFIED to be compatible with BFloat16 by bypassing the GradScaler.
         """
         model.train()
         total_loss = 0.0
         total_components = defaultdict(float)
         
-        pbar = tqdm(islice(train_loader_iter, steps_per_epoch), total=steps_per_epoch, desc=f"Epoch {self.global_step // steps_per_epoch + 1} Training", leave=False, ncols=100)
+        pbar = tqdm(islice(train_loader_iter, steps_per_epoch), total=steps_per_epoch, desc=f"Epoch {current_global_epoch+1} Training", leave=False, ncols=100)
         
+        # Check if we should skip the scaler. We do this if autocast is enabled for bfloat16,
+        # as the scaler's unscale_ step is not implemented for it.
+        # This assumes you are using autocast with dtype=torch.bfloat16 in your training loop.
+        use_scaler = scaler is not None
+
         for i, (signals, params_norm) in enumerate(pbar):
             signals, params_norm = signals.to(self.device), params_norm.to(self.device)
 
@@ -640,11 +646,26 @@ class EnhancedASLTrainer:
                     current_global_epoch
                 )
 
-            scaler.scale(loss).backward()
-            scaler.unscale_(optimizer) 
-            torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
-            scaler.step(optimizer)
-            scaler.update()
+            # === MODIFICATION START: Conditional Scaler Logic ===
+            # The original error was: RuntimeError: 'amp_foreach_non_finite_check_and_unscale_' not implemented for 'BFloat16'
+            # This happens inside scaler.unscale_. We must bypass the scaler operations for bfloat16.
+            if use_scaler and self.device.type == 'cuda' and torch.is_autocast_enabled() and torch.get_autocast_gpu_dtype() == torch.bfloat16:
+                # BFloat16 path: No GradScaler needed.
+                loss.backward()
+                torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
+                optimizer.step()
+            elif use_scaler:
+                # Original path for Float16 or standard Float32
+                scaler.scale(loss).backward()
+                scaler.unscale_(optimizer) 
+                torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
+                scaler.step(optimizer)
+                scaler.update()
+            else: # Fallback if scaler is not used at all
+                loss.backward()
+                torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
+                optimizer.step()
+            # === MODIFICATION END ===
 
             if scheduler:
                 scheduler.step()
