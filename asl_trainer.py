@@ -23,7 +23,6 @@ import optuna
 
 num_workers = mp.cpu_count()
 
-# === MODIFICATION: Import the new DisentangledASLNet ===
 from enhanced_asl_network import EnhancedASLNet, CustomLoss, DisentangledASLNet
 from enhanced_simulation import RealisticASLSimulator, _generate_single_balanced_subject
 from utils import engineer_signal_features
@@ -145,7 +144,7 @@ class ASLTrainer:
                 logger.info(f'Early stopping triggered at epoch {epoch + 1}')
                 break
             if (epoch + 1) % 10 == 0:
-                logger.info(f'Epoch {epoch + 1}: Train Loss = {train_loss:.6f}, Val Loss = {val_loss:.6f}')
+                logger.info(f'Epoch {epoch + 1}: Train Loss = {epoch + 1:.6f}, Val Loss = {val_loss:.6f}')
         model_path = Path('best_model_ASLTrainer.pt')
         if model_path.exists():
             self.model.load_state_dict(torch.load(str(model_path)))
@@ -179,7 +178,6 @@ class EnhancedASLDataset(Dataset):
     def __len__(self) -> int: return len(self.signals)
     def __getitem__(self, idx: int) -> Tuple[torch.Tensor, torch.Tensor]: return self.signals[idx], self.params[idx]
 
-# === MODIFICATION START: Update ASLIterableDataset for DisentangledASLNet ===
 class ASLIterableDataset(IterableDataset):
     """
     An iterable dataset for on-the-fly data generation.
@@ -277,7 +275,6 @@ class ASLIterableDataset(IterableDataset):
                     ) from e
                 
                 continue 
-# === MODIFICATION END ===
 
 class EnhancedASLTrainer:
     def __init__(self,
@@ -289,11 +286,9 @@ class EnhancedASLTrainer:
         self.batch_size = batch_size
         self.model_config = model_config # Store the full config
 
-        # --- CORRECTED: Directly read LRs from config without calculation ---
-        # The trainer should not derive config values; it should consume them.
-        self.lr_cbf_base = model_config.get('learning_rate_cbf', 0.0) # Default to 0, as it's unused in new arch
+        self.lr_cbf_base = model_config.get('learning_rate_cbf', 0.0)
         self.lr_att_base = model_config.get('learning_rate_att', 0.001)
-        self.lr_stage2_cbf = model_config.get('learning_rate_stage2_cbf', 0.0) # Default to 0
+        self.lr_stage2_cbf = model_config.get('learning_rate_stage2_cbf', 0.0) 
         self.lr_stage2_att = model_config.get('learning_rate_stage2_att', self.lr_att_base / 10.0)
 
         self.weight_decay = weight_decay
@@ -301,12 +296,8 @@ class EnhancedASLTrainer:
         self.validation_steps_per_epoch = model_config.get('validation_steps_per_epoch', 50)
         self.scalers = [torch.cuda.amp.GradScaler() for _ in range(self.n_ensembles)]
 
-        # === MODIFICATION START: Cast model to bfloat16 at initialization ===
-        # This aligns the model's weights with the autocast dtype, preventing
-        # the RuntimeError during the compiled forward pass.
         logger.info("Initializing models and casting to bfloat16 for mixed-precision training compatibility.")
         self.models = [model_class(**model_config).to(self.device, dtype=torch.bfloat16) for _ in range(n_ensembles)]
-        # === MODIFICATION END ===
         
         print("INFO: Compiling models with torch.compile() for optimized performance...")
         self.models = [torch.compile(m, mode="max-autotune") for m in self.models]
@@ -314,18 +305,15 @@ class EnhancedASLTrainer:
 
         self.best_states = [None] * self.n_ensembles
         
-        # Optimizers will be created just-in-time for each stage
         self.optimizers = []
         self.schedulers = [] 
         
-        # Initialize the loss function with default weights from config
         loss_params = {
             'w_cbf': model_config.get('loss_weight_cbf', 1.0), 
             'w_att': model_config.get('loss_weight_att', 1.0),
             'log_var_reg_lambda': model_config.get('loss_log_var_reg_lambda', 0.0), 
             'focal_gamma': model_config.get('focal_gamma', 1.5),
             'model_params': model_config,
-            # PINN/Pre-est weights will be set dynamically per stage
         }
         self.custom_loss_fn = CustomLoss(**loss_params)
 
@@ -334,79 +322,139 @@ class EnhancedASLTrainer:
         self.global_step = 0
         self.norm_stats = None
 
-    # === MODIFICATION START: New staged training logic ===
     def train_ensemble(self,
                    train_loaders: List[DataLoader], val_loaders: List[Optional[DataLoader]],
                    epoch_schedule: List[int], steps_per_epoch_schedule: List[Optional[int]],
                    early_stopping_patience: int = 20, optuna_trial: Optional[Any] = None) -> Dict[str, Any]:
         
-        # Check for the new disentangled training flag
+        # === MODIFICATION START: Correctly check the type of the compiled model ===
+        # torch.compile wraps the model, so we need to access the original module.
+        unwrapped_model = getattr(self.models[0], '_orig_mod', self.models[0])
         training_stages_config = self.model_config.get('training_stages')
-        if training_stages_config and isinstance(self.models[0], DisentangledASLNet):
+        
+        if training_stages_config and isinstance(unwrapped_model, DisentangledASLNet):
             logger.info(">>> Detected 'training_stages' config. Running new DISENTANGLED training curriculum. <<<")
+            # Note: The disentangled curriculum currently uses the first provided loader.
+            # This can be expanded if different loaders are needed per disentangled stage.
             return self._train_disentangled_curriculum(training_stages_config, train_loaders[0], val_loaders[0], early_stopping_patience)
         else:
             logger.info(">>> Running original unified training curriculum. <<<")
             return self._train_original_curriculum(train_loaders, val_loaders, epoch_schedule, steps_per_epoch_schedule, early_stopping_patience, optuna_trial)
+        # === MODIFICATION END ===
 
-    def _train_stage_logic(self, stage_name: str, n_epochs: int, train_loader: DataLoader, val_loader: Optional[DataLoader], early_stopping_patience: int) -> None:
+    # === MODIFICATION START: Fully implemented Disentangled Training Logic ===
+    def _train_stage_logic(self, stage_name: str, n_epochs: int, train_loader: DataLoader, val_loader: Optional[DataLoader], early_stopping_patience: int) -> Dict:
         """Helper function to run a generic training stage."""
         logger.info(f"--- Starting Stage: {stage_name} ({n_epochs} epochs) ---")
+        
+        # Determine steps per epoch for this stage
+        if isinstance(train_loader.dataset, IterableDataset):
+            steps_per_epoch = self.model_config.get('steps_per_epoch_stage1', 20) # Default for on-the-fly
+            if 'CBF' in stage_name.upper():
+                steps_per_epoch = self.model_config.get('steps_per_epoch_stage2', steps_per_epoch)
+        else:
+            steps_per_epoch = len(train_loader)
 
         # Configure optimizer and loss for the current stage
+        self.optimizers, self.schedulers = [], []
         for model_idx, model in enumerate(self.models):
+            unwrapped_model = getattr(model, '_orig_mod', model)
+            unwrapped_model.unfreeze_all_params() # Ensure all params are trainable before selectively freezing
+            
             is_att_stage = 'ATT' in stage_name.upper()
             if is_att_stage:
-                params_to_train = model.get_shape_stream_params()
+                params_to_train = unwrapped_model.get_shape_stream_params()
                 self.custom_loss_fn.w_cbf = 0.0
                 self.custom_loss_fn.w_att = self.model_config.get('loss_weight_att', 1.0)
-                logger.info(f"  Model {model_idx}: Training ATT stream with CBF loss OFF.")
+                lr = self.lr_att_base
+                logger.info(f"  Model {model_idx}: Training ATT stream with CBF loss OFF. LR={lr:.5f}")
             else: # CBF stage
-                model.freeze_shape_stream() # Freeze the already-trained shape stream
-                params_to_train = model.get_amplitude_stream_params()
+                unwrapped_model.freeze_shape_stream() 
+                params_to_train = unwrapped_model.get_amplitude_stream_params()
                 self.custom_loss_fn.w_cbf = self.model_config.get('loss_weight_cbf', 1.0)
                 self.custom_loss_fn.w_att = 0.0
-                logger.info(f"  Model {model_idx}: Training CBF stream (Shape stream frozen) with ATT loss OFF.")
+                lr = self.lr_stage2_cbf or self.lr_att_base # Fallback to main LR if not specified
+                logger.info(f"  Model {model_idx}: Training CBF stream (Shape stream frozen) with ATT loss OFF. LR={lr:.5f}")
             
-            self.optimizers[model_idx] = torch.optim.AdamW(params_to_train, lr=self.lr_att_base, weight_decay=self.weight_decay)
-            self.schedulers[model_idx] = torch.optim.lr_scheduler.OneCycleLR(self.optimizers[model_idx], max_lr=self.lr_att_base, total_steps=n_epochs * len(train_loader))
+            self.optimizers.append(torch.optim.AdamW(params_to_train, lr=lr, weight_decay=self.weight_decay))
+            self.schedulers.append(torch.optim.lr_scheduler.OneCycleLR(self.optimizers[-1], max_lr=lr, total_steps=n_epochs * steps_per_epoch))
 
         best_val_losses_stage = [float('inf')] * self.n_ensembles
         patience_counters_stage = [0] * self.n_ensembles
+        stage_histories = defaultdict(lambda: defaultdict(list))
             
         for epoch in range(n_epochs):
-            # ... The inner epoch loop logic is mostly the same as the original ...
-            # (Loop over models, train, validate, check early stopping)
-            # This part can be refactored from the original `_train_original_curriculum`
-            pass # Placeholder for the detailed epoch loop
+            epoch_train_losses_all_models = defaultdict(list)
+            epoch_val_metrics_all_models = []
+            
+            train_loader_iter = iter(train_loader)
+            for model_idx in range(self.n_ensembles):
+                train_loss_epoch, _ = self._train_epoch(self.models[model_idx], train_loader_iter, self.optimizers[model_idx], self.scalers[model_idx], self.schedulers[model_idx], self.global_step, steps_per_epoch)
+                epoch_train_losses_all_models['total_loss'].append(train_loss_epoch)
+                stage_histories[model_idx][f'train_losses_stage_{stage_name}'].append(train_loss_epoch)
+                if model_idx < self.n_ensembles - 1: train_loader_iter = iter(train_loader)
 
-    def _train_disentangled_curriculum(self, stages: List[str], train_loader: DataLoader, val_loader: Optional[DataLoader], early_stopping_patience: int) -> Dict[str, Any]:
+            if val_loader is not None and len(val_loader.dataset) > 0:
+                for model_idx in range(self.n_ensembles):
+                    val_metrics_dict = self._validate(self.models[model_idx], val_loader, self.global_step)
+                    epoch_val_metrics_all_models.append(val_metrics_dict)
+                    stage_histories[model_idx][f'val_metrics_stage_{stage_name}'].append(val_metrics_dict)
+                    val_loss_for_es = val_metrics_dict.get('val_loss', float('inf'))
+                    
+                    if val_loss_for_es < best_val_losses_stage[model_idx]:
+                        best_val_losses_stage[model_idx] = val_loss_for_es
+                        patience_counters_stage[model_idx] = 0
+                        if val_loss_for_es < self.overall_best_val_losses[model_idx]:
+                            self.overall_best_val_losses[model_idx] = val_loss_for_es
+                            unwrapped = getattr(self.models[model_idx], '_orig_mod', self.models[model_idx])
+                            self.best_states[model_idx] = unwrapped.state_dict()
+                            logger.debug(f"Model {model_idx} new OVERALL best state saved (Val loss: {val_loss_for_es:.4f})")
+                    else:
+                        patience_counters_stage[model_idx] += 1
+            
+            # Logging and early stopping logic copied from original curriculum
+            mean_train_loss = np.nanmean(epoch_train_losses_all_models['total_loss'])
+            mean_val_loss = np.nanmean([m.get('val_loss', np.nan) for m in epoch_val_metrics_all_models]) if epoch_val_metrics_all_models else np.nan
+            logger.info(f"Stage '{stage_name}', Epoch {epoch + 1}/{n_epochs}: Mean Train Loss = {mean_train_loss:.6f}, Mean Val Loss = {mean_val_loss:.6f}")
+
+            if all(p_count >= early_stopping_patience for p_count in patience_counters_stage):
+                logger.info(f"All models early stopped in stage '{stage_name}'. Moving to next stage.")
+                break
+        
+        return stage_histories
+
+    def _train_disentangled_curriculum(self, stages_config: List[str], train_loader: DataLoader, val_loader: Optional[DataLoader], early_stopping_patience: int) -> Dict[str, Any]:
         """Runs the new two-stage ATT-then-CBF training curriculum."""
-        histories = defaultdict(lambda: defaultdict(list))
+        all_histories = defaultdict(lambda: defaultdict(list))
         self.global_step = 0
         self.overall_best_val_losses = [float('inf')] * self.n_ensembles
         
         # STAGE 1: Train ATT Stream
-        self._train_stage_logic("ATT-only", self.model_config.get('n_epochs_stage1', 50), train_loader, val_loader, early_stopping_patience)
+        n_epochs_stage1 = self.model_config.get('n_epochs_stage1', 50)
+        hist1 = self._train_stage_logic("ATT-only", n_epochs_stage1, train_loader, val_loader, early_stopping_patience)
+        for k, v in hist1.items(): all_histories[k].update(v)
         
         # STAGE 2: Train CBF Stream
-        self._train_stage_logic("CBF-tuning", self.model_config.get('n_epochs_stage2', 30), train_loader, val_loader, early_stopping_patience)
+        n_epochs_stage2 = self.model_config.get('n_epochs_stage2', 30)
+        hist2 = self._train_stage_logic("CBF-tuning", n_epochs_stage2, train_loader, val_loader, early_stopping_patience)
+        for k, v in hist2.items(): all_histories[k].update(v)
 
         # Load best overall states and return final metrics
         for model_idx, state in enumerate(self.best_states):
              if state is not None:
-                self.models[model_idx].load_state_dict(state)
+                unwrapped = getattr(self.models[model_idx], '_orig_mod', self.models[model_idx])
+                unwrapped.load_state_dict(state)
+                logger.info(f"Loaded best overall state for model {model_idx} (Val Loss: {self.overall_best_val_losses[model_idx]:.4f})")
         
         final_val_losses = [l for l in self.overall_best_val_losses if l != float('inf')]
         final_mean_val_loss = np.nanmean(final_val_losses) if final_val_losses else float('nan')
-        return {'final_mean_val_loss': final_mean_val_loss, 'all_histories': histories}
-
+        return {'final_mean_val_loss': final_mean_val_loss, 'all_histories': all_histories}
+    # === MODIFICATION END ===
 
     def _train_original_curriculum(self,
                    train_loaders: List[DataLoader], val_loaders: List[Optional[DataLoader]],
                    epoch_schedule: List[int], steps_per_epoch_schedule: List[Optional[int]],
                    early_stopping_patience: int = 20, optuna_trial: Optional[Any] = None) -> Dict[str, Any]:
-    # === MODIFICATION END ===
         
         histories = defaultdict(lambda: defaultdict(list))
         self.global_step = 0
@@ -428,26 +476,22 @@ class EnhancedASLTrainer:
                 steps_per_epoch = len(train_loader)
                 logger.info(f"  Using map-style dataset. One epoch will be {steps_per_epoch} steps (full dataset).")
             
-            # --- DYNAMIC STAGE CONFIGURATION ---
-            # --- CORRECTED: Single learning rate setup ---
             stage_max_lr = 0.0
-            if stage_idx < 2: # Stages 0 and 1
+            if stage_idx < 2: 
                 stage_title = f"Curriculum Stage {stage_idx}: {'Physics Stabilization' if stage_idx == 0 else 'Data Generalization'} ({n_epochs_stage} epochs)"
                 pinn_weight = self.model_config.get(f'loss_pinn_weight_stage{stage_idx}', 1.0)
                 pre_est_weight = self.model_config.get(f'pre_estimator_loss_weight_stage{stage_idx}', 1.0)
-                self.custom_loss_fn.w_att = self.model_config.get('loss_weight_att', 1.0) # Reset to default
+                self.custom_loss_fn.w_att = self.model_config.get('loss_weight_att', 1.0)
                 stage_max_lr = self.lr_att_base
-            else: # Stage 2: Hard-Case Fine-Tuning
+            else: 
                 stage_title = f"Curriculum Stage 2: Hard-Case Fine-Tuning ({n_epochs_stage} epochs)"
                 pinn_weight = self.model_config.get('loss_pinn_weight_stage2', 0.1)
                 pre_est_weight = self.model_config.get('pre_estimator_loss_weight_stage2', 0.0)
                 self.custom_loss_fn.w_att = self.model_config.get('loss_weight_att_stage2', 8.0)
                 stage_max_lr = self.lr_stage2_att
 
-            # This list is now used by the scheduler. Both groups get the same LR.
             stage_max_lrs = [stage_max_lr, stage_max_lr]
 
-            # Update the loss function with the parameters for the current stage
             self.custom_loss_fn.pinn_weight = pinn_weight
             self.custom_loss_fn.pre_estimator_loss_weight = pre_est_weight
 
@@ -455,20 +499,18 @@ class EnhancedASLTrainer:
             logger.info(f"  PINN Weight: {pinn_weight}, Pre-Estimator Weight: {pre_est_weight}, ATT Loss Weight: {self.custom_loss_fn.w_att}")
             logger.info(f"  Max LR (for all params): {stage_max_lr:.6f}")
 
-            # Re-create optimizers and schedulers for the current stage with the correct LRs and total steps
             self.optimizers = []
             for model in self.models:
-                # With the unified architecture, all params are in the 'att_stream'.
-                # The optimizer setup correctly handles the empty 'cbf_stream'.
-                param_groups = model.get_param_groups()
+                unwrapped_model = getattr(model, '_orig_mod', model)
+                param_groups = unwrapped_model.get_param_groups()
                 optimizer_param_groups = [
                     {'params': group['params'], 'lr': stage_max_lr}
-                    for group in param_groups
+                    for group in param_groups if group['params']
                 ]
                 self.optimizers.append(torch.optim.AdamW(
                     optimizer_param_groups, 
                     weight_decay=self.weight_decay,
-                    betas=(0.9, 0.98) # Default is (0.9, 0.999). Lowering beta2 for faster adaptation.
+                    betas=(0.9, 0.98)
                 ))
             
             total_steps_stage = steps_per_epoch * n_epochs_stage
@@ -485,7 +527,6 @@ class EnhancedASLTrainer:
                 epoch_train_losses_all_models = defaultdict(list)
                 epoch_val_metrics_all_models = []
                 
-                # For map-style datasets, the iterator is recreated each epoch if shuffle=True
                 train_loader_iter = iter(train_loader)
                 for model_idx in range(self.n_ensembles):
                     train_loss_epoch, train_loss_components = self._train_epoch(
@@ -498,7 +539,6 @@ class EnhancedASLTrainer:
                         epoch_train_losses_all_models[key].append(val)
                     
                     histories[model_idx][f'train_losses_stage_{stage_idx}'].append(train_loss_epoch)
-                    # If using map-style, we need a fresh iterator for each model in the same epoch
                     if model_idx < self.n_ensembles - 1: train_loader_iter = iter(train_loader)
 
                 if current_val_loader is not None and len(current_val_loader.dataset) > 0:
@@ -513,48 +553,37 @@ class EnhancedASLTrainer:
                             patience_counters_stage[model_idx] = 0
                             if val_loss_for_es < self.overall_best_val_losses[model_idx]:
                                 self.overall_best_val_losses[model_idx] = val_loss_for_es
-                                # self.best_states[model_idx] = self.models[model_idx].state_dict() <-- old way before torch.compile
-                                unwrapped_model = self.models[model_idx]
-                                if hasattr(unwrapped_model, '_orig_mod'):
-                                    unwrapped_model = unwrapped_model._orig_mod
+                                unwrapped_model = getattr(self.models[model_idx], '_orig_mod', self.models[model_idx])
                                 self.best_states[model_idx] = unwrapped_model.state_dict()
                                 logger.debug(f"Model {model_idx} new overall best state saved (Val loss: {val_loss_for_es:.4f})")
                         else:
                             patience_counters_stage[model_idx] += 1
                 
                 if wandb.run:
-                    # --- REFINED W&B LOGGING ---
                     log_dict = {'epoch': global_epoch_counter}
                     
-                    # Log mean training losses
                     for key, values in epoch_train_losses_all_models.items():
                         log_dict[f'train/mean_{key}'] = np.nanmean(values)
-                        log_dict[f'stage_{stage_idx}/train/mean_{key}'] = np.nanmean(values) # Per-stage logging
+                        log_dict[f'stage_{stage_idx}/train/mean_{key}'] = np.nanmean(values)
 
-                    # Log per-model training loss (still a useful diagnostic)
                     for i, loss_val in enumerate(epoch_train_losses_all_models['total_loss']):
                         log_dict[f'train/loss_model_{i}'] = loss_val
 
-                    # Aggregate and log validation metrics
                     if epoch_val_metrics_all_models:
-                        # Aggregate metrics across all models in the ensemble
                         aggregated_val_metrics = defaultdict(list)
                         for m_dict in epoch_val_metrics_all_models:
                             for key, value in m_dict.items():
                                 if value is not None and np.isfinite(value):
                                     aggregated_val_metrics[key].append(value)
                         
-                        # Log the mean of each metric across the ensemble
                         for key, values in aggregated_val_metrics.items():
                             log_dict[f'val/mean_{key}'] = np.nanmean(values)
-                            log_dict[f'stage_{stage_idx}/val/mean_{key}'] = np.nanmean(values) # Per-stage logging
+                            log_dict[f'stage_{stage_idx}/val/mean_{key}'] = np.nanmean(values)
                         
-                        # Log per-model validation loss (critical for diagnosing divergent models)
                         for i, m_dict in enumerate(epoch_val_metrics_all_models):
                             log_dict[f'val/val_loss_model_{i}'] = m_dict.get('val_loss')
 
                     wandb.log(log_dict, step=self.global_step)
-                    # --- END REFINED LOGGING ---
 
                 if optuna_trial:
                     mean_val_loss_for_pruning = np.nanmean([m.get('val_loss', np.nan) for m in epoch_val_metrics_all_models]) if epoch_val_metrics_all_models else float('inf')
@@ -573,15 +602,8 @@ class EnhancedASLTrainer:
 
         for model_idx, state in enumerate(self.best_states):
             if state is not None:
-                # Unwrap the compiled model before loading the state dict
-                unwrapped_model = self.models[model_idx]
-                if hasattr(unwrapped_model, '_orig_mod'):
-                    # If the model is compiled, load the state into the original module
-                    unwrapped_model._orig_mod.load_state_dict(state)
-                else:
-                    # Fallback for non-compiled models
-                    unwrapped_model.load_state_dict(state)
-                
+                unwrapped_model = getattr(self.models[model_idx], '_orig_mod', self.models[model_idx])
+                unwrapped_model.load_state_dict(state)
                 logger.info(f"Loaded best overall state for model {model_idx} (Overall Val Loss: {self.overall_best_val_losses[model_idx]:.4f})")
             else:
                 logger.warning(f"No best overall state found for model {model_idx}. Using final state from last trained stage.")
@@ -600,18 +622,13 @@ class EnhancedASLTrainer:
         total_loss = 0.0
         total_components = defaultdict(float)
         
-        # The progress bar setup remains the same
-        pbar = tqdm(islice(train_loader_iter, steps_per_epoch), total=steps_per_epoch, desc=f"Epoch {current_global_epoch+1} Training", leave=False, ncols=100)
+        pbar = tqdm(islice(train_loader_iter, steps_per_epoch), total=steps_per_epoch, desc=f"Epoch {self.global_step // steps_per_epoch + 1} Training", leave=False, ncols=100)
         
-        # Standard training loop
         for i, (signals, params_norm) in enumerate(pbar):
             signals, params_norm = signals.to(self.device), params_norm.to(self.device)
 
-            # 1. Zero gradients
             optimizer.zero_grad(set_to_none=True)
 
-            # 2. Forward pass with mixed precision
-            # The compiled model will run its optimized code here.
             with torch.amp.autocast(device_type=self.device.type, dtype=torch.bfloat16):
                 outputs = model(signals)
                 cbf_mean_norm, att_mean_norm, cbf_log_var, att_log_var, cbf_rough, att_rough = outputs
@@ -623,24 +640,15 @@ class EnhancedASLTrainer:
                     current_global_epoch
                 )
 
-            # 3. Scaled backward pass
             scaler.scale(loss).backward()
-
-            # 4. Optimizer step
-            # Unscale gradients just before the step.
             scaler.unscale_(optimizer) 
-            # Clip gradients for stability.
             torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
             scaler.step(optimizer)
-
-            # 5. Update the scale factor for the next iteration
             scaler.update()
 
-            # 6. Update the learning rate scheduler
             if scheduler:
                 scheduler.step()
             
-            # Log and update progress
             total_loss += loss.item()
             for key, value in loss_components.items():
                 total_components[key] += value.item()
@@ -651,7 +659,6 @@ class EnhancedASLTrainer:
             pbar.set_postfix(loss=loss.item())
             self.global_step += 1
         
-        # Calculate and return average losses for the epoch
         num_steps = i + 1
         mean_total_loss = total_loss / num_steps if num_steps > 0 else 0.0
         mean_components = {key: val / num_steps for key, val in total_components.items()} if num_steps > 0 else {}
@@ -663,8 +670,6 @@ class EnhancedASLTrainer:
         all_cbf_preds_norm, all_att_preds_norm = [], []; all_cbf_trues_norm, all_att_trues_norm = [], []
         all_cbf_log_vars, all_att_log_vars = [], []
 
-        # For iterable datasets, validation_steps_per_epoch is used.
-        # For map-style datasets, we iterate through the whole thing.
         is_iterable = isinstance(val_loader.dataset, IterableDataset)
         val_iterator = islice(val_loader, self.validation_steps_per_epoch) if is_iterable else val_loader
         total_steps = self.validation_steps_per_epoch if is_iterable else len(val_loader)
@@ -701,7 +706,6 @@ class EnhancedASLTrainer:
                 metrics_dict['att_mae'] = mean_absolute_error(att_trues_denorm, att_preds_denorm)
                 metrics_dict['att_rmse'] = np.sqrt(mean_squared_error(att_trues_denorm, att_preds_denorm))
                 
-                # --- ADDED: Track MAE in the normalized space for cleaner signal ---
                 metrics_dict['cbf_mae_norm'] = mean_absolute_error(cbf_trues_norm_cat, cbf_preds_norm_cat)
                 metrics_dict['att_mae_norm'] = mean_absolute_error(att_trues_norm_cat, att_preds_norm_cat)
 
@@ -711,10 +715,7 @@ class EnhancedASLTrainer:
         return metrics_dict
 
     def predict(self, signals: np.ndarray) -> Tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
-        # === MODIFICATION START: Ensure input tensor matches model dtype ===
-        # The model is now bfloat16, so the input for inference must also be bfloat16.
         signals_tensor = torch.FloatTensor(signals).to(self.device, dtype=torch.bfloat16)
-        # === MODIFICATION END ===
 
         if signals_tensor.ndim == 1: signals_tensor = signals_tensor.unsqueeze(0)
         all_cbf_means_norm_list, all_att_means_norm_list = [], []; all_cbf_aleatoric_vars_list, all_att_aleatoric_vars_list = [], []
@@ -750,7 +751,6 @@ class EnhancedASLTrainer:
         total_cbf_std_denorm = np.sqrt(np.maximum(total_cbf_var_denorm, 0)); total_att_std_denorm = np.sqrt(np.maximum(total_att_var_denorm, 0))
         return ensemble_cbf_mean_denorm, ensemble_att_mean_denorm, total_cbf_std_denorm, total_att_std_denorm
 
-# === MODIFICATION START: Update ASLInMemoryDataset for DisentangledASLNet ===
 class ASLInMemoryDataset(torch.utils.data.Dataset):
     """
     A high-performance PyTorch Dataset that pre-loads and pre-processes the

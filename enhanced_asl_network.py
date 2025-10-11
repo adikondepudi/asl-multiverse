@@ -1,4 +1,4 @@
-# enhanced_asl_network.py
+# FILE: enhanced_asl_network.py
 
 import torch
 import torch.nn as nn
@@ -497,19 +497,29 @@ class DisentangledASLNet(nn.Module):
         elif norm_type == 'layer': return nn.LayerNorm(size)
         else: return nn.BatchNorm1d(size)
 
-    def get_shape_stream_params(self) -> List[torch.nn.Parameter]:
-        """Returns all parameters for the ATT-focused shape stream."""
-        params = list(self.pcasl_input_proj.parameters()) + \
-                 list(self.vsasl_input_proj.parameters()) + \
-                 list(self.transformer_encoder.parameters()) + \
-                 list(self.shape_pool.parameters()) + \
-                 list(self.joint_mlp.parameters()) + \
-                 list(self.att_head.parameters())
-        return params
+    def get_shape_stream_params(self):
+        """Returns all parameters related to shape processing and ATT prediction."""
+        return list(self.pcasl_input_proj.parameters()) + \
+               list(self.vsasl_input_proj.parameters()) + \
+               list(self.transformer_encoder.parameters()) + \
+               list(self.shape_pool.parameters()) + \
+               list(self.joint_mlp.parameters()) + \
+               list(self.att_head.parameters())
 
-    def get_amplitude_stream_params(self) -> List[torch.nn.Parameter]:
-        """Returns all parameters for the CBF-focused amplitude stream."""
+    def get_amplitude_stream_params(self):
+        """Returns all parameters related to amplitude processing and CBF prediction."""
+        # Note: The joint_mlp is trained in the ATT stage, so it's frozen here.
         return list(self.amplitude_mlp.parameters()) + list(self.cbf_head.parameters())
+    
+    def freeze_shape_stream(self):
+        """Freezes all parameters related to the shape stream (ATT prediction)."""
+        for param in self.get_shape_stream_params():
+            param.requires_grad = False
+    
+    def unfreeze_all_params(self):
+        """Sets requires_grad=True for all model parameters."""
+        for param in self.parameters():
+            param.requires_grad = True
 # === MODIFICATION END ===
 
 def torch_kinetic_model(pred_cbf_norm: torch.Tensor, pred_att_norm: torch.Tensor,
