@@ -1,3 +1,10 @@
+# FILE: final_benchmark.py
+#
+# A definitive, publication-ready benchmarking script to compare the trained
+# network against the conventional Least-Squares (LS) fitting method.
+# MODIFIED to implement a comprehensive "Pathology Pack" and "SNR Gauntlet"
+# for irrefutable, multi-faceted performance evaluation.
+
 import torch
 import numpy as np
 import pandas as pd
@@ -32,7 +39,7 @@ def load_artifacts(model_results_root: Path) -> tuple:
         models_dir = model_results_root / 'trained_models'
         num_plds = len(config['pld_values'])
         
-        # Determine which model class to use
+        # === MODIFICATION: Dynamically select model class ===
         is_disentangled = 'Disentangled' in config.get('model_class_name', '')
         if is_disentangled:
             model_class = DisentangledASLNet
@@ -43,9 +50,7 @@ def load_artifacts(model_results_root: Path) -> tuple:
 
         for model_path in models_dir.glob('ensemble_model_*.pt'):
             model = model_class(input_size=base_input_size, **config)
-            # --- FIX: Cast model to bfloat16 BEFORE loading state dict ---
-            # The model was trained and saved in bfloat16.
-            model.to(dtype=torch.bfloat16)
+            model.to(dtype=torch.bfloat16) # Models are trained in bfloat16
             model.load_state_dict(torch.load(model_path, map_location=torch.device('cpu')))
             model.eval()
             models.append(model)
@@ -69,6 +74,17 @@ def apply_normalization_disentangled(batch: np.ndarray, norm_stats: dict, num_pl
     amplitude_norm = (amplitude - norm_stats['amplitude_mean']) / (norm_stats['amplitude_std'] + 1e-6)
     
     return np.concatenate([shape_vector, eng_features, amplitude_norm], axis=1)
+
+def apply_normalization_unified(batch: np.ndarray, norm_stats: dict, num_plds: int) -> np.ndarray:
+    """Applies normalization for the original EnhancedASLNet input format."""
+    pcasl_raw, vsasl_raw = batch[:, :num_plds], batch[:, num_plds:num_plds*2]
+    features = batch[:, num_plds*2:]
+    
+    pcasl_norm = (pcasl_raw - norm_stats['pcasl_mean']) / (np.array(norm_stats['pcasl_std']) + 1e-6)
+    vsasl_norm = (vsasl_raw - norm_stats['vsasl_mean']) / (np.array(norm_stats['vsasl_std']) + 1e-6)
+    
+    return np.concatenate([pcasl_norm, vsasl_norm, features], axis=1)
+
 
 def calculate_metrics(df_group):
     """Calculates a comprehensive set of metrics for a given group of results."""
@@ -119,19 +135,23 @@ def test_scenario(scenario_name: str, cbf_range: tuple, att_range: tuple, tsnr_g
 
             # NN Prediction
             eng_feats = engineer_signal_features(noisy_signal, num_plds)
-            if is_disentangled:
-                nn_input_unnorm = np.concatenate([noisy_signal, eng_feats]).reshape(1, -1)
-                norm_input = apply_normalization_disentangled(nn_input_unnorm, norm_stats, num_plds)
-            else: # Original model format
-                # This part is simplified as it is not the main path of the refactoring
-                norm_input = np.zeros(num_plds * 2 + 4) # Placeholder
+            nn_input_unnorm = np.concatenate([noisy_signal, eng_feats]).reshape(1, -1)
             
-            # --- FIX: Cast input tensor to bfloat16 to match the model's dtype ---
+            # === MODIFICATION: Select correct normalization based on model type ===
+            if is_disentangled:
+                norm_input = apply_normalization_disentangled(nn_input_unnorm, norm_stats, num_plds)
+            else:
+                norm_input = apply_normalization_unified(nn_input_unnorm, norm_stats, num_plds)
+            
             input_tensor = torch.FloatTensor(norm_input).to(device, dtype=torch.bfloat16)
             with torch.no_grad():
                 cbf_means = [model(input_tensor)[0].cpu().numpy() for model in models]
                 att_means = [model(input_tensor)[1].cpu().numpy() for model in models]
-            nn_cbf_pred, nn_att_pred = denormalize_predictions(np.mean(cbf_means), np.mean(att_means), None, None, norm_stats) # Uncertainty not needed here
+            
+            # Squeeze is important because model output is (1,1) and mean makes it (1,)
+            nn_cbf_pred, nn_att_pred, _, _ = denormalize_predictions(
+                np.mean(cbf_means).squeeze(), np.mean(att_means).squeeze(), None, None, norm_stats
+            )
             
             results.append({
                 'scenario': scenario_name, 'tsnr': tsnr,

@@ -1,3 +1,7 @@
+# FILE: predict_on_invivo.py
+# THIS VERSION USES A ROBUST, GRID-SEARCH-INITIALIZED LS BASELINE.
+# MODIFIED to save uncertainty maps and computational timings.
+
 import torch
 import numpy as np
 import nibabel as nib
@@ -25,6 +29,18 @@ def apply_normalization_vectorized(batch: np.ndarray, norm_stats: Dict, num_plds
     
     return np.concatenate([pcasl_norm, vsasl_norm, features], axis=1)
 
+def apply_normalization_disentangled_vectorized(batch: np.ndarray, norm_stats: Dict, num_plds: int) -> np.ndarray:
+    """Applies normalization for the DisentangledASLNet input format to a batch."""
+    raw_signal = batch[:, :num_plds*2]
+    eng_features = batch[:, num_plds*2:]
+    
+    amplitude = np.linalg.norm(raw_signal, axis=1, keepdims=True) + 1e-6
+    shape_vector = raw_signal / amplitude
+    
+    amplitude_norm = (amplitude - norm_stats['amplitude_mean']) / (norm_stats['amplitude_std'] + 1e-6)
+    
+    return np.concatenate([shape_vector, eng_features, amplitude_norm], axis=1)
+
 def denormalize_predictions(cbf_norm, att_norm, cbf_log_var_norm, att_log_var_norm, norm_stats):
     """Applies de-normalization to NN outputs, including uncertainty."""
     y_mean_cbf, y_std_cbf = norm_stats['y_mean_cbf'], norm_stats['y_std_cbf']
@@ -38,29 +54,42 @@ def denormalize_predictions(cbf_norm, att_norm, cbf_log_var_norm, att_log_var_no
 
     return cbf_denorm, att_denorm, cbf_std_denorm, att_std_denorm
 
-def batch_predict_nn(signals_masked, subject_plds, models, config, norm_stats, device) -> Tuple:
+def batch_predict_nn(signals_masked, subject_plds, models, config, norm_stats, device, is_disentangled) -> Tuple:
     """Runs batched inference and returns predictions AND uncertainty."""
-    # This function is simplified for brevity but would need the disentangled logic
-    # similar to the one in the modified final_benchmark.py
     num_plds_train = len(config['pld_values'])
     eng_feats = engineer_signal_features(signals_masked, num_plds_train)
-    nn_input = np.concatenate([signals_masked, eng_feats], axis=1) # Simplified
     
-    norm_input = apply_normalization_vectorized(nn_input, norm_stats, num_plds_train)
-
-    # --- FIX: Cast input tensor to bfloat16 to match the model's dtype ---
+    # === MODIFICATION: Select correct normalization based on model type ===
+    if is_disentangled:
+        nn_input_unnorm = np.concatenate([signals_masked, eng_feats], axis=1)
+        norm_input = apply_normalization_disentangled_vectorized(nn_input_unnorm, norm_stats, num_plds_train)
+    else:
+        nn_input = np.concatenate([signals_masked, eng_feats], axis=1)
+        norm_input = apply_normalization_vectorized(nn_input, norm_stats, num_plds_train)
+    
     input_tensor = torch.FloatTensor(norm_input).to(device, dtype=torch.bfloat16)
     
     with torch.no_grad():
-        cbf_means = [model(input_tensor)[0].cpu().numpy() for model in models]
-        att_means = [model(input_tensor)[1].cpu().numpy() for model in models]
-        cbf_log_vars = [model(input_tensor)[2].cpu().numpy() for model in models]
-        att_log_vars = [model(input_tensor)[3].cpu().numpy() for model in models]
-
-    cbf_norm_ens = np.mean(cbf_means, axis=0)
-    att_norm_ens = np.mean(att_means, axis=0)
-    cbf_log_var_ens = np.mean(cbf_log_vars, axis=0)
-    att_log_var_ens = np.mean(att_log_vars, axis=0)
+        cbf_means, att_means, cbf_log_vars, att_log_vars = [], [], [], []
+        # Process in chunks to avoid GPU memory errors on large masks
+        batch_size = 8192
+        for i in range(0, len(input_tensor), batch_size):
+            batch_tensor = input_tensor[i:i+batch_size]
+            
+            cbf_means_batch = [model(batch_tensor)[0].cpu().numpy() for model in models]
+            att_means_batch = [model(batch_tensor)[1].cpu().numpy() for model in models]
+            cbf_log_vars_batch = [model(batch_tensor)[2].cpu().numpy() for model in models]
+            att_log_vars_batch = [model(batch_tensor)[3].cpu().numpy() for model in models]
+            
+            cbf_means.append(np.mean(cbf_means_batch, axis=0))
+            att_means.append(np.mean(att_means_batch, axis=0))
+            cbf_log_vars.append(np.mean(cbf_log_vars_batch, axis=0))
+            att_log_vars.append(np.mean(att_log_vars_batch, axis=0))
+    
+    cbf_norm_ens = np.concatenate(cbf_means, axis=0)
+    att_norm_ens = np.concatenate(att_means, axis=0)
+    cbf_log_var_ens = np.concatenate(cbf_log_vars, axis=0)
+    att_log_var_ens = np.concatenate(att_log_vars, axis=0)
     
     return denormalize_predictions(
         cbf_norm_ens.squeeze(), att_norm_ens.squeeze(),
@@ -88,7 +117,7 @@ def fit_ls_robust(signals_masked: np.ndarray, plds: np.ndarray, config: Dict) ->
     results_arr = np.array(results)
     return results_arr[:, 0], results_arr[:, 1]
 
-def predict_subject(subject_dir: Path, models: List, config: Dict, norm_stats: Dict, device: torch.device, output_root: Path):
+def predict_subject(subject_dir: Path, models: List, config: Dict, norm_stats: Dict, device: torch.device, output_root: Path, is_disentangled: bool):
     subject_id = subject_dir.name
     subject_output_dir = output_root / subject_id
     subject_output_dir.mkdir(parents=True, exist_ok=True)
@@ -104,7 +133,7 @@ def predict_subject(subject_dir: Path, models: List, config: Dict, norm_stats: D
     
     # --- NN Prediction ---
     start_time_nn = time.time()
-    nn_results = batch_predict_nn(low_snr_masked, plds, models, config, norm_stats, device)
+    nn_results = batch_predict_nn(low_snr_masked, plds, models, config, norm_stats, device, is_disentangled)
     timings['nn_total_s'] = time.time() - start_time_nn
     
     # --- LS Prediction ---
@@ -162,7 +191,6 @@ def main():
 
         for model_path in models_dir.glob('ensemble_model_*.pt'):
             model = model_class(input_size=base_input_size, **config)
-            # --- FIX: Cast model to bfloat16 BEFORE loading state dict ---
             model.to(dtype=torch.bfloat16)
             model.load_state_dict(torch.load(model_path, map_location=torch.device('cpu')))
             model.eval()
@@ -180,10 +208,9 @@ def main():
 
     subject_dirs = sorted([d for d in preprocessed_root.iterdir() if d.is_dir()])
     for subject_dir in tqdm(subject_dirs, desc="Processing All Subjects"):
-        predict_subject(subject_dir, models, config, norm_stats, device, output_root)
+        predict_subject(subject_dir, models, config, norm_stats, device, output_root, is_disentangled)
 
     print("\n--- All subjects predicted successfully! ---")
-
 
 if __name__ == '__main__':
     main()

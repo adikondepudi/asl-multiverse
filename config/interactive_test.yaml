@@ -1,10 +1,10 @@
-# config/interactive_test.yaml
+# FILE: config/interactive_test.yaml
 # A minimal configuration to test the new DisentangledASLNet and two-stage
 # training curriculum in an interactive HPC session (~15 mins).
 
 training:
   # === NEW: Specify the new model and training strategy ===
-  model_class_name: "DisentangledASLNet"
+  model_class_name: "DisentangledASLNet" # <-- THIS IS THE KEY TO SELECT THE NEW MODEL
   training_stages: ["ATT-only", "CBF-tuning"] # This flag activates your new curriculum
 
   # --- Key parameters for a fast run ---
