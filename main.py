@@ -257,9 +257,9 @@ def run_comprehensive_asl_research(config: ResearchConfig, output_dir: Path, nor
     val_dataset = ASLInMemoryDataset(data_dir=None, norm_stats=norm_stats)
     val_dataset.signals_unnormalized = val_signals_full
     val_dataset.params_unnormalized = validation_data_dict['parameters']
-    val_dataset.signals_normalized = val_dataset._normalize_signals(val_dataset.signals_unnormalized)
+    val_dataset.signals_processed = val_dataset._process_signals(val_dataset.signals_unnormalized)
     val_dataset.params_normalized = val_dataset._normalize_params(val_dataset.params_unnormalized)
-    val_dataset.signals_tensor = torch.from_numpy(val_dataset.signals_normalized.astype(np.float32))
+    val_dataset.signals_tensor = torch.from_numpy(val_dataset.signals_processed.astype(np.float32))
     val_dataset.params_tensor = torch.from_numpy(val_dataset.params_normalized.astype(np.float32))
     script_logger.info(f"Fixed validation dataset created with {len(val_dataset)} samples.")
     
