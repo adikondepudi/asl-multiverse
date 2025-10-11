@@ -301,7 +301,13 @@ class EnhancedASLTrainer:
         self.validation_steps_per_epoch = model_config.get('validation_steps_per_epoch', 50)
         self.scalers = [torch.cuda.amp.GradScaler() for _ in range(self.n_ensembles)]
 
-        self.models = [model_class(**model_config).to(self.device) for _ in range(n_ensembles)]
+        # === MODIFICATION START: Cast model to bfloat16 at initialization ===
+        # This aligns the model's weights with the autocast dtype, preventing
+        # the RuntimeError during the compiled forward pass.
+        logger.info("Initializing models and casting to bfloat16 for mixed-precision training compatibility.")
+        self.models = [model_class(**model_config).to(self.device, dtype=torch.bfloat16) for _ in range(n_ensembles)]
+        # === MODIFICATION END ===
+        
         print("INFO: Compiling models with torch.compile() for optimized performance...")
         self.models = [torch.compile(m, mode="max-autotune") for m in self.models]
         print("INFO: Model compilation complete.")
@@ -705,7 +711,11 @@ class EnhancedASLTrainer:
         return metrics_dict
 
     def predict(self, signals: np.ndarray) -> Tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
-        signals_tensor = torch.FloatTensor(signals).to(self.device)
+        # === MODIFICATION START: Ensure input tensor matches model dtype ===
+        # The model is now bfloat16, so the input for inference must also be bfloat16.
+        signals_tensor = torch.FloatTensor(signals).to(self.device, dtype=torch.bfloat16)
+        # === MODIFICATION END ===
+
         if signals_tensor.ndim == 1: signals_tensor = signals_tensor.unsqueeze(0)
         all_cbf_means_norm_list, all_att_means_norm_list = [], []; all_cbf_aleatoric_vars_list, all_att_aleatoric_vars_list = [], []
         for model in self.models:

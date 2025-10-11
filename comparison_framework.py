@@ -1,3 +1,4 @@
+# FILE: comparison_framework.py
 import numpy as np
 import torch
 import matplotlib.pyplot as plt
@@ -138,6 +139,9 @@ class ComprehensiveComparison:
 
         # The constructor is designed to handle extra kwargs, so we can pass the whole config.
         model = EnhancedASLNet(input_size=self.base_nn_input_size, **model_params_to_use)
+        # === MODIFICATION: Cast the loaded model to bfloat16 ===
+        # The state dict was saved from a bfloat16 model, so we load into a bfloat16 model.
+        model.to(dtype=torch.bfloat16)
         model.load_state_dict(torch.load(model_path, map_location=torch.device('cpu')))
         model.eval()
         return model
@@ -274,7 +278,8 @@ class ComprehensiveComparison:
                 apply_normalization_to_input_flat(sig, self.norm_stats, current_n_plds, current_m0_feature_flag)
                 for sig in nn_input_arr])
 
-        input_tensor = torch.FloatTensor(normalized_nn_input_arr_eval)
+        # === MODIFICATION: Cast input tensor to bfloat16 to match the model's dtype ===
+        input_tensor = torch.FloatTensor(normalized_nn_input_arr_eval).to(dtype=torch.bfloat16)
         start_time = time.time()
         with torch.no_grad():
             cbf_pred_norm, att_pred_norm, cbf_log_var_norm, att_log_var_norm, _, _ = self.nn_model(input_tensor)

@@ -1,7 +1,3 @@
-# predict_on_invivo.py
-# THIS VERSION USES A ROBUST, GRID-SEARCH-INITIALIZED LS BASELINE.
-# MODIFIED to save uncertainty maps and computational timings.
-
 import torch
 import numpy as np
 import nibabel as nib
@@ -51,7 +47,9 @@ def batch_predict_nn(signals_masked, subject_plds, models, config, norm_stats, d
     nn_input = np.concatenate([signals_masked, eng_feats], axis=1) # Simplified
     
     norm_input = apply_normalization_vectorized(nn_input, norm_stats, num_plds_train)
-    input_tensor = torch.FloatTensor(norm_input).to(device)
+
+    # --- FIX: Cast input tensor to bfloat16 to match the model's dtype ---
+    input_tensor = torch.FloatTensor(norm_input).to(device, dtype=torch.bfloat16)
     
     with torch.no_grad():
         cbf_means = [model(input_tensor)[0].cpu().numpy() for model in models]
@@ -130,6 +128,62 @@ def predict_subject(subject_dir: Path, models: List, config: Dict, norm_stats: D
         nib.save(nib.Nifti1Image(full_map.reshape(dims), affine, header), subject_output_dir / f'{name}.nii.gz')
     print(f"  --> Saved all maps and timings for {subject_id}.")
 
+def main():
+    parser = argparse.ArgumentParser(description="Run inference on preprocessed in-vivo ASL data.")
+    parser.add_argument("preprocessed_dir", type=str, help="Path to the directory containing the preprocessed NumPy data.")
+    parser.add_argument("model_artifacts_dir", type=str, help="Path to the directory with trained models, config, and norm stats.")
+    parser.add_argument("output_dir", type=str, help="Directory to save the final NIfTI parameter maps.")
+    args = parser.parse_args()
+
+    preprocessed_root = Path(args.preprocessed_dir)
+    model_root = Path(args.model_artifacts_dir)
+    output_root = Path(args.output_dir)
+    output_root.mkdir(parents=True, exist_ok=True)
+
+    # --- Load Artifacts ---
+    print(f"--> Loading artifacts from: {model_root}")
+    try:
+        with open(model_root / 'research_config.json', 'r') as f:
+            config = json.load(f)
+        with open(model_root / 'norm_stats.json', 'r') as f:
+            norm_stats = json.load(f)
+
+        models = []
+        models_dir = model_root / 'trained_models'
+        num_plds = len(config['pld_values'])
+        
+        is_disentangled = 'Disentangled' in config.get('model_class_name', '')
+        if is_disentangled:
+            model_class = DisentangledASLNet
+            base_input_size = num_plds * 2 + 4 + 1
+        else:
+            model_class = EnhancedASLNet
+            base_input_size = num_plds * 2 + 4
+
+        for model_path in models_dir.glob('ensemble_model_*.pt'):
+            model = model_class(input_size=base_input_size, **config)
+            # --- FIX: Cast model to bfloat16 BEFORE loading state dict ---
+            model.to(dtype=torch.bfloat16)
+            model.load_state_dict(torch.load(model_path, map_location=torch.device('cpu')))
+            model.eval()
+            models.append(model)
+        
+        if not models:
+            raise FileNotFoundError("No models found in trained_models folder.")
+    except Exception as e:
+        print(f"[FATAL ERROR] Could not load artifacts: {e}. Exiting.")
+        sys.exit(1)
+
+    device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+    for model in models:
+        model.to(device)
+
+    subject_dirs = sorted([d for d in preprocessed_root.iterdir() if d.is_dir()])
+    for subject_dir in tqdm(subject_dirs, desc="Processing All Subjects"):
+        predict_subject(subject_dir, models, config, norm_stats, device, output_root)
+
+    print("\n--- All subjects predicted successfully! ---")
+
+
 if __name__ == '__main__':
-    # Main execution logic remains similar but would call the modified predict_subject
-    pass
+    main()

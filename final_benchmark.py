@@ -1,10 +1,3 @@
-# final_benchmark.py
-#
-# A definitive, publication-ready benchmarking script to compare the trained
-# network against the conventional Least-Squares (LS) fitting method.
-# MODIFIED to implement a comprehensive "Pathology Pack" and "SNR Gauntlet"
-# for irrefutable, multi-faceted performance evaluation.
-
 import torch
 import numpy as np
 import pandas as pd
@@ -50,6 +43,9 @@ def load_artifacts(model_results_root: Path) -> tuple:
 
         for model_path in models_dir.glob('ensemble_model_*.pt'):
             model = model_class(input_size=base_input_size, **config)
+            # --- FIX: Cast model to bfloat16 BEFORE loading state dict ---
+            # The model was trained and saved in bfloat16.
+            model.to(dtype=torch.bfloat16)
             model.load_state_dict(torch.load(model_path, map_location=torch.device('cpu')))
             model.eval()
             models.append(model)
@@ -62,7 +58,7 @@ def load_artifacts(model_results_root: Path) -> tuple:
         print(f"[FATAL ERROR] Could not load artifacts: {e}. Exiting.")
         sys.exit(1)
 
-def apply_normalization_disentangled(batch: np.ndarray, norm_stats: Dict, num_plds: int) -> np.ndarray:
+def apply_normalization_disentangled(batch: np.ndarray, norm_stats: dict, num_plds: int) -> np.ndarray:
     """Applies normalization for the DisentangledASLNet input format."""
     raw_signal = batch[:, :num_plds*2]
     eng_features = batch[:, num_plds*2:]
@@ -130,11 +126,12 @@ def test_scenario(scenario_name: str, cbf_range: tuple, att_range: tuple, tsnr_g
                 # This part is simplified as it is not the main path of the refactoring
                 norm_input = np.zeros(num_plds * 2 + 4) # Placeholder
             
-            input_tensor = torch.FloatTensor(norm_input).to(device)
+            # --- FIX: Cast input tensor to bfloat16 to match the model's dtype ---
+            input_tensor = torch.FloatTensor(norm_input).to(device, dtype=torch.bfloat16)
             with torch.no_grad():
                 cbf_means = [model(input_tensor)[0].cpu().numpy() for model in models]
                 att_means = [model(input_tensor)[1].cpu().numpy() for model in models]
-            nn_cbf_pred, nn_att_pred = denormalize_predictions(np.mean(cbf_means), np.mean(att_means), norm_stats)
+            nn_cbf_pred, nn_att_pred = denormalize_predictions(np.mean(cbf_means), np.mean(att_means), None, None, norm_stats) # Uncertainty not needed here
             
             results.append({
                 'scenario': scenario_name, 'tsnr': tsnr,
