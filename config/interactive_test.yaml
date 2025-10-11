@@ -1,0 +1,52 @@
+# config/interactive_test.yaml
+# A minimal configuration for a FAST (~2 minute) interactive test run on the HPC.
+# This validates the full training pipeline without waiting in the queue.
+
+training:
+  # Use the new DisentangledASLNet
+  model_class_name: "DisentangledASLNet"
+  training_stages: ["ATT-only", "CBF-tuning"]
+
+  # Minimal architecture and run parameters for speed
+  hidden_sizes: [16, 8, 4]
+  batch_size: 128
+  n_ensembles: 1
+  
+  # --- CRITICAL: Very short training schedule ---
+  n_epochs_stage1: 1  # Just ONE epoch for the ATT stage
+  n_epochs_stage2: 1  # Just ONE epoch for the CBF stage
+
+  # Other necessary parameters
+  learning_rate_att: 0.001
+  weight_decay: 1e-5
+  dropout_rate: 0.1
+  norm_type: "batch"
+  log_var_cbf_min: -6.0
+  log_var_cbf_max: 7.0
+  log_var_att_min: -2.0
+  log_var_att_max: 14.0
+  loss_weight_cbf: 1.0
+  loss_weight_att: 1.0
+  loss_log_var_reg_lambda: 0.0
+  transformer_d_model_focused: 8
+  transformer_nhead_model: 2
+  transformer_nlayers_model: 1
+
+data:
+  # Use on-the-fly data generation to avoid slow offline loading for this test
+  use_offline_dataset: false
+  pld_values: [500, 1000, 1500, 2000, 2500, 3000]
+  # Calculate norm stats on a tiny number of samples for speed
+  num_samples: 1000
+
+simulation:
+  T1_artery: 1850.0
+  T_tau: 1800.0
+  T2_factor: 1.0
+  alpha_BS1: 1.0
+  alpha_PCASL: 0.85
+  alpha_VSASL: 0.56
+
+wandb:
+  wandb_project: "asl-multiverse-interactive-tests"
+  wandb_entity: null
