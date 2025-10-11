@@ -21,7 +21,7 @@ training:
   # --- Architecture & Regularization (use proven values) ---
   hidden_sizes: [256, 128, 64]
   dropout_rate: 0.1
-  weight_decay: 1e-5
+  weight_decay: 0.00001
   learning_rate_att: 0.001
   norm_type: "batch"
 
