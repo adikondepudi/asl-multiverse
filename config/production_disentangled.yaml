@@ -1,0 +1,67 @@
+# config/production_disentangled.yaml
+#
+# Definitive configuration for a full-scale production training run of the
+# NEW DisentangledASLNet architecture. This implements the two-stage,
+# ATT-first training curriculum.
+
+training:
+  # --- NEW: Keys to activate the disentangled model and training curriculum ---
+  model_class_name: "DisentangledASLNet"
+  training_stages: ["ATT-only", "CBF-tuning"]
+
+  # --- Architecture & Regularization (Based on prior HPO) ---
+  hidden_sizes: [512, 256, 128]
+  dropout_rate: 0.0878
+  weight_decay: 0.0000138
+
+  # --- Learning Rate & Production Scale Parameters ---
+  learning_rate_att: 0.0005 # Used for both stages for simplicity and stability
+  batch_size: 8192
+  n_ensembles: 5
+  validation_steps_per_epoch: 50
+  norm_type: "batch"
+
+  # ==========================================================
+  # --- 2-STAGE DISENTANGLED CURRICULUM ---
+  # ==========================================================
+
+  # Stage 1: Train the SHAPE stream to master ATT prediction.
+  n_epochs_stage1: 75
+
+  # Stage 2: Freeze the SHAPE stream and train the AMPLITUDE stream for CBF.
+  n_epochs_stage2: 30
+  
+  # --- Loss Weights (Applied per-stage by the trainer logic) ---
+  loss_weight_cbf: 1.0
+  loss_weight_att: 2.5 # Stronger weight on ATT during its training phase
+
+  # --- Core Model/Loss Parameters (Unchanged) ---
+  log_var_cbf_min: -6.0
+  log_var_cbf_max: 7.0
+  log_var_att_min: -2.0
+  log_var_att_max: 14.0
+  loss_log_var_reg_lambda: 0.001
+  use_transformer_temporal_model: true # Placeholder, not directly used by new model
+  use_focused_transformer_model: true # Placeholder
+  transformer_d_model_focused: 32
+  transformer_nhead_model: 4
+  transformer_nlayers_model: 2
+
+data:
+  # --- CRITICAL: Requires a large, pre-generated offline dataset ---
+  use_offline_dataset: true
+  offline_dataset_path: "asl_offline_dataset_10M" # MUST match the path to your generated data
+  pld_values: [500, 1000, 1500, 2000, 2500, 3000]
+  num_samples: 1000000 # Number of samples for norm_stats calculation if needed
+
+simulation:
+  T1_artery: 1850.0
+  T_tau: 1800.0
+  T2_factor: 1.0
+  alpha_BS1: 1.0
+  alpha_PCASL: 0.85
+  alpha_VSASL: 0.56
+
+wandb:
+  wandb_project: "asl-multiverse-disentangled-prod" # New project for this run
+  wandb_entity: null # Your W&B entity, if you have one
