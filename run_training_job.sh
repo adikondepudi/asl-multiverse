@@ -13,10 +13,10 @@
 echo "Job started on $(hostname) at $(date)"
 mkdir -p slurm_logs # Create directory for logs if it doesn't exist
 
-# --- Activate Conda Environment ---
-# Replace with the correct path to your conda installation if needed
-source ~/miniconda3/etc/profile.d/conda.sh
-conda activate asl-multiverse # Use your environment name
+# --- Activate Conda Environment using the cluster's module system ---
+echo "Loading Anaconda module and activating environment..."
+module load anaconda3/2023.09  # This command sets up conda correctly for the job
+conda activate asl-multiverse # Your environment name
 
 # --- Set W&B to Offline Mode for HPC Stability ---
 export WANDB_MODE=offline
