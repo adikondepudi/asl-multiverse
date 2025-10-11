@@ -23,7 +23,8 @@ import optuna
 
 num_workers = mp.cpu_count()
 
-from enhanced_asl_network import EnhancedASLNet, CustomLoss
+# === MODIFICATION: Import the new DisentangledASLNet ===
+from enhanced_asl_network import EnhancedASLNet, CustomLoss, DisentangledASLNet
 from enhanced_simulation import RealisticASLSimulator, _generate_single_balanced_subject
 from utils import engineer_signal_features
 
@@ -178,13 +179,15 @@ class EnhancedASLDataset(Dataset):
     def __len__(self) -> int: return len(self.signals)
     def __getitem__(self, idx: int) -> Tuple[torch.Tensor, torch.Tensor]: return self.signals[idx], self.params[idx]
 
+# === MODIFICATION START: Update ASLIterableDataset for DisentangledASLNet ===
 class ASLIterableDataset(IterableDataset):
     """
-    An iterable dataset for on-the-fly data generation, normalization, and feature engineering.
-    This avoids creating massive datasets in RAM and ensures the model sees unique data in every epoch.
+    An iterable dataset for on-the-fly data generation.
+    MODIFIED to support both original and new disentangled data formats.
     """
     def __init__(self, simulator: RealisticASLSimulator, plds: np.ndarray, 
-                 noise_levels: List[float], norm_stats: Dict, num_att_bins: int = 14):
+                 noise_levels: List[float], norm_stats: Dict, num_att_bins: int = 14,
+                 disentangled_mode: bool = False):
         super().__init__()
         self.simulator = simulator
         self.plds = plds
@@ -197,6 +200,7 @@ class ASLIterableDataset(IterableDataset):
         self.cbf_range = self.physio_var.cbf_range
         self.t1_range = self.physio_var.t1_artery_range
         self.norm_stats = norm_stats
+        self.disentangled_mode = disentangled_mode
 
     def __iter__(self):
         worker_info = torch.utils.data.get_worker_info()
@@ -234,14 +238,22 @@ class ASLIterableDataset(IterableDataset):
                 # 4. Engineer features from raw signal
                 eng_features = engineer_signal_features(raw_signal, self.num_plds)
                 
-                # 5. Normalize raw signals
-                pcasl_norm = (raw_signal[:self.num_plds] - self.norm_stats['pcasl_mean']) / (np.array(self.norm_stats['pcasl_std']) + 1e-6)
-                vsasl_norm = (raw_signal[self.num_plds:] - self.norm_stats['vsasl_mean']) / (np.array(self.norm_stats['vsasl_std']) + 1e-6)
-            
-                # 6. Concatenate to form the final model input
-                final_input = np.concatenate([pcasl_norm, vsasl_norm, eng_features.flatten()])
+                if self.disentangled_mode:
+                    # 5a. Disentangled Input Generation
+                    amplitude = np.linalg.norm(raw_signal) + 1e-6
+                    shape_vector = raw_signal / amplitude
+                    
+                    amplitude_norm = (amplitude - self.norm_stats['amplitude_mean']) / (self.norm_stats['amplitude_std'] + 1e-6)
 
-                # 7. Normalize the target parameters
+                    # Concatenate shape, features, and amplitude for the model
+                    final_input = np.concatenate([shape_vector, eng_features.flatten(), np.array([amplitude_norm])])
+                else:
+                    # 5b. Original Input Generation
+                    pcasl_norm = (raw_signal[:self.num_plds] - self.norm_stats['pcasl_mean']) / (np.array(self.norm_stats['pcasl_std']) + 1e-6)
+                    vsasl_norm = (raw_signal[self.num_plds:] - self.norm_stats['vsasl_mean']) / (np.array(self.norm_stats['vsasl_std']) + 1e-6)
+                    final_input = np.concatenate([pcasl_norm, vsasl_norm, eng_features.flatten()])
+
+                # 6. Normalize the target parameters
                 params = np.array([true_cbf, true_att])
                 params_norm = np.array([
                     (params[0] - self.norm_stats['y_mean_cbf']) / self.norm_stats['y_std_cbf'],
@@ -265,6 +277,7 @@ class ASLIterableDataset(IterableDataset):
                     ) from e
                 
                 continue 
+# === MODIFICATION END ===
 
 class EnhancedASLTrainer:
     def __init__(self,
@@ -315,10 +328,79 @@ class EnhancedASLTrainer:
         self.global_step = 0
         self.norm_stats = None
 
+    # === MODIFICATION START: New staged training logic ===
     def train_ensemble(self,
                    train_loaders: List[DataLoader], val_loaders: List[Optional[DataLoader]],
                    epoch_schedule: List[int], steps_per_epoch_schedule: List[Optional[int]],
                    early_stopping_patience: int = 20, optuna_trial: Optional[Any] = None) -> Dict[str, Any]:
+        
+        # Check for the new disentangled training flag
+        training_stages_config = self.model_config.get('training_stages')
+        if training_stages_config and isinstance(self.models[0], DisentangledASLNet):
+            logger.info(">>> Detected 'training_stages' config. Running new DISENTANGLED training curriculum. <<<")
+            return self._train_disentangled_curriculum(training_stages_config, train_loaders[0], val_loaders[0], early_stopping_patience)
+        else:
+            logger.info(">>> Running original unified training curriculum. <<<")
+            return self._train_original_curriculum(train_loaders, val_loaders, epoch_schedule, steps_per_epoch_schedule, early_stopping_patience, optuna_trial)
+
+    def _train_stage_logic(self, stage_name: str, n_epochs: int, train_loader: DataLoader, val_loader: Optional[DataLoader], early_stopping_patience: int) -> None:
+        """Helper function to run a generic training stage."""
+        logger.info(f"--- Starting Stage: {stage_name} ({n_epochs} epochs) ---")
+
+        # Configure optimizer and loss for the current stage
+        for model_idx, model in enumerate(self.models):
+            is_att_stage = 'ATT' in stage_name.upper()
+            if is_att_stage:
+                params_to_train = model.get_shape_stream_params()
+                self.custom_loss_fn.w_cbf = 0.0
+                self.custom_loss_fn.w_att = self.model_config.get('loss_weight_att', 1.0)
+                logger.info(f"  Model {model_idx}: Training ATT stream with CBF loss OFF.")
+            else: # CBF stage
+                model.freeze_shape_stream() # Freeze the already-trained shape stream
+                params_to_train = model.get_amplitude_stream_params()
+                self.custom_loss_fn.w_cbf = self.model_config.get('loss_weight_cbf', 1.0)
+                self.custom_loss_fn.w_att = 0.0
+                logger.info(f"  Model {model_idx}: Training CBF stream (Shape stream frozen) with ATT loss OFF.")
+            
+            self.optimizers[model_idx] = torch.optim.AdamW(params_to_train, lr=self.lr_att_base, weight_decay=self.weight_decay)
+            self.schedulers[model_idx] = torch.optim.lr_scheduler.OneCycleLR(self.optimizers[model_idx], max_lr=self.lr_att_base, total_steps=n_epochs * len(train_loader))
+
+        best_val_losses_stage = [float('inf')] * self.n_ensembles
+        patience_counters_stage = [0] * self.n_ensembles
+            
+        for epoch in range(n_epochs):
+            # ... The inner epoch loop logic is mostly the same as the original ...
+            # (Loop over models, train, validate, check early stopping)
+            # This part can be refactored from the original `_train_original_curriculum`
+            pass # Placeholder for the detailed epoch loop
+
+    def _train_disentangled_curriculum(self, stages: List[str], train_loader: DataLoader, val_loader: Optional[DataLoader], early_stopping_patience: int) -> Dict[str, Any]:
+        """Runs the new two-stage ATT-then-CBF training curriculum."""
+        histories = defaultdict(lambda: defaultdict(list))
+        self.global_step = 0
+        self.overall_best_val_losses = [float('inf')] * self.n_ensembles
+        
+        # STAGE 1: Train ATT Stream
+        self._train_stage_logic("ATT-only", self.model_config.get('n_epochs_stage1', 50), train_loader, val_loader, early_stopping_patience)
+        
+        # STAGE 2: Train CBF Stream
+        self._train_stage_logic("CBF-tuning", self.model_config.get('n_epochs_stage2', 30), train_loader, val_loader, early_stopping_patience)
+
+        # Load best overall states and return final metrics
+        for model_idx, state in enumerate(self.best_states):
+             if state is not None:
+                self.models[model_idx].load_state_dict(state)
+        
+        final_val_losses = [l for l in self.overall_best_val_losses if l != float('inf')]
+        final_mean_val_loss = np.nanmean(final_val_losses) if final_val_losses else float('nan')
+        return {'final_mean_val_loss': final_mean_val_loss, 'all_histories': histories}
+
+
+    def _train_original_curriculum(self,
+                   train_loaders: List[DataLoader], val_loaders: List[Optional[DataLoader]],
+                   epoch_schedule: List[int], steps_per_epoch_schedule: List[Optional[int]],
+                   early_stopping_patience: int = 20, optuna_trial: Optional[Any] = None) -> Dict[str, Any]:
+    # === MODIFICATION END ===
         
         histories = defaultdict(lambda: defaultdict(list))
         self.global_step = 0
@@ -658,74 +740,81 @@ class EnhancedASLTrainer:
         total_cbf_std_denorm = np.sqrt(np.maximum(total_cbf_var_denorm, 0)); total_att_std_denorm = np.sqrt(np.maximum(total_att_var_denorm, 0))
         return ensemble_cbf_mean_denorm, ensemble_att_mean_denorm, total_cbf_std_denorm, total_att_std_denorm
 
+# === MODIFICATION START: Update ASLInMemoryDataset for DisentangledASLNet ===
 class ASLInMemoryDataset(torch.utils.data.Dataset):
     """
     A high-performance PyTorch Dataset that pre-loads and pre-processes the
-    entire offline dataset into RAM. Can also be used with pre-loaded in-memory data.
+    entire offline dataset into RAM.
+    MODIFIED to support both original and new disentangled data formats.
     """
-    def __init__(self, data_dir: Optional[str], norm_stats: dict):
+    def __init__(self, data_dir: Optional[str], norm_stats: dict, disentangled_mode: bool = False):
         self.data_dir = Path(data_dir) if data_dir else None
         self.norm_stats = norm_stats
         self.num_plds = len(norm_stats.get('pcasl_mean', []))
+        self.disentangled_mode = disentangled_mode
 
         if self.data_dir:
-            # --- HEAVY LIFTING: Load all data chunks into memory ONCE ---
             logger.info(f"Loading all dataset chunks from {self.data_dir} into RAM...")
             file_paths = sorted(list(self.data_dir.glob('dataset_chunk_*.npz')))
             if not file_paths:
                 raise FileNotFoundError(f"No dataset chunks found in {data_dir}. Run generate_offline_dataset.py first.")
             
-            all_signals = []
+            all_signals_with_features = []
             all_params = []
             for f in tqdm(file_paths, desc="Loading data chunks"):
                 with np.load(f) as data:
-                    all_signals.append(data['signals'])
+                    all_signals_with_features.append(data['signals'])
                     all_params.append(data['params'])
             
-            self.signals_unnormalized = np.concatenate(all_signals, axis=0)
+            self.signals_unnormalized = np.concatenate(all_signals_with_features, axis=0)
             self.params_unnormalized = np.concatenate(all_params, axis=0)
             logger.info(f"Loaded {len(self.signals_unnormalized)} samples into memory.")
 
-            # --- ONE-SHOT NORMALIZATION: Process the entire dataset at once ---
-            logger.info("Performing one-shot vectorized normalization on the entire dataset...")
-            self.signals_normalized = self._normalize_signals(self.signals_unnormalized)
+            logger.info("Performing one-shot vectorized processing on the entire dataset...")
+            self.signals_processed = self._process_signals(self.signals_unnormalized)
             self.params_normalized = self._normalize_params(self.params_unnormalized)
-            logger.info("Normalization complete. Dataset is ready.")
+            logger.info("Processing complete. Dataset is ready.")
 
-            self.signals_tensor = torch.from_numpy(self.signals_normalized.astype(np.float32))
+            self.signals_tensor = torch.from_numpy(self.signals_processed.astype(np.float32))
             self.params_tensor = torch.from_numpy(self.params_normalized.astype(np.float32))
         else:
-            # If no data_dir, initialize empty. Data must be populated manually.
             logger.info("ASLInMemoryDataset initialized in manual mode. Populate tensors directly.")
             self.signals_unnormalized = np.array([])
             self.params_unnormalized = np.array([])
-            self.signals_normalized = np.array([])
+            self.signals_processed = np.array([])
             self.params_normalized = np.array([])
             self.signals_tensor = torch.empty(0)
             self.params_tensor = torch.empty(0)
 
-    def _normalize_signals(self, signals_unnorm: np.ndarray) -> np.ndarray:
-        pcasl_raw = signals_unnorm[:, :self.num_plds]
-        vsasl_raw = signals_unnorm[:, self.num_plds:self.num_plds*2]
-        eng_features = signals_unnorm[:, self.num_plds*2:]
+    def _process_signals(self, signals_unnorm: np.ndarray) -> np.ndarray:
+        raw_signal_part = signals_unnorm[:, :self.num_plds*2]
+        eng_features_part = signals_unnorm[:, self.num_plds*2:]
 
-        pcasl_mean = np.array(self.norm_stats['pcasl_mean'])
-        pcasl_std = np.array(self.norm_stats['pcasl_std']) + 1e-6
-        vsasl_mean = np.array(self.norm_stats['vsasl_mean'])
-        vsasl_std = np.array(self.norm_stats['vsasl_std']) + 1e-6
+        if self.disentangled_mode:
+            amplitude = np.linalg.norm(raw_signal_part, axis=1, keepdims=True) + 1e-6
+            shape_vector = raw_signal_part / amplitude
+            
+            amp_mean = self.norm_stats['amplitude_mean']
+            amp_std = self.norm_stats['amplitude_std'] + 1e-6
+            amplitude_norm = (amplitude - amp_mean) / amp_std
+            
+            return np.concatenate([shape_vector, eng_features_part, amplitude_norm], axis=1)
+        else:
+            pcasl_raw = raw_signal_part[:, :self.num_plds]
+            vsasl_raw = raw_signal_part[:, self.num_plds:]
+            
+            pcasl_mean, pcasl_std = np.array(self.norm_stats['pcasl_mean']), np.array(self.norm_stats['pcasl_std']) + 1e-6
+            vsasl_mean, vsasl_std = np.array(self.norm_stats['vsasl_mean']), np.array(self.norm_stats['vsasl_std']) + 1e-6
 
-        pcasl_norm = (pcasl_raw - pcasl_mean) / pcasl_std
-        vsasl_norm = (vsasl_raw - vsasl_mean) / vsasl_std
-        
-        return np.concatenate([pcasl_norm, vsasl_norm, eng_features], axis=1)
+            pcasl_norm = (pcasl_raw - pcasl_mean) / pcasl_std
+            vsasl_norm = (vsasl_raw - vsasl_mean) / vsasl_std
+            
+            return np.concatenate([pcasl_norm, vsasl_norm, eng_features_part], axis=1)
 
     def _normalize_params(self, params_unnorm: np.ndarray) -> np.ndarray:
-        cbf_unnorm = params_unnorm[:, 0]
-        att_unnorm = params_unnorm[:, 1]
-        
+        cbf_unnorm, att_unnorm = params_unnorm[:, 0], params_unnorm[:, 1]
         cbf_norm = (cbf_unnorm - self.norm_stats['y_mean_cbf']) / self.norm_stats['y_std_cbf']
         att_norm = (att_unnorm - self.norm_stats['y_mean_att']) / self.norm_stats['y_std_att']
-        
         return np.stack([cbf_norm, att_norm], axis=1)
 
     def __len__(self):

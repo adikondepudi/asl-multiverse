@@ -396,6 +396,122 @@ class EnhancedASLNet(nn.Module):
             {'params': att_params, 'name': 'att_stream'}
         ]
 
+# === MODIFICATION START: New Disentangled Architecture ===
+class DisentangledASLNet(nn.Module):
+    """
+    A new architecture that explicitly disentangles signal SHAPE (for ATT)
+    and signal AMPLITUDE (for CBF) into separate processing streams before fusion.
+    """
+    def __init__(self, 
+                 input_size: int,
+                 hidden_sizes: List[int] = [256, 128, 64],
+                 n_plds: int = 6,
+                 dropout_rate: float = 0.1,
+                 norm_type: str = 'batch',
+                 transformer_d_model_focused: int = 32,
+                 transformer_nhead: int = 4,
+                 transformer_nlayers: int = 2,
+                 log_var_cbf_min: float = 0.0,
+                 log_var_cbf_max: float = 7.0,
+                 log_var_att_min: float = 0.0,
+                 log_var_att_max: float = 14.0,
+                 **kwargs):
+        super().__init__()
+        
+        self.n_plds = n_plds
+        self.num_shape_features = n_plds * 2
+        self.num_engineered_features = 4  # TTP_p, TTP_v, CoM_p, CoM_v
+        self.num_amplitude_features = 1
+        
+        # --- 1. SHAPE STREAM (Transformers for temporal features) ---
+        self.att_d_model = transformer_d_model_focused
+        self.pcasl_input_proj = nn.Linear(1, self.att_d_model)
+        self.vsasl_input_proj = nn.Linear(1, self.att_d_model)
+        
+        encoder_layer = nn.TransformerEncoderLayer(self.att_d_model, transformer_nhead, self.att_d_model * 2, dropout_rate, batch_first=True)
+        self.transformer_encoder = nn.TransformerEncoder(encoder_layer, transformer_nlayers)
+        self.shape_pool = AttentionPooling(self.att_d_model)
+        
+        # --- 2. AMPLITUDE STREAM (Simple MLP for energy-to-CBF mapping) ---
+        self.amplitude_mlp = nn.Sequential(
+            nn.Linear(self.num_amplitude_features + self.num_engineered_features, 32),
+            nn.ReLU(),
+            nn.Linear(32, 64),
+            nn.ReLU()
+        )
+        
+        # --- 3. FUSION & PREDICTION ---
+        shape_feature_size = self.att_d_model * 2 # One pooled feature for PCASL, one for VSASL
+        amplitude_feature_size = 64
+        fused_feature_size = shape_feature_size + amplitude_feature_size
+
+        self.joint_mlp = nn.Sequential(
+            nn.Linear(fused_feature_size, hidden_sizes[0]),
+            self._get_norm_layer(hidden_sizes[0], norm_type),
+            nn.ReLU(),
+            nn.Dropout(dropout_rate),
+            nn.Linear(hidden_sizes[0], hidden_sizes[1])
+        )
+
+        # Separate heads for ATT and CBF to facilitate staged training
+        self.att_head = UncertaintyHead(hidden_sizes[1], 1, log_var_min=log_var_att_min, log_var_max=log_var_att_max)
+        self.cbf_head = UncertaintyHead(hidden_sizes[1], 1, log_var_min=log_var_cbf_min, log_var_max=log_var_cbf_max)
+
+    def forward(self, x: torch.Tensor) -> Tuple[torch.Tensor, ...]:
+        # Unpack the disentangled input tensor
+        shape_vector = x[:, :self.num_shape_features]
+        engineered_features = x[:, self.num_shape_features : self.num_shape_features + self.num_engineered_features]
+        amplitude_scalar = x[:, -self.num_amplitude_features:]
+
+        # --- SHAPE STREAM ---
+        pcasl_shape = shape_vector[:, :self.n_plds].unsqueeze(-1)  # (B, PLDs, 1)
+        vsasl_shape = shape_vector[:, self.n_plds:].unsqueeze(-1) # (B, PLDs, 1)
+        
+        pcasl_proj = self.pcasl_input_proj(pcasl_shape)
+        vsasl_proj = self.vsasl_input_proj(vsasl_shape)
+        
+        pcasl_encoded = self.transformer_encoder(pcasl_proj)
+        vsasl_encoded = self.transformer_encoder(vsasl_proj)
+        
+        pcasl_features = self.shape_pool(pcasl_encoded)
+        vsasl_features = self.shape_pool(vsasl_encoded)
+        shape_features = torch.cat([pcasl_features, vsasl_features], dim=1)
+
+        # --- AMPLITUDE STREAM ---
+        amplitude_input = torch.cat([amplitude_scalar, engineered_features], dim=1)
+        amplitude_features = self.amplitude_mlp(amplitude_input)
+
+        # --- FUSION & PREDICTION ---
+        fused_features = torch.cat([shape_features, amplitude_features], dim=1)
+        joint_features = self.joint_mlp(fused_features)
+        
+        cbf_mean, cbf_log_var = self.cbf_head(joint_features)
+        att_mean, att_log_var = self.att_head(joint_features)
+
+        # Return in the standard order expected by the trainer and loss function
+        # The pre-estimator is removed, so we return None for those outputs
+        return cbf_mean, att_mean, cbf_log_var, att_log_var, None, None
+
+    def _get_norm_layer(self, size: int, norm_type: str) -> nn.Module:
+        if norm_type == 'batch': return nn.BatchNorm1d(size)
+        elif norm_type == 'layer': return nn.LayerNorm(size)
+        else: return nn.BatchNorm1d(size)
+
+    def get_shape_stream_params(self) -> List[torch.nn.Parameter]:
+        """Returns all parameters for the ATT-focused shape stream."""
+        params = list(self.pcasl_input_proj.parameters()) + \
+                 list(self.vsasl_input_proj.parameters()) + \
+                 list(self.transformer_encoder.parameters()) + \
+                 list(self.shape_pool.parameters()) + \
+                 list(self.joint_mlp.parameters()) + \
+                 list(self.att_head.parameters())
+        return params
+
+    def get_amplitude_stream_params(self) -> List[torch.nn.Parameter]:
+        """Returns all parameters for the CBF-focused amplitude stream."""
+        return list(self.amplitude_mlp.parameters()) + list(self.cbf_head.parameters())
+# === MODIFICATION END ===
+
 def torch_kinetic_model(pred_cbf_norm: torch.Tensor, pred_att_norm: torch.Tensor,
                         norm_stats: Dict, model_params: Dict) -> torch.Tensor:
     """
@@ -460,7 +576,7 @@ class CustomLoss(nn.Module):
                 cbf_pred_norm: torch.Tensor, att_pred_norm: torch.Tensor, 
                 cbf_true_norm: torch.Tensor, att_true_norm: torch.Tensor, 
                 cbf_log_var: torch.Tensor, att_log_var: torch.Tensor, 
-                cbf_rough_physical: torch.Tensor, att_rough_physical: torch.Tensor,
+                cbf_rough_physical: Optional[torch.Tensor], att_rough_physical: Optional[torch.Tensor],
                 global_epoch: int) -> Tuple[torch.Tensor, Dict[str, torch.Tensor]]:
         
         # Prevents both exploding precision and pathologically negative loss.
@@ -504,7 +620,7 @@ class CustomLoss(nn.Module):
 
         # --- Auxiliary Loss for Pre-Estimator (in NORMALIZED space for stability) ---
         pre_estimator_loss = torch.tensor(0.0, device=total_param_loss.device)
-        if self.pre_estimator_loss_weight > 0 and self.norm_stats:
+        if self.pre_estimator_loss_weight > 0 and self.norm_stats and cbf_rough_physical is not None:
             # Normalize the rough physical estimates before calculating loss.
             # This makes the loss scale-invariant and removes the need for manual scaling factors.
             cbf_rough_norm = (cbf_rough_physical - self.norm_stats['y_mean_cbf']) / (self.norm_stats['y_std_cbf'] + 1e-6)
