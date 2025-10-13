@@ -64,4 +64,4 @@ simulation:
 
 wandb:
   wandb_project: "asl-multiverse-disentangled-prod" # New project for this run
-  wandb_entity: null # Your W&B entity, if you have one
+  wandb_entity: "adikondepudi" # Your W&B entity, if you have one

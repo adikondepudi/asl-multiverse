@@ -19,7 +19,7 @@ source /cm/shared/apps/anaconda3/2023.09/etc/profile.d/conda.sh
 conda activate asl_multiverse # Use your environment name
 
 # --- Set W&B to Offline Mode for HPC Stability ---
-export WANDB_MODE=offline
+export WANDB_MODE=online
 
 # --- Define Output Directory ---
 # This creates a unique, timestamped directory for the results
