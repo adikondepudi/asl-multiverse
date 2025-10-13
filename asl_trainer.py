@@ -641,19 +641,24 @@ class EnhancedASLTrainer:
                     current_global_epoch
                 )
 
-            if use_scaler and self.device.type == 'cuda' and torch.is_autocast_enabled() and torch.get_autocast_gpu_dtype() == torch.bfloat16:
+            # Check if we are in bfloat16 mode, which doesn't need the GradScaler.
+            is_bfloat16_autocast = (use_scaler and self.device.type == 'cuda' and 
+                                    torch.is_autocast_enabled() and 
+                                    torch.get_autocast_gpu_dtype() == torch.bfloat16)
+
+            if is_bfloat16_autocast:
                 # BFloat16 path: No GradScaler needed.
                 loss.backward()
                 torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
                 optimizer.step()
             elif use_scaler:
-                # Original path for Float16 or standard Float32
+                # Standard path for Float16 or Float32 with GradScaler
                 scaler.scale(loss).backward()
                 scaler.unscale_(optimizer) 
                 torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
                 scaler.step(optimizer)
                 scaler.update()
-            else: # Fallback if scaler is not used at all
+            else:  # Fallback for CPU or if scaler is disabled
                 loss.backward()
                 torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
                 optimizer.step()
