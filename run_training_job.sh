@@ -15,7 +15,7 @@ mkdir -p slurm_logs # Create directory for logs if it doesn't exist
 
 # --- Activate Conda Environment using the cluster's module system ---
 echo "Loading Anaconda module and activating environment..."
-source ~/miniconda3/etc/profile.d/conda.sh
+source /cm/shared/apps/anaconda3/2023.09/etc/profile.d/conda.sh
 conda activate asl_multiverse # Use your environment name
 
 # --- Set W&B to Offline Mode for HPC Stability ---

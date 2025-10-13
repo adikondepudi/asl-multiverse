@@ -327,8 +327,6 @@ class EnhancedASLTrainer:
                    epoch_schedule: List[int], steps_per_epoch_schedule: List[Optional[int]],
                    early_stopping_patience: int = 20, optuna_trial: Optional[Any] = None) -> Dict[str, Any]:
         
-        # === MODIFICATION START: Correctly check the type of the compiled model ===
-        # torch.compile wraps the model, so we need to access the original module.
         unwrapped_model = getattr(self.models[0], '_orig_mod', self.models[0])
         training_stages_config = self.model_config.get('training_stages')
         
@@ -340,9 +338,7 @@ class EnhancedASLTrainer:
         else:
             logger.info(">>> Running original unified training curriculum. <<<")
             return self._train_original_curriculum(train_loaders, val_loaders, epoch_schedule, steps_per_epoch_schedule, early_stopping_patience, optuna_trial)
-        # === MODIFICATION END ===
 
-    # === MODIFICATION START: Fully implemented Disentangled Training Logic ===
     def _train_stage_logic(self, stage_name: str, n_epochs: int, train_loader: DataLoader, val_loader: Optional[DataLoader], early_stopping_patience: int) -> Dict:
         """Helper function to run a generic training stage."""
         logger.info(f"--- Starting Stage: {stage_name} ({n_epochs} epochs) ---")
@@ -449,7 +445,6 @@ class EnhancedASLTrainer:
         final_val_losses = [l for l in self.overall_best_val_losses if l != float('inf')]
         final_mean_val_loss = np.nanmean(final_val_losses) if final_val_losses else float('nan')
         return {'final_mean_val_loss': final_mean_val_loss, 'all_histories': all_histories}
-    # === MODIFICATION END ===
 
     def _train_original_curriculum(self,
                    train_loaders: List[DataLoader], val_loaders: List[Optional[DataLoader]],
@@ -646,9 +641,6 @@ class EnhancedASLTrainer:
                     current_global_epoch
                 )
 
-            # === MODIFICATION START: Conditional Scaler Logic ===
-            # The original error was: RuntimeError: 'amp_foreach_non_finite_check_and_unscale_' not implemented for 'BFloat16'
-            # This happens inside scaler.unscale_. We must bypass the scaler operations for bfloat16.
             if use_scaler and self.device.type == 'cuda' and torch.is_autocast_enabled() and torch.get_autocast_gpu_dtype() == torch.bfloat16:
                 # BFloat16 path: No GradScaler needed.
                 loss.backward()
@@ -665,7 +657,6 @@ class EnhancedASLTrainer:
                 loss.backward()
                 torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
                 optimizer.step()
-            # === MODIFICATION END ===
 
             if scheduler:
                 scheduler.step()

@@ -7,7 +7,6 @@ import multiprocessing as mp
 from itertools import product
 import numba
 
-# === MODIFICATION START ===
 # The JIT-compiled worker functions have been moved out of the ASLSimulator
 # class to the top level of the module. This makes them directly importable
 # by other files, such as utils.py, fixing the ImportError.
@@ -58,8 +57,6 @@ def _generate_pcasl_signal_jit(plds, att, cbf_ml_g_s, t1_artery, t_tau, alpha1, 
                          T2_factor)
         # Condition 0 (PLD < ATT - T_tau) is implicitly handled by signal being initialized to zeros.
     return signal
-
-# === MODIFICATION END ===
 
 
 @dataclass
@@ -189,7 +186,6 @@ class ASLSimulator:
         """Wrapper for the JIT-compiled VSASL function."""
         alpha2 = alpha_vsasl * (self.params.alpha_BS1**3)
         cbf_ml_g_s = cbf_ml_100g_min / 6000.0
-        # === MODIFICATION: Call the top-level function directly, without `self.` ===
         return _generate_vsasl_signal_jit(plds, att, cbf_ml_g_s, t1_artery, alpha2, self.params.T2_factor)
 
     def _generate_pcasl_signal(self, plds: np.ndarray, att: float,
@@ -197,7 +193,6 @@ class ASLSimulator:
         """Wrapper for the JIT-compiled PCASL function."""
         alpha1 = alpha_pcasl * (self.params.alpha_BS1**4)
         cbf_ml_g_s = cbf_ml_100g_min / 6000.0
-        # === MODIFICATION: Call the top-level function directly, without `self.` ===
         return _generate_pcasl_signal_jit(plds, att, cbf_ml_g_s, t1_artery, t_tau, alpha1, self.params.T2_factor)
 
     def parallel_grid_search(self,

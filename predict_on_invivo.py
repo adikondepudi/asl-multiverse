@@ -59,7 +59,6 @@ def batch_predict_nn(signals_masked, subject_plds, models, config, norm_stats, d
     num_plds_train = len(config['pld_values'])
     eng_feats = engineer_signal_features(signals_masked, num_plds_train)
     
-    # === MODIFICATION: Select correct normalization based on model type ===
     if is_disentangled:
         nn_input_unnorm = np.concatenate([signals_masked, eng_feats], axis=1)
         norm_input = apply_normalization_disentangled_vectorized(nn_input_unnorm, norm_stats, num_plds_train)

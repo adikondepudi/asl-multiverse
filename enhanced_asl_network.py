@@ -396,7 +396,6 @@ class EnhancedASLNet(nn.Module):
             {'params': att_params, 'name': 'att_stream'}
         ]
 
-# === MODIFICATION START: New Disentangled Architecture ===
 class DisentangledASLNet(nn.Module):
     """
     A new architecture that explicitly disentangles signal SHAPE (for ATT)
@@ -520,7 +519,6 @@ class DisentangledASLNet(nn.Module):
         """Sets requires_grad=True for all model parameters."""
         for param in self.parameters():
             param.requires_grad = True
-# === MODIFICATION END ===
 
 def torch_kinetic_model(pred_cbf_norm: torch.Tensor, pred_att_norm: torch.Tensor,
                         norm_stats: Dict, model_params: Dict) -> torch.Tensor:
