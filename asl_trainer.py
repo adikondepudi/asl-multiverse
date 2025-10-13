@@ -614,6 +614,7 @@ class EnhancedASLTrainer:
         Training epoch loop, optimized for use with torch.compile().
         MODIFIED to be compatible with BFloat16 by bypassing the GradScaler.
         """
+        print("--- RUNNING UPDATED VERSION OF _train_epoch --- THIS MESSAGE MUST APPEAR IN LOGS ---")
         model.train()
         total_loss = 0.0
         total_components = defaultdict(float)
