@@ -14,8 +14,8 @@ mkdir -p slurm_logs # Create directory for logs if it doesn't exist
 
 # --- Activate Conda Environment using the cluster's module system ---
 echo "Loading Anaconda module and activating environment..."
-module load anaconda3/2023.09  # This command sets up conda correctly for the job
-conda activate asl-multiverse # Your environment name
+source ~/miniconda3/etc/profile.d/conda.sh
+conda activate asl_multiverse # Use your environment name
 
 # --- Define Output Directory for the Dataset ---
 DATASET_DIR="asl_offline_dataset_10M"
