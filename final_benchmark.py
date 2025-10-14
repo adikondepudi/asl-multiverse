@@ -1,9 +1,5 @@
-# FILE: final_benchmark.py
-#
-# A definitive, publication-ready benchmarking script to compare the trained
-# network against the conventional Least-Squares (LS) fitting method.
-# MODIFIED to implement a comprehensive "Pathology Pack" and "SNR Gauntlet"
-# for irrefutable, multi-faceted performance evaluation.
+# final_benchmark.py
+# FINAL CORRECTED VERSION
 
 import torch
 import numpy as np
@@ -39,7 +35,6 @@ def load_artifacts(model_results_root: Path) -> tuple:
         models_dir = model_results_root / 'trained_models'
         num_plds = len(config['pld_values'])
         
-        # === MODIFICATION: Dynamically select model class ===
         is_disentangled = 'Disentangled' in config.get('model_class_name', '')
         if is_disentangled:
             model_class = DisentangledASLNet
@@ -137,20 +132,22 @@ def test_scenario(scenario_name: str, cbf_range: tuple, att_range: tuple, tsnr_g
             eng_feats = engineer_signal_features(noisy_signal, num_plds)
             nn_input_unnorm = np.concatenate([noisy_signal, eng_feats]).reshape(1, -1)
             
-            # === MODIFICATION: Select correct normalization based on model type ===
             if is_disentangled:
                 norm_input = apply_normalization_disentangled(nn_input_unnorm, norm_stats, num_plds)
             else:
                 norm_input = apply_normalization_unified(nn_input_unnorm, norm_stats, num_plds)
             
-            input_tensor = torch.FloatTensor(norm_input).to(device, dtype=torch.bfloat16)
+            input_tensor = torch.from_numpy(norm_input).to(device, dtype=torch.bfloat16)
+
             with torch.no_grad():
-                cbf_means = [model(input_tensor)[0].cpu().numpy() for model in models]
-                att_means = [model(input_tensor)[1].cpu().numpy() for model in models]
+                cbf_means = [model(input_tensor)[0].cpu().float().numpy() for model in models]
+                att_means = [model(input_tensor)[1].cpu().float().numpy() for model in models]
             
-            # Squeeze is important because model output is (1,1) and mean makes it (1,)
+            nn_cbf_pred_norm = np.mean([item.item() for item in cbf_means])
+            nn_att_pred_norm = np.mean([item.item() for item in att_means])
+
             nn_cbf_pred, nn_att_pred, _, _ = denormalize_predictions(
-                np.mean(cbf_means).squeeze(), np.mean(att_means).squeeze(), None, None, norm_stats
+                nn_cbf_pred_norm, nn_att_pred_norm, None, None, norm_stats
             )
             
             results.append({
@@ -193,9 +190,13 @@ def main(model_dir: Path, output_dir: Path):
 
     for scenario_name, group in df_results.groupby('scenario'):
         print(f"\n--- TABLE: PERFORMANCE FOR SCENARIO [{scenario_name}] ---")
-        summary = group.groupby('tsnr').apply(calculate_metrics)
+        # --- FIX 2: Silence pandas warning ---
+        summary = group.groupby('tsnr').apply(calculate_metrics, include_groups=False)
         print(summary.to_string(float_format="%.2f"))
-        summary.to_csv(output_dir / f'summary_{scenario_name.replace(" ", "_")}.csv')
+        
+        # --- FIX 1: Sanitize filename by removing slashes ---
+        safe_scenario_name = scenario_name.replace(" ", "_").replace("/", "")
+        summary.to_csv(output_dir / f'summary_{safe_scenario_name}.csv')
 
     print("\n--- Generating Publication-Ready Plots ---")
     fig, axes = plt.subplots(2, 2, figsize=(18, 14), sharex=True)
@@ -209,7 +210,7 @@ def main(model_dir: Path, output_dir: Path):
         for j, param in enumerate(params_to_plot):
             ax = axes[i, j]
             for s_idx, (scenario_name, group) in enumerate(df_results.groupby('scenario')):
-                summary = group.groupby('tsnr').apply(calculate_metrics)
+                summary = group.groupby('tsnr').apply(calculate_metrics, include_groups=False)
                 ax.plot(summary.index, summary[f'NN {param} {metric}'], 'o-', color=palette[s_idx], label=f'NN ({scenario_name})', lw=2.5)
                 ax.plot(summary.index, summary[f'LS {param} {metric}'], 'x--', color=palette[s_idx], label=f'LS ({scenario_name})', lw=1.5)
             ax.set_title(f'{param} {title_part} vs. tSNR', fontsize=14, fontweight='bold')

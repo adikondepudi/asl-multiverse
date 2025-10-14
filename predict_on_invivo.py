@@ -1,4 +1,6 @@
 # predict_on_invivo.py
+# FINAL CORRECTED VERSION
+
 import torch
 import numpy as np
 import nibabel as nib
@@ -46,12 +48,16 @@ def denormalize_predictions(cbf_norm, att_norm, cbf_log_var_norm, att_log_var_no
     cbf_denorm = cbf_norm * y_std_cbf + y_mean_cbf
     att_denorm = att_norm * y_std_att + y_mean_att
     
-    # Clamp log_var to prevent numerical overflow from exp()
-    cbf_log_var_norm_clamped = np.clip(cbf_log_var_norm, -20, 20)
-    att_log_var_norm_clamped = np.clip(att_log_var_norm, -20, 20)
-    
-    cbf_std_denorm = np.exp(cbf_log_var_norm_clamped / 2.0) * y_std_cbf
-    att_std_denorm = np.exp(att_log_var_norm_clamped / 2.0) * y_std_att
+    cbf_std_denorm = None
+    if cbf_log_var_norm is not None:
+        # Clamp log_var to prevent numerical overflow from exp()
+        cbf_log_var_norm_clamped = np.clip(cbf_log_var_norm, -20, 20)
+        cbf_std_denorm = np.exp(cbf_log_var_norm_clamped / 2.0) * y_std_cbf
+
+    att_std_denorm = None
+    if att_log_var_norm is not None:
+        att_log_var_norm_clamped = np.clip(att_log_var_norm, -20, 20)
+        att_std_denorm = np.exp(att_log_var_norm_clamped / 2.0) * y_std_att
 
     return cbf_denorm, att_denorm, cbf_std_denorm, att_std_denorm
 
@@ -80,7 +86,6 @@ def batch_predict_nn(signals_masked: np.ndarray, subject_plds: np.ndarray, model
         resampled_signals[:, target_indices] = signals_masked[:, source_indices]
         resampled_signals[:, target_indices + num_model_plds] = signals_masked[:, source_indices + num_subject_plds]
     
-    # CRITICAL FIX: Engineer features from the RESAMPLED signal.
     eng_feats = engineer_signal_features(resampled_signals, num_model_plds)
     
     unnormalized_input = np.concatenate([resampled_signals, eng_feats], axis=1)
@@ -99,14 +104,10 @@ def batch_predict_nn(signals_masked: np.ndarray, subject_plds: np.ndarray, model
             batch_tensor = input_tensor[i:i+batch_size]
             
             with torch.amp.autocast(device_type=device.type, dtype=torch.bfloat16):
-                # EFFICIENT: Run each model only once
                 all_outputs = [model(batch_tensor) for model in models]
 
-            # FIX: Convert to float32 before numpy to avoid bfloat16 error.
-            # This block is now outside the autocast context.
             cbf_means_batch = [out[0].cpu().float().numpy() for out in all_outputs]
             att_means_batch = [out[1].cpu().float().numpy() for out in all_outputs]
-            # Robustly handle cases where uncertainty is not predicted
             cbf_log_vars_batch = [out[2].cpu().float().numpy() if out[2] is not None else np.zeros_like(cbf_m) for out, cbf_m in zip(all_outputs, cbf_means_batch)]
             att_log_vars_batch = [out[3].cpu().float().numpy() if out[3] is not None else np.zeros_like(att_m) for out, att_m in zip(all_outputs, att_means_batch)]
 
