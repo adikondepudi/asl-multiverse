@@ -1,11 +1,11 @@
+# FILE: config/interactive_test.yaml
 # config/interactive_test.yaml
 # A minimal configuration for a FAST (~2 minute) interactive test run on the HPC.
-# This validates the full training pipeline without waiting in the queue.
+# This validates the full unified training pipeline.
 
 training:
   # Use the new DisentangledASLNet
   model_class_name: "DisentangledASLNet"
-  training_stages: ["ATT-only", "CBF-tuning"]
 
   # Minimal architecture and run parameters for speed
   hidden_sizes: [16, 8, 4]
@@ -13,11 +13,11 @@ training:
   n_ensembles: 1
   
   # --- CRITICAL: Very short training schedule ---
-  n_epochs_stage1: 1  # Just ONE epoch for the ATT stage
-  n_epochs_stage2: 1  # Just ONE epoch for the CBF stage
+  n_epochs: 2             # Just TWO epochs for the whole run
+  steps_per_epoch: 10     # And only 10 batches per epoch
 
   # Other necessary parameters
-  learning_rate_att: 0.001
+  learning_rate: 0.001
   weight_decay: 1e-5
   dropout_rate: 0.1
   norm_type: "batch"
@@ -28,6 +28,7 @@ training:
   loss_weight_cbf: 1.0
   loss_weight_att: 1.0
   loss_log_var_reg_lambda: 0.0
+  loss_pinn_weight: 0.5
   transformer_d_model_focused: 8
   transformer_nhead_model: 2
   transformer_nlayers_model: 1

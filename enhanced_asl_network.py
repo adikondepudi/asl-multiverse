@@ -1,3 +1,4 @@
+// FILE: enhanced_asl_network.py
 # FILE: enhanced_asl_network.py
 
 import torch
@@ -398,8 +399,9 @@ class EnhancedASLNet(nn.Module):
 
 class DisentangledASLNet(nn.Module):
     """
-    A new architecture that explicitly disentangles signal SHAPE (for ATT)
-    and signal AMPLITUDE (for CBF) into separate processing streams before fusion.
+    DisentangledASLNet v2: A new architecture that explicitly disentangles signal SHAPE
+    (for ATT) and signal AMPLITUDE (for CBF) and fuses them using a dynamic,
+    context-aware Cross-Attention Fusion Engine.
     """
     def __init__(self, 
                  input_size: int,
@@ -429,9 +431,8 @@ class DisentangledASLNet(nn.Module):
         
         encoder_layer = nn.TransformerEncoderLayer(self.att_d_model, transformer_nhead, self.att_d_model * 2, dropout_rate, batch_first=True)
         self.transformer_encoder = nn.TransformerEncoder(encoder_layer, transformer_nlayers)
-        self.shape_pool = AttentionPooling(self.att_d_model)
         
-        # --- 2. AMPLITUDE STREAM (Simple MLP for energy-to-CBF mapping) ---
+        # --- 2. AMPLITUDE STREAM (Simple MLP for energy mapping) ---
         self.amplitude_mlp = nn.Sequential(
             nn.Linear(self.num_amplitude_features + self.num_engineered_features, 32),
             nn.ReLU(),
@@ -439,10 +440,22 @@ class DisentangledASLNet(nn.Module):
             nn.ReLU()
         )
         
-        # --- 3. FUSION & PREDICTION ---
-        shape_feature_size = self.att_d_model * 2 # One pooled feature for PCASL, one for VSASL
+        # --- 3. DYNAMIC FUSION ENGINE (Cross-Attention) & PREDICTION ---
         amplitude_feature_size = 64
-        fused_feature_size = shape_feature_size + amplitude_feature_size
+        # Project amplitude features to match shape feature dimensions for attention
+        self.query_proj = nn.Linear(amplitude_feature_size, self.att_d_model)
+
+        self.cross_attention = nn.MultiheadAttention(
+            embed_dim=self.att_d_model, 
+            nhead=transformer_nhead, 
+            dropout=dropout_rate, 
+            batch_first=True
+        )
+        self.fusion_norm = nn.LayerNorm(self.att_d_model)
+        self.fusion_dropout = nn.Dropout(dropout_rate)
+
+        # Fused features will be concatenation of attention output and original amplitude features
+        fused_feature_size = self.att_d_model + amplitude_feature_size
 
         self.joint_mlp = nn.Sequential(
             nn.Linear(fused_feature_size, hidden_sizes[0]),
@@ -452,7 +465,7 @@ class DisentangledASLNet(nn.Module):
             nn.Linear(hidden_sizes[0], hidden_sizes[1])
         )
 
-        # Separate heads for ATT and CBF to facilitate staged training
+        # Separate heads for ATT and CBF
         self.att_head = UncertaintyHead(hidden_sizes[1], 1, log_var_min=log_var_att_min, log_var_max=log_var_att_max)
         self.cbf_head = UncertaintyHead(hidden_sizes[1], 1, log_var_min=log_var_cbf_min, log_var_max=log_var_cbf_max)
 
@@ -472,23 +485,35 @@ class DisentangledASLNet(nn.Module):
         pcasl_encoded = self.transformer_encoder(pcasl_proj)
         vsasl_encoded = self.transformer_encoder(vsasl_proj)
         
-        pcasl_features = self.shape_pool(pcasl_encoded)
-        vsasl_features = self.shape_pool(vsasl_encoded)
-        shape_features = torch.cat([pcasl_features, vsasl_features], dim=1)
-
         # --- AMPLITUDE STREAM ---
         amplitude_input = torch.cat([amplitude_scalar, engineered_features], dim=1)
         amplitude_features = self.amplitude_mlp(amplitude_input)
 
-        # --- FUSION & PREDICTION ---
-        fused_features = torch.cat([shape_features, amplitude_features], dim=1)
+        # --- DYNAMIC FUSION ENGINE ---
+        # The sequence of shape features acts as Key and Value
+        shape_sequence = torch.cat([pcasl_encoded, vsasl_encoded], dim=1)
+        
+        # The amplitude features act as the Query
+        query_proj = self.query_proj(amplitude_features)
+        query = query_proj.unsqueeze(1) # (B, 1, att_d_model)
+
+        # Cross-attention: amplitude queries shape sequence
+        attn_output, _ = self.cross_attention(query=query, key=shape_sequence, value=shape_sequence)
+        
+        # Residual connection and normalization on the projected query
+        contextualized_query_unnorm = query + self.fusion_dropout(attn_output)
+        contextualized_query = self.fusion_norm(contextualized_query_unnorm).squeeze(1) # (B, att_d_model)
+
+        # Final feature vector for prediction, combining context-aware and original features
+        fused_features = torch.cat([contextualized_query, amplitude_features], dim=1)
+
+        # --- PREDICTION ---
         joint_features = self.joint_mlp(fused_features)
         
         cbf_mean, cbf_log_var = self.cbf_head(joint_features)
         att_mean, att_log_var = self.att_head(joint_features)
 
         # Return in the standard order expected by the trainer and loss function
-        # The pre-estimator is removed, so we return None for those outputs
         return cbf_mean, att_mean, cbf_log_var, att_log_var, None, None
 
     def _get_norm_layer(self, size: int, norm_type: str) -> nn.Module:
@@ -501,7 +526,6 @@ class DisentangledASLNet(nn.Module):
         return list(self.pcasl_input_proj.parameters()) + \
                list(self.vsasl_input_proj.parameters()) + \
                list(self.transformer_encoder.parameters()) + \
-               list(self.shape_pool.parameters()) + \
                list(self.joint_mlp.parameters()) + \
                list(self.att_head.parameters())
 
@@ -550,33 +574,25 @@ def torch_kinetic_model(pred_cbf_norm: torch.Tensor, pred_att_norm: torch.Tensor
 
 class CustomLoss(nn.Module):
     """
-    Custom loss: NLL with regression-focal loss on ATT and optional log_var regularization
-    and a physics-informed (PINN) reconstruction loss.
-    NEW: Includes an auxiliary loss to train the pre-estimator network.
+    Custom loss for v2: A unified loss combining uncertainty-aware NLL for
+    multi-task learning and a physics-informed (PINN) reconstruction loss for
+    regularization.
     """
     
     def __init__(self, 
                  w_cbf: float = 1.0, 
                  w_att: float = 1.0, 
                  log_var_reg_lambda: float = 0.0,
-                 focal_gamma: float = 1.5,
                  pinn_weight: float = 0.0,
                  model_params: Optional[Dict[str, Any]] = None,
-                 att_epoch_weight_schedule: Optional[callable] = None,
-                 pinn_att_weighting_sigma: float = 500.0,
-                 pre_estimator_loss_weight: float = 0.5 # New weight for auxiliary loss
                 ):
         super().__init__()
         self.w_cbf = w_cbf
         self.w_att = w_att
         self.log_var_reg_lambda = log_var_reg_lambda
-        self.focal_gamma = focal_gamma
         self.pinn_weight = pinn_weight
-        self.pre_estimator_loss_weight = pre_estimator_loss_weight
         self.model_params = model_params if model_params is not None else {}
         self.norm_stats = None
-        self.att_epoch_weight_schedule = att_epoch_weight_schedule or (lambda _: 1.0)
-        self.pinn_att_weighting_sigma = pinn_att_weighting_sigma
         self.mse_loss = nn.MSELoss()
 
     def forward(self,
@@ -592,25 +608,15 @@ class CustomLoss(nn.Module):
         att_log_var = torch.clamp(att_log_var, min=-10.0, max=10.0)
 
         # --- Standard NLL calculation (Aleatoric Uncertainty Loss) ---
-        # Now, all uses of cbf_log_var and att_log_var are guaranteed to be within a safe range.
         cbf_precision = torch.exp(-cbf_log_var)
         att_precision = torch.exp(-att_log_var)
 
         cbf_nll_loss = 0.5 * (cbf_precision * (cbf_pred_norm - cbf_true_norm)**2 + cbf_log_var)
         att_nll_loss = 0.5 * (att_precision * (att_pred_norm - att_true_norm)**2 + att_log_var)
 
-        # --- Focal Weighting for ATT based on prediction error ---
-        focal_weight = torch.ones_like(att_nll_loss)
-        if self.focal_gamma > 0:
-            with torch.no_grad():
-                att_residual = torch.abs(att_pred_norm - att_true_norm)
-                att_error_norm = torch.clamp(att_residual / 4.0, 0.0, 1.0)
-            focal_weight = (att_error_norm + 0.1).pow(self.focal_gamma)
-
         # --- Apply weights and combine losses ---
         weighted_cbf_loss = self.w_cbf * cbf_nll_loss
-        att_epoch_weight_factor = self.att_epoch_weight_schedule(global_epoch)
-        weighted_att_loss = self.w_att * att_nll_loss * focal_weight * att_epoch_weight_factor
+        weighted_att_loss = self.w_att * att_nll_loss
         total_param_loss = torch.mean(weighted_cbf_loss + weighted_att_loss)
 
         # --- Optional regularization on the magnitude of predicted uncertainty ---
@@ -626,25 +632,14 @@ class CustomLoss(nn.Module):
             input_signal_norm = normalized_input_signal[:, :num_raw_signal_feats]
             pinn_loss = self.mse_loss(reconstructed_signal_norm, input_signal_norm)
 
-        # --- Auxiliary Loss for Pre-Estimator (in NORMALIZED space for stability) ---
-        pre_estimator_loss = torch.tensor(0.0, device=total_param_loss.device)
-        if self.pre_estimator_loss_weight > 0 and self.norm_stats and cbf_rough_physical is not None:
-            # Normalize the rough physical estimates before calculating loss.
-            # This makes the loss scale-invariant and removes the need for manual scaling factors.
-            cbf_rough_norm = (cbf_rough_physical - self.norm_stats['y_mean_cbf']) / (self.norm_stats['y_std_cbf'] + 1e-6)
-            att_rough_norm = (att_rough_physical - self.norm_stats['y_mean_att']) / (self.norm_stats['y_std_att'] + 1e-6)
-            
-            loss_cbf_pre = self.mse_loss(cbf_rough_norm, cbf_true_norm)
-            loss_att_pre = self.mse_loss(att_rough_norm, att_true_norm)
-            pre_estimator_loss = loss_cbf_pre + loss_att_pre
-
-        total_loss = total_param_loss + log_var_regularization + self.pinn_weight * pinn_loss + self.pre_estimator_loss_weight * pre_estimator_loss
+        # --- Final Unified Loss ---
+        total_loss = total_param_loss + log_var_regularization + self.pinn_weight * pinn_loss
         
         loss_components = {
             'param_nll_loss': total_param_loss,
             'log_var_reg_loss': log_var_regularization,
             'pinn_loss': pinn_loss,
-            'pre_estimator_loss': pre_estimator_loss
+            'pre_estimator_loss': torch.tensor(0.0) # Placeholder for logging compatibility
         }
         
         return total_loss, loss_components

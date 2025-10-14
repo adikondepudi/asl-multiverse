@@ -1,5 +1,5 @@
 #!/bin/bash
-#SBATCH --job-name=asl-data-gen
+#SBATCH --job-name=asl-data-gen-v2
 #SBATCH --partition=cpu          # Use the CPU partition for this task
 #SBATCH --nodes=1
 #SBATCH --cpus-per-task=48       # Request a lot of CPU cores for parallelism
@@ -18,14 +18,15 @@ source /cm/shared/apps/anaconda3/2023.09/etc/profile.d/conda.sh
 conda activate asl_multiverse # Use your environment name
 
 # --- Define Output Directory for the Dataset ---
-DATASET_DIR="asl_offline_dataset_10M"
+# MODIFIED: Changed directory name to reflect the new v2 data strategy
+DATASET_DIR="asl_offline_dataset_10M_v2"
 
 # --- Clean up any previous partial run ---
 echo "Checking for and removing previous dataset directory: ${DATASET_DIR}"
 rm -rf "${DATASET_DIR}"
 
 # --- Run the Data Generation Script ---
-echo "Starting offline dataset generation for 10,000,000 samples..."
+echo "Starting offline dataset generation for 10,000,000 samples (v2 Strategy)..."
 python generate_offline_dataset.py "${DATASET_DIR}" --total_samples 10000000 --chunk_size 25000
 
 echo "Job finished at $(date)"

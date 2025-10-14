@@ -1,3 +1,4 @@
+// FILE: main.py
 # FILE: main.py
 import torch
 import numpy as np
@@ -36,31 +37,17 @@ script_logger = logging.getLogger(__name__)
 
 @dataclass
 class ResearchConfig:
-    # === MODIFICATION: Add model_class_name to the config dataclass ===
-    model_class_name: str = "EnhancedASLNet"
-    training_stages: Optional[List[str]] = None
+    model_class_name: str = "DisentangledASLNet"
     hidden_sizes: List[int] = field(default_factory=lambda: [256, 128, 64])
     learning_rate: float = 0.001
     use_offline_dataset: bool = False
     offline_dataset_path: Optional[str] = None
-    n_epochs_stage0_pretrain: int = 0
-    steps_per_epoch_stage0_pretrain: int = 0
-    learning_rate_cbf: Optional[float] = None
-    learning_rate_att: Optional[float] = None
-    learning_rate_stage2_cbf: Optional[float] = None
-    learning_rate_stage2_att: Optional[float] = None
+    n_epochs: int = 100
+    steps_per_epoch: int = 50
+    loss_pinn_weight: float = 1.0
     weight_decay: float = 1e-5
     batch_size: int = 256
-    steps_per_epoch_stage1: int = 20
-    steps_per_epoch_stage2: int = 40
-    n_epochs_stage1: int = 140
-    n_epochs_stage2: int = 60
     validation_steps_per_epoch: int = 50
-    learning_rate_stage2: float = 0.0001
-    loss_pinn_weight_stage1: float = 1.0
-    loss_pinn_weight_stage2: float = 0.1
-    pre_estimator_loss_weight_stage1: float = 1.0 
-    pre_estimator_loss_weight_stage2: float = 0.0 
     n_ensembles: int = 5
     dropout_rate: float = 0.1
     norm_type: str = 'batch'
@@ -87,8 +74,7 @@ class ResearchConfig:
     att_ranges_config: List[Tuple[float, float, str]] = field(default_factory=lambda: [(500.0, 1500.0, "Short ATT"),(1500.0, 2500.0, "Medium ATT"),(2500.0, 4000.0, "Long ATT")])
     T1_artery: float = 1850.0; T2_factor: float = 1.0; alpha_BS1: float = 1.0
     alpha_PCASL: float = 0.85; alpha_VSASL: float = 0.56; T_tau: float = 1800.0
-    training_noise_levels_stage1: List[float] = field(default_factory=lambda: [3.0, 5.0, 10.0, 15.0])
-    training_noise_levels_stage2: List[float] = field(default_factory=lambda: [10.0, 15.0, 20.0])
+    training_noise_levels: List[float] = field(default_factory=lambda: [3.0, 5.0, 10.0, 15.0, 20.0])
     n_test_subjects_per_att_range: int = 200 
     test_snr_levels: List[float] = field(default_factory=lambda: [5.0, 10.0])
     test_conditions: List[str] = field(default_factory=lambda: ['healthy', 'stroke'])
@@ -136,35 +122,40 @@ def objective(trial: optuna.Trial, base_config: ResearchConfig, output_dir: Path
     hidden_size_2 = trial.suggest_categorical("hidden_size_2", [64, 128, 256])
     hidden_size_3 = trial.suggest_categorical("hidden_size_3", [32, 64, 128])
     trial_config.hidden_sizes = [hidden_size_1, hidden_size_2, hidden_size_3]
-    trial_config.loss_pinn_weight_stage1 = trial.suggest_float("loss_pinn_weight_stage1", 0.1, 10.0, log=True)
-    trial_config.loss_pinn_weight_stage2 = trial.suggest_float("loss_pinn_weight_stage2", 0.0, 1.0)
+    trial_config.loss_pinn_weight = trial.suggest_float("loss_pinn_weight", 0.1, 10.0, log=True)
     
     script_logger.info(f"--- Optuna Trial {trial.number} ---")
     script_logger.info(f"  Params: lr={trial_config.learning_rate:.5f}, wd={trial_config.weight_decay:.6f}, dropout={trial_config.dropout_rate:.3f}")
     
     trial_config.n_ensembles = 1
-    trial_config.n_epochs_stage1 = base_config.optuna_n_epochs
-    trial_config.n_epochs_stage2 = 0
-    trial_config.steps_per_epoch_stage1 = base_config.optuna_steps_per_epoch
+    trial_config.n_epochs = base_config.optuna_n_epochs
+    trial_config.steps_per_epoch = base_config.optuna_steps_per_epoch
     
     plds_np = np.array(trial_config.pld_values)
     num_plds = len(plds_np)
     asl_params_sim = ASLParameters(**{k:v for k,v in asdict(trial_config).items() if k in ASLParameters.__annotations__})
     simulator = RealisticASLSimulator(params=asl_params_sim)
     
-    # HPO always uses the original model for simplicity
-    train_dataset = ASLIterableDataset(simulator, plds_np, trial_config.training_noise_levels_stage1, norm_stats=norm_stats, disentangled_mode=False)
-    val_dataset = ASLIterableDataset(simulator, plds_np, trial_config.training_noise_levels_stage1, norm_stats=norm_stats, disentangled_mode=False)
+    is_disentangled = trial_config.model_class_name == "DisentangledASLNet"
+    
+    train_dataset = ASLIterableDataset(simulator, plds_np, trial_config.training_noise_levels, norm_stats=norm_stats, disentangled_mode=is_disentangled)
+    val_dataset = ASLIterableDataset(simulator, plds_np, trial_config.training_noise_levels, norm_stats=norm_stats, disentangled_mode=is_disentangled)
     
     num_workers = min(4, os.cpu_count())
     train_loader = DataLoader(train_dataset, batch_size=trial_config.batch_size, num_workers=num_workers, pin_memory=True, persistent_workers=False)
     val_loader = DataLoader(val_dataset, batch_size=trial_config.batch_size, num_workers=num_workers, pin_memory=True, persistent_workers=False)
 
     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
-    base_input_size_nn = num_plds * 2 + 4
+    
+    if is_disentangled:
+        model_class = DisentangledASLNet
+        base_input_size_nn = num_plds * 2 + 4 + 1
+    else:
+        model_class = EnhancedASLNet
+        base_input_size_nn = num_plds * 2 + 4
     
     model_config = asdict(trial_config)
-    trainer = EnhancedASLTrainer(model_config=model_config, model_class=lambda **kwargs: EnhancedASLNet(input_size=base_input_size_nn, **kwargs),
+    trainer = EnhancedASLTrainer(model_config=model_config, model_class=lambda **kwargs: model_class(input_size=base_input_size_nn, **kwargs),
                                  input_size=base_input_size_nn,
                                  weight_decay=trial_config.weight_decay, 
                                  batch_size=trial_config.batch_size, n_ensembles=trial_config.n_ensembles, device=device)
@@ -175,9 +166,9 @@ def objective(trial: optuna.Trial, base_config: ResearchConfig, output_dir: Path
 
     try:
         train_results = trainer.train_ensemble(
-            train_loaders=[train_loader], val_loaders=[val_loader],
-            epoch_schedule=[trial_config.n_epochs_stage1],
-            steps_per_epoch_schedule=[trial_config.steps_per_epoch_stage1],
+            train_loader=train_loader, val_loader=val_loader,
+            n_epochs=trial_config.n_epochs,
+            steps_per_epoch=trial_config.steps_per_epoch,
             early_stopping_patience=5,
             optuna_trial=trial
         )
@@ -244,21 +235,18 @@ def run_comprehensive_asl_research(config: ResearchConfig, output_dir: Path, nor
     asl_params_sim = ASLParameters(**{k:v for k,v in asdict(config).items() if k in ASLParameters.__annotations__})
     simulator = RealisticASLSimulator(params=asl_params_sim)
 
-    script_logger.info("Starting multi-stage ensemble training...")
+    script_logger.info("Starting unified, single-stage ensemble training...")
     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
     script_logger.info(f"Using device: {device}")
 
-    # === MODIFICATION: Determine model class and input size from config ===
     is_disentangled = config.model_class_name == "DisentangledASLNet"
     if is_disentangled:
         script_logger.info("Selected model architecture: DisentangledASLNet")
         model_class = DisentangledASLNet
-        # shape (num_plds*2) + engineered (4) + amplitude (1)
         base_input_size_nn = num_plds * 2 + 4 + 1
     else:
         script_logger.info("Selected model architecture: EnhancedASLNet (Unified)")
         model_class = EnhancedASLNet
-        # raw signal (num_plds*2) + engineered (4)
         base_input_size_nn = num_plds * 2 + 4
     
     # --- Create a fixed, diverse validation set for stable evaluation ---
@@ -287,55 +275,15 @@ def run_comprehensive_asl_research(config: ResearchConfig, output_dir: Path, nor
     num_workers = min(os.cpu_count() or 1, 32)
     script_logger.info(f"Using a capped number of {num_workers} CPU cores for data loading.")
 
-    train_loaders = []
-    epoch_schedule = []
-    steps_per_epoch_schedule = []
-
-    stage_definitions = [
-        ('n_epochs_stage0_pretrain', 'steps_per_epoch_stage0_pretrain', 'standard'),
-        ('n_epochs_stage1', 'steps_per_epoch_stage1', 'standard'),
-        ('n_epochs_stage2', 'steps_per_epoch_stage2', 'weighted')
-    ]
-    
     if use_offline and offline_path:
         script_logger.info(f"Using OFFLINE In-Memory dataset from: {offline_path}")
         full_dataset = ASLInMemoryDataset(data_dir=offline_path, norm_stats=norm_stats, disentangled_mode=is_disentangled)
-        
-        script_logger.info("... creating standard loader for unbiased learning (Stages 0 & 1).")
-        standard_loader = DataLoader(full_dataset, batch_size=config.batch_size, num_workers=num_workers,
+        train_loader = DataLoader(full_dataset, batch_size=config.batch_size, num_workers=num_workers,
                                      pin_memory=True, persistent_workers=(num_workers > 0), shuffle=True)
-                                     
-        script_logger.info("... creating weighted sampler loader for hard-case fine-tuning (Stage 2).")
-        att_sampler = create_att_weighted_sampler(full_dataset)
-        weighted_loader = DataLoader(full_dataset, batch_size=config.batch_size, num_workers=num_workers,
-                                     pin_memory=True, persistent_workers=(num_workers > 0), sampler=att_sampler)
-        
-        loader_map = {"standard": standard_loader, "weighted": weighted_loader}
-
-        for n_epochs_key, _, sampler_type in stage_definitions:
-            n_epochs = getattr(config, n_epochs_key, 0)
-            if n_epochs > 0:
-                epoch_schedule.append(n_epochs)
-                steps_per_epoch_schedule.append(None)
-                train_loaders.append(loader_map[sampler_type])
-                script_logger.info(f"Scheduled stage '{n_epochs_key}' for {n_epochs} epochs with '{sampler_type}' loader.")
-
     else:
-        script_logger.info("Using ON-THE-FLY IterableDataset for all training stages.")
-        stage_noise_levels = [
-            config.training_noise_levels_stage1,
-            config.training_noise_levels_stage1,
-            config.training_noise_levels_stage2
-        ]
-        for i, (n_epochs_key, steps_key, _) in enumerate(stage_definitions):
-            n_epochs = getattr(config, n_epochs_key, 0)
-            if n_epochs > 0:
-                iterable_dataset = ASLIterableDataset(simulator, plds_np, stage_noise_levels[i], norm_stats=norm_stats, disentangled_mode=is_disentangled)
-                loader = DataLoader(iterable_dataset, batch_size=config.batch_size, num_workers=num_workers, pin_memory=True, persistent_workers=(num_workers > 0))
-                
-                epoch_schedule.append(n_epochs)
-                steps_per_epoch_schedule.append(getattr(config, steps_key))
-                train_loaders.append(loader)
+        script_logger.info("Using ON-THE-FLY IterableDataset for training.")
+        iterable_dataset = ASLIterableDataset(simulator, plds_np, config.training_noise_levels, norm_stats=norm_stats, disentangled_mode=is_disentangled)
+        train_loader = DataLoader(iterable_dataset, batch_size=config.batch_size, num_workers=num_workers, pin_memory=True, persistent_workers=(num_workers > 0))
 
     val_loader = DataLoader(val_dataset, batch_size=config.batch_size, num_workers=num_workers, pin_memory=True, shuffle=False)
     
@@ -354,14 +302,14 @@ def run_comprehensive_asl_research(config: ResearchConfig, output_dir: Path, nor
         if hasattr(model, 'set_norm_stats'):
             model.set_norm_stats(norm_stats)
     
-    script_logger.info(f"Training {config.n_ensembles}-model ensemble over {len(epoch_schedule)} stages...")
+    script_logger.info(f"Training {config.n_ensembles}-model ensemble for {config.n_epochs} epochs...")
     training_start_time = time.time()
     
     trainer.train_ensemble(
-        train_loaders=train_loaders,
-        val_loaders=[val_loader] * len(epoch_schedule),
-        epoch_schedule=epoch_schedule,
-        steps_per_epoch_schedule=steps_per_epoch_schedule,
+        train_loader=train_loader,
+        val_loader=val_loader,
+        n_epochs=config.n_epochs,
+        steps_per_epoch=config.steps_per_epoch if not use_offline else None,
         early_stopping_patience=25 
     )
 
