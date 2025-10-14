@@ -64,6 +64,26 @@ def load_artifacts_for_eval(model_root: Path) -> tuple:
     if not models: raise FileNotFoundError(f"No models found in {models_dir}")
     return models, config, norm_stats, is_disentangled
 
+def analyze_computational_performance(final_maps_dir: Path) -> pd.DataFrame:
+    """Analyzes the timing information from prediction runs."""
+    timings = []
+    for subject_dir in final_maps_dir.iterdir():
+        if not subject_dir.is_dir():
+            continue
+        timing_file = subject_dir / "timings.json"
+        if timing_file.exists():
+            with open(timing_file, 'r') as f:
+                data = json.load(f)
+            data['subject_id'] = subject_dir.name
+            timings.append(data)
+    if not timings:
+        print("Warning: No timing.json files found to analyze computational performance.", file=sys.stderr)
+        return pd.DataFrame()
+    df = pd.DataFrame(timings).set_index('subject_id')
+    if 'nn_total_s' in df.columns and 'ls_total_s' in df.columns:
+        df['speedup_factor'] = df['ls_total_s'] / df['nn_total_s'].replace(0, 1e-6)
+    return df
+
 # --- Core Evaluation Functions ---
 
 def evaluate_robustness(ls_1r_map: np.ndarray, nn_1r_map: np.ndarray, brain_mask: np.ndarray, param: str) -> dict:
@@ -89,28 +109,40 @@ def evaluate_robustness(ls_1r_map: np.ndarray, nn_1r_map: np.ndarray, brain_mask
     }
 
 def calculate_test_retest_cov(raw_subject_dir: Path, brain_mask: np.ndarray, gm_mask: np.ndarray, config: Dict,
-                                method: str, is_disentangled: bool, models: List = None, norm_stats: Dict = None, device: torch.device = None) -> Tuple[float, float]:
-    """Calculates the test-retest CoV by processing each of the 4 repeats."""
+                                method: str, is_disentangled: bool, models: List = None, norm_stats: Dict = None, device: torch.device = None) -> Tuple[float, float, np.ndarray, np.ndarray]:
+    """Calculates the test-retest CoV by processing each available repeat dynamically."""
     pcasl_files = find_and_sort_files_by_pld(raw_subject_dir, ['r_normdiff_alldyn_PCASL_*.nii*'])
     vsasl_files = find_and_sort_files_by_pld(raw_subject_dir, ['r_normdiff_alldyn_VSASL_*.nii*'])
-    if not pcasl_files or not vsasl_files: return np.nan, np.nan
+    if not pcasl_files or not vsasl_files: return np.nan, np.nan, None, None
     plds = np.array([int(re.search(r'_(\d+)', p.name).group(1)) for p in pcasl_files])
 
-    cbf_maps, att_maps = [], []
-    num_repeats = 4 # Assume 4 repeats
-    for i in range(num_repeats):
-        pcasl_repeat = [load_nifti_data(f) for f in pcasl_files]
-        vsasl_repeat = [load_nifti_data(f) for f in vsasl_files]
-        if any(d is None for d in pcasl_repeat) or any(d is None for d in vsasl_repeat): continue
-        if any(d.shape[-1] < num_repeats for d in pcasl_repeat) or any(d.shape[-1] < num_repeats for d in vsasl_repeat): continue
+    # --- ROBUSTNESS FIX: Pre-load data and determine number of repeats dynamically ---
+    pcasl_data_all_repeats = [load_nifti_data(f) for f in pcasl_files]
+    vsasl_data_all_repeats = [load_nifti_data(f) for f in vsasl_files]
 
-        pcasl_repeat_i = np.stack([d[..., i] for d in pcasl_repeat], axis=-1)
-        vsasl_repeat_i = np.stack([d[..., i] for d in vsasl_repeat], axis=-1)
+    if any(d is None for d in pcasl_data_all_repeats) or any(d is None for d in vsasl_data_all_repeats):
+        tqdm.write(f"  [Warning] Could not load all NIfTI files for test-retest. Skipping.")
+        return np.nan, np.nan, None, None
+
+    try:
+        num_repeats = min(d.shape[-1] for d in pcasl_data_all_repeats + vsasl_data_all_repeats)
+        if num_repeats < 2:
+            tqdm.write(f"  [Warning] Subject has < 2 repeats ({num_repeats}). Cannot calculate test-retest. Skipping.")
+            return np.nan, np.nan, None, None
+    except (IndexError, ValueError):
+        tqdm.write(f"  [Warning] Could not determine number of repeats. Skipping test-retest.")
+        return np.nan, np.nan, None, None
+    # --- END FIX ---
+
+    cbf_maps, att_maps = [], []
+    for i in range(num_repeats): # Loop over dynamically found number of repeats
+        # Use the pre-loaded data
+        pcasl_repeat_i = np.stack([d[..., i] for d in pcasl_data_all_repeats], axis=-1)
+        vsasl_repeat_i = np.stack([d[..., i] for d in vsasl_data_all_repeats], axis=-1)
         signal_i_flat = np.concatenate([pcasl_repeat_i.reshape(-1, len(plds)), vsasl_repeat_i.reshape(-1, len(plds))], axis=1)
         
         cbf_masked, att_masked = np.array([np.nan]), np.array([np.nan])
         if method == 'nn':
-            # batch_predict_nn returns (cbf, att, cbf_std, att_std)
             results = batch_predict_nn(signal_i_flat[brain_mask.flatten()], plds, models, config, norm_stats, device, is_disentangled)
             cbf_masked, att_masked = results[0], results[1]
         elif method == 'ls':
@@ -120,17 +152,20 @@ def calculate_test_retest_cov(raw_subject_dir: Path, brain_mask: np.ndarray, gm_
         cbf_map[brain_mask], att_map[brain_mask] = cbf_masked, att_masked
         cbf_maps.append(cbf_map); att_maps.append(att_map)
         
-    if not cbf_maps: return np.nan, np.nan
+    if len(cbf_maps) < 2:
+        return np.nan, np.nan, None, None
         
-    stacked_cbf, stacked_att = np.stack(cbf_maps, axis=-1), np.stack(att_maps, axis=-1)
-    
-    mean_cbf, std_cbf = np.nanmean(stacked_cbf, axis=-1), np.nanstd(stacked_cbf, axis=-1)
-    cov_map_cbf = np.divide(std_cbf, mean_cbf, out=np.full_like(mean_cbf, np.nan), where=mean_cbf > 1e-6)
-    
-    mean_att, std_att = np.nanmean(stacked_att, axis=-1), np.nanstd(stacked_att, axis=-1)
-    cov_map_att = np.divide(std_att, mean_att, out=np.full_like(mean_att, np.nan), where=mean_att > 1e-6)
-    
-    return np.nanmean(cov_map_cbf[gm_mask]), np.nanmean(cov_map_att[gm_mask]), std_cbf, std_att
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore", category=RuntimeWarning)
+        stacked_cbf, stacked_att = np.stack(cbf_maps, axis=-1), np.stack(att_maps, axis=-1)
+        
+        mean_cbf, std_cbf = np.nanmean(stacked_cbf, axis=-1), np.nanstd(stacked_cbf, axis=-1)
+        cov_map_cbf = np.divide(std_cbf, mean_cbf, out=np.full_like(mean_cbf, np.nan), where=mean_cbf > 1e-6)
+        
+        mean_att, std_att = np.nanmean(stacked_att, axis=-1), np.nanstd(stacked_att, axis=-1)
+        cov_map_att = np.divide(std_att, mean_att, out=np.full_like(mean_att, np.nan), where=mean_att > 1e-6)
+        
+        return np.nanmean(cov_map_cbf[gm_mask]), np.nanmean(cov_map_att[gm_mask]), std_cbf, std_att
 
 def evaluate_concordance(ls_map: np.ndarray, nn_map: np.ndarray, gm_mask: np.ndarray, param: str, subject_id: str, output_dir: Path) -> dict:
     if ls_map is None or nn_map is None or gm_mask is None: return {}
@@ -204,8 +239,9 @@ def main():
             results.update(evaluate_concordance(maps["ls_1r_att"], maps["nn_1r_att"], gm_mask, 'att', subject_id, output_path))
             
             tqdm.write(f"  Calculating Test-Retest Metrics for {subject_id}...")
-            ls_params = {k:v for k,v in config.items() if k in ['T1_artery','T_tau','T2_factor','alpha_BS1','alpha_PCASL','alpha_VSASL']}
+            # For NN, pass the full config. For LS, create a smaller dict of only physical params.
             nn_cbf_cov, nn_att_cov, _, _ = calculate_test_retest_cov(raw_subject_dir, brain_mask, gm_mask, config, 'nn', is_disentangled, models, norm_stats, device)
+            ls_params = {k:v for k,v in config.items() if k in ['T1_artery','T_tau','T2_factor','alpha_BS1','alpha_PCASL','alpha_VSASL']}
             ls_cbf_cov, ls_att_cov, meas_std_cbf, meas_std_att = calculate_test_retest_cov(raw_subject_dir, brain_mask, gm_mask, ls_params, 'ls', is_disentangled)
             results.update({'cbf_precision_cov_nn': nn_cbf_cov, 'att_precision_cov_nn': nn_att_cov, 'cbf_precision_cov_ls': ls_cbf_cov, 'att_precision_cov_ls': ls_att_cov})
             
@@ -230,9 +266,12 @@ def main():
         df_metric.to_csv(output_path / f"summary_{metric_name.lower()}.csv")
 
     df_timings = analyze_computational_performance(Path(args.final_maps_dir))
-    print("\n" + "="*80); print(" " * 22 + "COMPUTATIONAL PERFORMANCE SUMMARY"); print("="*80)
-    print(df_timings.mean().to_frame(name='Mean Value (s)').to_string(float_format="%.2f"))
-    df_timings.to_csv(output_path / "summary_computational_performance.csv")
+    if not df_timings.empty:
+        print("\n" + "="*80); print(" " * 22 + "COMPUTATIONAL PERFORMANCE SUMMARY"); print("="*80)
+        print(df_timings.mean().to_frame(name='Mean Value (s)').to_string(float_format="%.2f"))
+        df_timings.to_csv(output_path / "summary_computational_performance.csv")
+    else:
+        print("\nSkipping computational performance summary as no timing data was found.")
 
     print(f"\nAll summary tables saved to: {output_path.resolve()}"); print(f"All plots saved to: {output_path.resolve()}/plots/")
     print("\n--- In-vivo evaluation pipeline complete! ---")

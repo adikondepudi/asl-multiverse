@@ -1,3 +1,4 @@
+# predict_on_invivo.py
 import torch
 import numpy as np
 import nibabel as nib
@@ -98,11 +99,16 @@ def batch_predict_nn(signals_masked: np.ndarray, subject_plds: np.ndarray, model
             batch_tensor = input_tensor[i:i+batch_size]
             
             with torch.amp.autocast(device_type=device.type, dtype=torch.bfloat16):
-                cbf_means_batch = [model(batch_tensor)[0].cpu().numpy() for model in models]
-                att_means_batch = [model(batch_tensor)[1].cpu().numpy() for model in models]
-                # Handle cases where model doesn't output uncertainty
-                cbf_log_vars_batch = [m_out[2].cpu().numpy() if m_out[2] is not None else np.zeros_like(cbf_means_batch[0]) for m_out in [model(batch_tensor) for model in models]]
-                att_log_vars_batch = [m_out[3].cpu().numpy() if m_out[3] is not None else np.zeros_like(att_means_batch[0]) for m_out in [model(batch_tensor) for model in models]]
+                # EFFICIENT: Run each model only once
+                all_outputs = [model(batch_tensor) for model in models]
+
+            # FIX: Convert to float32 before numpy to avoid bfloat16 error.
+            # This block is now outside the autocast context.
+            cbf_means_batch = [out[0].cpu().float().numpy() for out in all_outputs]
+            att_means_batch = [out[1].cpu().float().numpy() for out in all_outputs]
+            # Robustly handle cases where uncertainty is not predicted
+            cbf_log_vars_batch = [out[2].cpu().float().numpy() if out[2] is not None else np.zeros_like(cbf_m) for out, cbf_m in zip(all_outputs, cbf_means_batch)]
+            att_log_vars_batch = [out[3].cpu().float().numpy() if out[3] is not None else np.zeros_like(att_m) for out, att_m in zip(all_outputs, att_means_batch)]
 
             cbf_means.append(np.mean(cbf_means_batch, axis=0))
             att_means.append(np.mean(att_means_batch, axis=0))
