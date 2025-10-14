@@ -446,7 +446,7 @@ class DisentangledASLNet(nn.Module):
 
         self.cross_attention = nn.MultiheadAttention(
             embed_dim=self.att_d_model, 
-            nhead=transformer_nhead, 
+            num_heads=transformer_nhead, 
             dropout=dropout_rate, 
             batch_first=True
         )
