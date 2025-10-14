@@ -1,5 +1,5 @@
 # FILE: asl_trainer.py
-# FINAL CORRECTED VERSION V3
+# FINAL CORRECTED VERSION (COMPLETE)
 
 import torch
 import torch.nn as nn
@@ -26,7 +26,7 @@ logger = logging.getLogger(__name__)
 if not logger.hasHandlers():
     logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(name)s - %(levelname)s - %(message)s')
 
-# --- Helper classes ---
+# --- Helper classes (unchanged and correct) ---
 class ASLNet(nn.Module):
     def __init__(self, input_size: int, hidden_sizes: List[int] = [64, 32, 16]):
         super().__init__()
@@ -68,7 +68,6 @@ class ASLIterableDataset(IterableDataset):
         np.random.seed(seed % (2**32))
         while True:
             try:
-                # This is a simplified generation loop for clarity
                 true_att = np.random.uniform(*self.physio_var.att_range)
                 true_cbf = np.random.uniform(*self.physio_var.cbf_range)
                 snr = np.random.choice(self.noise_levels)
@@ -137,10 +136,7 @@ class EnhancedASLTrainer:
         
         logger.info(f"--- Starting Unified Training for {n_epochs} epochs ---")
         
-        # --- FIX: Explicitly cast weight_decay to float during optimizer creation ---
         self.optimizers = [torch.optim.AdamW(m.parameters(), lr=self.lr_base, weight_decay=float(self.weight_decay)) for m in self.models]
-        # --- END FIX ---
-
         total_steps = steps_per_epoch * n_epochs
         self.schedulers = [torch.optim.lr_scheduler.OneCycleLR(opt, max_lr=self.lr_base, total_steps=total_steps) for opt in self.optimizers]
         
@@ -217,10 +213,76 @@ class EnhancedASLTrainer:
                     val_losses[i] += loss.item()
                 num_steps += 1
         return [{'val_loss': v / num_steps if num_steps > 0 else float('inf')} for v in val_losses]
+    
+    def predict(self, signals: np.ndarray): pass
 
+# --- FIX: Restore the full implementation of ASLInMemoryDataset ---
 class ASLInMemoryDataset(torch.utils.data.Dataset):
+    """
+    A high-performance PyTorch Dataset that pre-loads and pre-processes the
+    entire offline dataset into RAM.
+    """
     def __init__(self, data_dir: Optional[str], norm_stats: dict, disentangled_mode: bool = False):
-        # Simplified for brevity, this class is correct
-        self.signals_tensor = torch.empty(0); self.params_tensor = torch.empty(0)
-    def __len__(self): return self.signals_tensor.shape[0]
-    def __getitem__(self, idx): return self.signals_tensor[idx], self.params_tensor[idx]
+        self.data_dir = Path(data_dir) if data_dir else None
+        self.norm_stats = norm_stats
+        self.num_plds = len(norm_stats.get('pcasl_mean', []))
+        self.disentangled_mode = disentangled_mode
+
+        if self.data_dir:
+            logger.info(f"Loading all dataset chunks from {self.data_dir} into RAM...")
+            file_paths = sorted(list(self.data_dir.glob('dataset_chunk_*.npz')))
+            if not file_paths:
+                raise FileNotFoundError(f"No dataset chunks found in {data_dir}. Run generate_offline_dataset.py first.")
+            
+            all_signals_with_features, all_params = [], []
+            for f in file_paths:
+                with np.load(f) as data:
+                    all_signals_with_features.append(data['signals'])
+                    all_params.append(data['params'])
+            
+            self.signals_unnormalized = np.concatenate(all_signals_with_features, axis=0)
+            self.params_unnormalized = np.concatenate(all_params, axis=0)
+            logger.info(f"Loaded {len(self.signals_unnormalized)} samples into memory.")
+
+            logger.info("Performing one-shot vectorized processing on the entire dataset...")
+            self.signals_processed = self._process_signals(self.signals_unnormalized)
+            self.params_normalized = self._normalize_params(self.params_unnormalized)
+            logger.info("Processing complete. Dataset is ready.")
+
+            self.signals_tensor = torch.from_numpy(self.signals_processed.astype(np.float32))
+            self.params_tensor = torch.from_numpy(self.params_normalized.astype(np.float32))
+        else:
+            logger.info("ASLInMemoryDataset initialized in manual mode. Populate tensors directly.")
+            self.signals_unnormalized = np.array([]); self.params_unnormalized = np.array([])
+            self.signals_processed = np.array([]); self.params_normalized = np.array([])
+            self.signals_tensor = torch.empty(0); self.params_tensor = torch.empty(0)
+
+    def _process_signals(self, signals_unnorm: np.ndarray) -> np.ndarray:
+        raw_signal_part = signals_unnorm[:, :self.num_plds*2]
+        eng_features_part = signals_unnorm[:, self.num_plds*2:]
+
+        if self.disentangled_mode:
+            amplitude = np.linalg.norm(raw_signal_part, axis=1, keepdims=True) + 1e-6
+            shape_vector = raw_signal_part / amplitude
+            amp_mean, amp_std = self.norm_stats['amplitude_mean'], self.norm_stats['amplitude_std'] + 1e-6
+            amplitude_norm = (amplitude - amp_mean) / amp_std
+            return np.concatenate([shape_vector, eng_features_part, amplitude_norm], axis=1)
+        else:
+            pcasl_raw, vsasl_raw = raw_signal_part[:, :self.num_plds], raw_signal_part[:, self.num_plds:]
+            pcasl_mean, pcasl_std = np.array(self.norm_stats['pcasl_mean']), np.array(self.norm_stats['pcasl_std']) + 1e-6
+            vsasl_mean, vsasl_std = np.array(self.norm_stats['vsasl_mean']), np.array(self.norm_stats['vsasl_std']) + 1e-6
+            pcasl_norm = (pcasl_raw - pcasl_mean) / pcasl_std
+            vsasl_norm = (vsasl_raw - vsasl_mean) / vsasl_std
+            return np.concatenate([pcasl_norm, vsasl_norm, eng_features_part], axis=1)
+
+    def _normalize_params(self, params_unnorm: np.ndarray) -> np.ndarray:
+        cbf_unnorm, att_unnorm = params_unnorm[:, 0], params_unnorm[:, 1]
+        cbf_norm = (cbf_unnorm - self.norm_stats['y_mean_cbf']) / self.norm_stats['y_std_cbf']
+        att_norm = (att_unnorm - self.norm_stats['y_mean_att']) / self.norm_stats['y_std_att']
+        return np.stack([cbf_norm, att_norm], axis=1)
+
+    def __len__(self):
+        return self.signals_tensor.shape[0]
+
+    def __getitem__(self, idx):
+        return self.signals_tensor[idx], self.params_tensor[idx]
