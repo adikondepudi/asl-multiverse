@@ -1,4 +1,3 @@
-// FILE: generate_offline_dataset.py
 # generate_offline_dataset.py
 import numpy as np
 import multiprocessing as mp

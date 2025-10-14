@@ -1,4 +1,3 @@
-// FILE: asl_trainer.py
 # FILE: asl_trainer.py
 import torch
 import torch.nn as nn

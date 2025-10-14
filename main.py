@@ -1,4 +1,3 @@
-// FILE: main.py
 # FILE: main.py
 import torch
 import numpy as np
