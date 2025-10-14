@@ -1,4 +1,6 @@
 # FILE: asl_trainer.py
+# FINAL CORRECTED VERSION
+
 import torch
 import torch.nn as nn
 import torch.optim as optim
@@ -336,8 +338,12 @@ class EnhancedASLTrainer:
         self.overall_best_val_losses = [float('inf')] * self.n_ensembles
         
         if steps_per_epoch is None:
+            # This is a map-style dataset, its length is known
             steps_per_epoch = len(train_loader)
             logger.info(f"Using map-style dataset. One epoch will be {steps_per_epoch} steps (full dataset).")
+        else:
+            # This is an iterable dataset, length is unknown, so steps_per_epoch must be provided
+            logger.info(f"Using iterable dataset. One epoch will be {steps_per_epoch} steps.")
         
         logger.info(f"--- Starting Unified Training for {n_epochs} epochs ---")
         logger.info(f"  PINN Weight: {self.custom_loss_fn.pinn_weight}, Max LR: {self.lr_base:.6f}")
@@ -348,7 +354,6 @@ class EnhancedASLTrainer:
         
         total_steps = steps_per_epoch * n_epochs
         self.schedulers = [torch.optim.lr_scheduler.OneCycleLR(opt, max_lr=self.lr_base, total_steps=total_steps) for opt in self.optimizers]
-        best_val_losses_stage = [float('inf')] * self.n_ensembles
         patience_counters = [0] * self.n_ensembles
         
         for epoch in range(n_epochs):
@@ -363,21 +368,19 @@ class EnhancedASLTrainer:
                 histories[model_idx]['train_losses'].append(train_loss_epoch)
                 if model_idx < self.n_ensembles - 1: train_loader_iter = iter(train_loader)
 
-            if val_loader is not None and len(val_loader.dataset) > 0:
+            if val_loader is not None:
                 for model_idx in range(self.n_ensembles):
                     val_metrics_dict = self._validate(self.models[model_idx], val_loader, epoch)
                     epoch_val_metrics_all_models.append(val_metrics_dict)
                     histories[model_idx]['val_metrics'].append(val_metrics_dict)
                     val_loss_for_es = val_metrics_dict.get('val_loss', float('inf'))
                     
-                    if val_loss_for_es < best_val_losses_stage[model_idx]:
-                        best_val_losses_stage[model_idx] = val_loss_for_es
+                    if val_loss_for_es < self.overall_best_val_losses[model_idx]:
+                        self.overall_best_val_losses[model_idx] = val_loss_for_es
                         patience_counters[model_idx] = 0
-                        if val_loss_for_es < self.overall_best_val_losses[model_idx]:
-                            self.overall_best_val_losses[model_idx] = val_loss_for_es
-                            unwrapped_model = getattr(self.models[model_idx], '_orig_mod', self.models[model_idx])
-                            self.best_states[model_idx] = unwrapped_model.state_dict()
-                            logger.debug(f"Model {model_idx} new overall best state saved (Val loss: {val_loss_for_es:.4f})")
+                        unwrapped_model = getattr(self.models[model_idx], '_orig_mod', self.models[model_idx])
+                        self.best_states[model_idx] = unwrapped_model.state_dict()
+                        logger.debug(f"Model {model_idx} new overall best state saved (Val loss: {val_loss_for_es:.4f})")
                     else:
                         patience_counters[model_idx] += 1
             
@@ -402,7 +405,7 @@ class EnhancedASLTrainer:
             if all(p_count >= early_stopping_patience for p_count in patience_counters): 
                 logger.info(f"All models early stopped at epoch {epoch+1}. Ending training.")
                 break 
-            if (epoch + 1) % 10 == 0:
+            if (epoch + 1) % 10 == 0 or (epoch + 1) == n_epochs:
                 mean_train_loss_console = np.nanmean(epoch_train_losses_all_models.get('total_loss', [np.nan]))
                 mean_val_loss_console = np.nanmean([m.get('val_loss', np.nan) for m in epoch_val_metrics_all_models]) if epoch_val_metrics_all_models else np.nan
                 logger.info(f"Epoch {epoch + 1}/{n_epochs}: Mean Train Loss = {mean_train_loss_console:.6f}, Mean Val Loss = {mean_val_loss_console:.6f}")
@@ -462,7 +465,7 @@ class EnhancedASLTrainer:
             if wandb.run and scheduler: wandb.log({'lr': scheduler.get_last_lr()[0]}, step=self.global_step)
             
             if (i + 1) % log_interval == 0 or (i + 1) == steps_per_epoch:
-                logger.info(f"  Epoch {current_global_epoch+1} Training | Step [{i+1}/{steps_per_epoch}] | Current Loss: {loss.item():.4f}")
+                logger.debug(f"  Epoch {current_global_epoch+1} Training | Step [{i+1}/{steps_per_epoch}] | Current Loss: {loss.item():.4f}")
 
             self.global_step += 1
         
@@ -494,7 +497,7 @@ class EnhancedASLTrainer:
                 all_cbf_trues_norm.append(params_norm[:, 0:1].cpu()); all_att_trues_norm.append(params_norm[:, 1:2].cpu())
                 all_cbf_log_vars.append(cbf_log_var.cpu()); all_att_log_vars.append(att_log_var.cpu())
                 if (i + 1) % log_interval == 0 or (i + 1) == total_steps:
-                    logger.info(f"  Epoch {current_global_epoch+1} Validation | Step [{i+1}/{total_steps}]")
+                    logger.debug(f"  Epoch {current_global_epoch+1} Validation | Step [{i+1}/{total_steps}]")
         
         avg_loss_val = total_loss_val / total_steps if total_steps > 0 else float('inf')
         metrics_dict = {'val_loss': avg_loss_val}
