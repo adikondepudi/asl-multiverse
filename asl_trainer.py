@@ -87,7 +87,7 @@ class EnhancedASLTrainer:
         self.device = torch.device(device); self.model_config = model_config
         self.lr_base = float(model_config.get('learning_rate', 0.001)); self.weight_decay = float(weight_decay)
         self.n_ensembles = n_ensembles; self.validation_steps_per_epoch = model_config.get('validation_steps_per_epoch', 50)
-        self.scalers = [torch.cuda.amp.GradScaler() for _ in range(n_ensembles)]
+        # --- FIX: Removed GradScaler initialization, as it's not compatible with BFloat16 ---
         logger.info("Initializing models and casting to bfloat16..."); self.models = [model_class(**model_config).to(self.device, dtype=torch.bfloat16) for _ in range(n_ensembles)]
         logger.info("Compiling models with torch.compile()..."); self.models = [torch.compile(m, mode="max-autotune") for m in self.models]
         logger.info("Model compilation complete.")
@@ -110,7 +110,8 @@ class EnhancedASLTrainer:
         self.schedulers = [torch.optim.lr_scheduler.OneCycleLR(opt, max_lr=self.lr_base, total_steps=total_steps) for opt in self.optimizers]
         patience_counters = [0] * self.n_ensembles; self.overall_best_val_losses = [float('inf')] * self.n_ensembles
         for epoch in range(n_epochs):
-            train_loss, _ = self._train_epoch(self.models, train_loader, self.optimizers, self.scalers, self.schedulers, epoch, steps_per_epoch)
+            # --- FIX: Removed scalers from the arguments ---
+            train_loss, _ = self._train_epoch(self.models, train_loader, self.optimizers, self.schedulers, epoch, steps_per_epoch)
             val_metrics = self._validate(self.models, val_loader, epoch)
             mean_val_loss = np.nanmean([m.get('val_loss', np.nan) for m in val_metrics])
             logger.info(f"Epoch {epoch + 1}/{n_epochs}: Train Loss = {train_loss:.6f}, Val Loss = {mean_val_loss:.6f}")
@@ -126,7 +127,8 @@ class EnhancedASLTrainer:
             if state: getattr(self.models[i], '_orig_mod', self.models[i]).load_state_dict(state)
         return {'final_mean_val_loss': np.nanmean(self.overall_best_val_losses)}
 
-    def _train_epoch(self, models, loader, optimizers, scalers, schedulers, epoch, steps):
+    # --- FIX: Major changes to the training epoch to remove GradScaler ---
+    def _train_epoch(self, models, loader, optimizers, schedulers, epoch, steps):
         for m in models: m.train()
         total_loss = 0.0; loader_iter = iter(loader)
         for i in range(steps):
@@ -135,18 +137,23 @@ class EnhancedASLTrainer:
                 except StopIteration: loader_iter = iter(loader); signals, params_norm = next(loader_iter)
                 signals, params_norm = signals.to(self.device), params_norm.to(self.device)
                 optimizers[model_idx].zero_grad(set_to_none=True)
+                
                 with torch.amp.autocast(device_type=self.device.type, dtype=torch.bfloat16):
                     cbf_mean, att_mean, cbf_lvar, att_lvar, cbf_r, att_r = model(signals)
-                    # --- FIX: Call loss function with explicit keyword arguments ---
                     loss, comps = self.custom_loss_fn(
                         normalized_input_signal=signals, cbf_pred_norm=cbf_mean, att_pred_norm=att_mean,
                         cbf_true_norm=params_norm[:, 0:1], att_true_norm=params_norm[:, 1:2],
                         cbf_log_var=cbf_lvar, att_log_var=att_lvar,
                         cbf_rough_physical=cbf_r, att_rough_physical=att_r, global_epoch=epoch)
-                scalers[model_idx].scale(loss).backward(); scalers[model_idx].unscale_(optimizers[model_idx])
+                
+                # The GradScaler logic is removed. We call backward() directly on the loss.
+                loss.backward()
                 torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
-                scalers[model_idx].step(optimizers[model_idx]); scalers[model_idx].update(); schedulers[model_idx].step()
+                optimizers[model_idx].step()
+                schedulers[model_idx].step()
+                
                 if model_idx == 0: total_loss += loss.item()
+
             self.global_step += 1
         return total_loss / steps, {}
 
@@ -162,7 +169,6 @@ class EnhancedASLTrainer:
                 for i, model in enumerate(models):
                     with torch.amp.autocast(device_type=self.device.type, dtype=torch.bfloat16):
                         cbf_mean, att_mean, cbf_lvar, att_lvar, cbf_r, att_r = model(signals)
-                        # --- FIX: Call loss function with explicit keyword arguments ---
                         loss, _ = self.custom_loss_fn(
                             normalized_input_signal=signals, cbf_pred_norm=cbf_mean, att_pred_norm=att_mean,
                             cbf_true_norm=params_norm[:, 0:1], att_true_norm=params_norm[:, 1:2],
