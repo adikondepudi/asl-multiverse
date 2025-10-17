@@ -82,6 +82,9 @@ class ResearchConfig:
     wandb_project: str = "asl-multiverse-project"
     wandb_entity: Optional[str] = None
     num_samples: int = 1000000
+    # --- NEW: Fields for Two-Stage Fine-Tuning ---
+    pretrained_encoder_path: Optional[str] = None
+    fine_tuning_freeze_epochs: int = 10
 
 def create_att_weighted_sampler(dataset: ASLInMemoryDataset) -> WeightedRandomSampler:
     """Creates a sampler that over-samples the tails of the ATT distribution."""
@@ -300,7 +303,26 @@ def run_comprehensive_asl_research(config: ResearchConfig, output_dir: Path, nor
         model.to(device)
         if hasattr(model, 'set_norm_stats'):
             model.set_norm_stats(norm_stats)
+
+    # --- NEW: Load pre-trained encoder weights if specified ---
+    if config.pretrained_encoder_path and Path(config.pretrained_encoder_path).exists():
+        script_logger.info(f"Loading pre-trained encoder weights from: {config.pretrained_encoder_path}")
+        encoder_state_dict = torch.load(config.pretrained_encoder_path, map_location=device)
+        num_loaded = 0
+        for model in trainer.models:
+            if hasattr(model, 'encoder'):
+                model.encoder.load_state_dict(encoder_state_dict, strict=False)
+                num_loaded += 1
+        script_logger.info(f"Successfully loaded pre-trained weights into {num_loaded} model encoders.")
+    else:
+        script_logger.info("No pre-trained encoder path provided or found. Training from scratch.")
     
+    # --- NEW: Prepare fine-tuning configuration to pass to the trainer ---
+    fine_tuning_cfg = None
+    if config.pretrained_encoder_path and Path(config.pretrained_encoder_path).exists():
+        script_logger.info("Fine-tuning mode activated.")
+        fine_tuning_cfg = {'freeze_epochs': config.fine_tuning_freeze_epochs}
+
     script_logger.info(f"Training {config.n_ensembles}-model ensemble for {config.n_epochs} epochs...")
     training_start_time = time.time()
     
@@ -309,7 +331,8 @@ def run_comprehensive_asl_research(config: ResearchConfig, output_dir: Path, nor
         val_loader=val_loader,
         n_epochs=config.n_epochs,
         steps_per_epoch=config.steps_per_epoch if not use_offline else None,
-        early_stopping_patience=25 
+        early_stopping_patience=25,
+        fine_tuning_config=fine_tuning_cfg
     )
 
     training_duration_hours = (time.time() - training_start_time) / 3600

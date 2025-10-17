@@ -1,7 +1,3 @@
-# FILE: asl_trainer.py
-# FILE: asl_trainer.py
-# FINAL, DEFINITIVE, CORRECTED VERSION
-
 import torch
 import torch.nn as nn
 import torch.optim as optim
@@ -88,7 +84,6 @@ class EnhancedASLTrainer:
         self.device = torch.device(device); self.model_config = model_config
         self.lr_base = float(model_config.get('learning_rate', 0.001)); self.weight_decay = float(weight_decay)
         self.n_ensembles = n_ensembles; self.validation_steps_per_epoch = model_config.get('validation_steps_per_epoch', 50)
-        # --- FIX: Removed GradScaler initialization, as it's not compatible with BFloat16 ---
         logger.info("Initializing models and casting to bfloat16..."); self.models = [model_class(**model_config).to(self.device, dtype=torch.bfloat16) for _ in range(n_ensembles)]
         logger.info("Compiling models with torch.compile()..."); self.models = [torch.compile(m, mode="max-autotune") for m in self.models]
         logger.info("Model compilation complete.")
@@ -104,15 +99,34 @@ class EnhancedASLTrainer:
     def train_ensemble(self,
                        train_loader: DataLoader, val_loader: Optional[DataLoader],
                        n_epochs: int, steps_per_epoch: Optional[int],
-                       early_stopping_patience: int = 20, optuna_trial: Optional[Any] = None):
+                       early_stopping_patience: int = 20, optuna_trial: Optional[Any] = None,
+                       fine_tuning_config: Optional[Dict] = None):
         if steps_per_epoch is None: steps_per_epoch = len(train_loader)
         logger.info(f"--- Starting Unified Training for {n_epochs} epochs ---")
+        
         self.optimizers = [torch.optim.AdamW(m.parameters(), lr=self.lr_base, weight_decay=self.weight_decay) for m in self.models]
         total_steps = steps_per_epoch * n_epochs
         self.schedulers = [torch.optim.lr_scheduler.OneCycleLR(opt, max_lr=self.lr_base, total_steps=total_steps) for opt in self.optimizers]
+        
         patience_counters = [0] * self.n_ensembles; self.overall_best_val_losses = [float('inf')] * self.n_ensembles
+        freeze_epochs = fine_tuning_config.get('freeze_epochs', 0) if fine_tuning_config else 0
+
         for epoch in range(n_epochs):
-            # --- FIX: Removed scalers from the arguments ---
+            # --- FINE-TUNING LOGIC: Adjust optimizers and model state based on epoch ---
+            if fine_tuning_config:
+                if epoch == 0 and freeze_epochs > 0:
+                    logger.info(f"--- Fine-tuning Stage 1/2: Freezing encoder for {freeze_epochs} epochs. ---")
+                    for m in self.models: m.freeze_encoder()
+                    self.optimizers = [torch.optim.AdamW(filter(lambda p: p.requires_grad, m.parameters()), lr=self.lr_base, weight_decay=self.weight_decay) for m in self.models]
+                    self.schedulers = [torch.optim.lr_scheduler.OneCycleLR(opt, max_lr=self.lr_base, total_steps=steps_per_epoch * freeze_epochs) for opt in self.optimizers]
+                
+                if epoch == freeze_epochs:
+                    logger.info(f"--- Fine-tuning Stage 2/2: Unfreezing all layers. ---")
+                    for m in self.models: m.unfreeze_all()
+                    self.optimizers = [torch.optim.AdamW(m.parameters(), lr=self.lr_base, weight_decay=self.weight_decay) for m in self.models]
+                    remaining_steps = steps_per_epoch * (n_epochs - freeze_epochs)
+                    self.schedulers = [torch.optim.lr_scheduler.OneCycleLR(opt, max_lr=self.lr_base, total_steps=remaining_steps) for opt in self.optimizers]
+
             train_loss, _ = self._train_epoch(self.models, train_loader, self.optimizers, self.schedulers, epoch, steps_per_epoch)
             val_metrics = self._validate(self.models, val_loader, epoch)
             mean_val_loss = np.nanmean([m.get('val_loss', np.nan) for m in val_metrics])
@@ -125,15 +139,14 @@ class EnhancedASLTrainer:
                     unwrapped = getattr(self.models[i], '_orig_mod', self.models[i]); self.best_states[i] = unwrapped.state_dict()
                 else: patience_counters[i] += 1
             if all(p >= early_stopping_patience for p in patience_counters): logger.info("All models early stopped."); break
+        
         for i, state in enumerate(self.best_states):
             if state: getattr(self.models[i], '_orig_mod', self.models[i]).load_state_dict(state)
         return {'final_mean_val_loss': np.nanmean(self.overall_best_val_losses)}
 
-    # --- MODIFIED: Major changes for Online Hard Example Mining (OHEM) ---
     def _train_epoch(self, models, loader, optimizers, schedulers, epoch, steps):
         for m in models: m.train()
         total_loss = 0.0; loader_iter = iter(loader)
-        # Get OHEM fraction from config, default to 1.0 (no OHEM)
         ohem_fraction = self.model_config.get('ohem_fraction', 1.0)
 
         for i in range(steps):
@@ -144,32 +157,22 @@ class EnhancedASLTrainer:
                 optimizers[model_idx].zero_grad(set_to_none=True)
                 
                 with torch.amp.autocast(device_type=self.device.type, dtype=torch.bfloat16):
-                    cbf_mean, att_mean, cbf_lvar, att_lvar, cbf_r, att_r = model(signals)
-                    # Calculate the full batch loss AND get the unreduced components
+                    outputs = model(signals)
                     loss_full_batch, comps = self.custom_loss_fn(
-                        normalized_input_signal=signals, cbf_pred_norm=cbf_mean, att_pred_norm=att_mean,
+                        normalized_input_signal=signals, cbf_pred_norm=outputs[0], att_pred_norm=outputs[1],
                         cbf_true_norm=params_norm[:, 0:1], att_true_norm=params_norm[:, 1:2],
-                        cbf_log_var=cbf_lvar, att_log_var=att_lvar,
-                        cbf_rough_physical=cbf_r, att_rough_physical=att_r, global_epoch=epoch)
+                        cbf_log_var=outputs[2], att_log_var=outputs[3],
+                        cbf_rough_physical=outputs[4], att_rough_physical=outputs[5], global_epoch=epoch)
                 
-                # --- OHEM LOGIC ---
                 if ohem_fraction < 1.0:
-                    # Get the per-sample NLL loss (now attached to the graph)
                     unreduced_loss = comps['unreduced_loss']
                     num_hard_examples = int(signals.shape[0] * ohem_fraction)
-                    
-                    # Select the top 'k' losses
                     top_k_losses, _ = torch.topk(unreduced_loss.view(-1), k=num_hard_examples)
-                    
-                    # The final loss for backpropagation is the mean of only the hardest examples
                     final_loss = top_k_losses.mean()
                 else:
-                    # Default behavior: use the mean loss of the full batch
                     final_loss = loss_full_batch
-                # --- END OHEM LOGIC ---
                 
-                # The GradScaler logic is removed. We call backward() directly on the final_loss.
-                final_loss.backward() # Backpropagate only on the loss from the hardest examples
+                final_loss.backward()
                 torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
                 optimizers[model_idx].step()
                 schedulers[model_idx].step()
@@ -190,12 +193,12 @@ class EnhancedASLTrainer:
                 signals, params_norm = signals.to(self.device), params_norm.to(self.device)
                 for i, model in enumerate(models):
                     with torch.amp.autocast(device_type=self.device.type, dtype=torch.bfloat16):
-                        cbf_mean, att_mean, cbf_lvar, att_lvar, cbf_r, att_r = model(signals)
+                        outputs = model(signals)
                         loss, _ = self.custom_loss_fn(
-                            normalized_input_signal=signals, cbf_pred_norm=cbf_mean, att_pred_norm=att_mean,
+                            normalized_input_signal=signals, cbf_pred_norm=outputs[0], att_pred_norm=outputs[1],
                             cbf_true_norm=params_norm[:, 0:1], att_true_norm=params_norm[:, 1:2],
-                            cbf_log_var=cbf_lvar, att_log_var=att_lvar,
-                            cbf_rough_physical=cbf_r, att_rough_physical=att_r, global_epoch=epoch)
+                            cbf_log_var=outputs[2], att_log_var=outputs[3],
+                            cbf_rough_physical=outputs[4], att_rough_physical=outputs[5], global_epoch=epoch)
                     val_losses[i] += loss.item()
                 num_steps += 1
         return [{'val_loss': v / num_steps if num_steps > 0 else float('inf')} for v in val_losses]

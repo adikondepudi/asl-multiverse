@@ -1,6 +1,3 @@
-# FILE: enhanced_asl_network.py
-# FILE: enhanced_asl_network.py
-
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
@@ -432,28 +429,10 @@ class EnhancedASLNet(nn.Module):
             {'params': att_params, 'name': 'att_stream'}
         ]
 
-class DisentangledASLNet(nn.Module):
-    """
-    DisentangledASLNet v2: A new architecture that explicitly disentangles signal SHAPE
-    (for ATT) and signal AMPLITUDE (for CBF) and fuses them using a dynamic,
-    context-aware Cross-Attention Fusion Engine.
-    """
-    def __init__(self, 
-                 input_size: int,
-                 hidden_sizes: List[int] = [256, 128, 64],
-                 n_plds: int = 6,
-                 dropout_rate: float = 0.1,
-                 norm_type: str = 'batch',
-                 transformer_d_model_focused: int = 32,
-                 transformer_nhead: int = 4,
-                 transformer_nlayers: int = 2,
-                 log_var_cbf_min: float = 0.0,
-                 log_var_cbf_max: float = 7.0,
-                 log_var_att_min: float = 0.0,
-                 log_var_att_max: float = 14.0,
-                 **kwargs):
+class DisentangledEncoder(nn.Module):
+    """The feature extraction backbone for DisentangledASLNet."""
+    def __init__(self, n_plds, dropout_rate, transformer_d_model_focused, transformer_nhead, transformer_nlayers, **kwargs):
         super().__init__()
-        
         self.n_plds = n_plds
         self.num_shape_features = n_plds * 2
         self.num_engineered_features = 4  # TTP_p, TTP_v, CoM_p, CoM_v
@@ -475,48 +454,27 @@ class DisentangledASLNet(nn.Module):
             nn.ReLU()
         )
         
-        # --- 3. DYNAMIC FUSION ENGINE (Cross-Attention) & PREDICTION ---
+        # --- 3. DYNAMIC FUSION ENGINE (Cross-Attention) ---
         amplitude_feature_size = 64
-        # Project amplitude features to match shape feature dimensions for attention
         self.query_proj = nn.Linear(amplitude_feature_size, self.att_d_model)
 
         self.cross_attention = nn.MultiheadAttention(
-            embed_dim=self.att_d_model, 
-            num_heads=transformer_nhead, 
-            dropout=dropout_rate, 
-            batch_first=True
+            embed_dim=self.att_d_model, num_heads=transformer_nhead, 
+            dropout=dropout_rate, batch_first=True
         )
         self.fusion_norm = nn.LayerNorm(self.att_d_model)
         self.fusion_dropout = nn.Dropout(dropout_rate)
-
-        # Fused features will be concatenation of attention output and original amplitude features
-        fused_feature_size = self.att_d_model + amplitude_feature_size
-
-        self.joint_mlp = nn.Sequential(
-            nn.Linear(fused_feature_size, hidden_sizes[0]),
-            self._get_norm_layer(hidden_sizes[0], norm_type),
-            nn.ReLU(),
-            nn.Dropout(dropout_rate),
-            nn.Linear(hidden_sizes[0], hidden_sizes[1])
-        )
-
-        # Separate heads for ATT and CBF
-        self.att_head = UncertaintyHead(hidden_sizes[1], 1, log_var_min=log_var_att_min, log_var_max=log_var_att_max)
-        self.cbf_head = UncertaintyHead(hidden_sizes[1], 1, log_var_min=log_var_cbf_min, log_var_max=log_var_cbf_max)
-
-    def forward(self, x: torch.Tensor) -> Tuple[torch.Tensor, ...]:
-        # Unpack the disentangled input tensor
+    
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
         shape_vector = x[:, :self.num_shape_features]
         engineered_features = x[:, self.num_shape_features : self.num_shape_features + self.num_engineered_features]
         amplitude_scalar = x[:, -self.num_amplitude_features:]
 
         # --- SHAPE STREAM ---
-        pcasl_shape = shape_vector[:, :self.n_plds].unsqueeze(-1)  # (B, PLDs, 1)
-        vsasl_shape = shape_vector[:, self.n_plds:].unsqueeze(-1) # (B, PLDs, 1)
-        
+        pcasl_shape = shape_vector[:, :self.n_plds].unsqueeze(-1)
+        vsasl_shape = shape_vector[:, self.n_plds:].unsqueeze(-1)
         pcasl_proj = self.pcasl_input_proj(pcasl_shape)
         vsasl_proj = self.vsasl_input_proj(vsasl_shape)
-        
         pcasl_encoded = self.transformer_encoder(pcasl_proj)
         vsasl_encoded = self.transformer_encoder(vsasl_proj)
         
@@ -525,30 +483,56 @@ class DisentangledASLNet(nn.Module):
         amplitude_features = self.amplitude_mlp(amplitude_input)
 
         # --- DYNAMIC FUSION ENGINE ---
-        # The sequence of shape features acts as Key and Value
         shape_sequence = torch.cat([pcasl_encoded, vsasl_encoded], dim=1)
-        
-        # The amplitude features act as the Query
         query_proj = self.query_proj(amplitude_features)
-        query = query_proj.unsqueeze(1) # (B, 1, att_d_model)
-
-        # Cross-attention: amplitude queries shape sequence
+        query = query_proj.unsqueeze(1)
         attn_output, _ = self.cross_attention(query=query, key=shape_sequence, value=shape_sequence)
-        
-        # Residual connection and normalization on the projected query
         contextualized_query_unnorm = query + self.fusion_dropout(attn_output)
-        contextualized_query = self.fusion_norm(contextualized_query_unnorm).squeeze(1) # (B, att_d_model)
+        contextualized_query = self.fusion_norm(contextualized_query_unnorm).squeeze(1)
 
         # Final feature vector for prediction, combining context-aware and original features
         fused_features = torch.cat([contextualized_query, amplitude_features], dim=1)
+        return fused_features
 
-        # --- PREDICTION ---
-        joint_features = self.joint_mlp(fused_features)
+class DisentangledASLNet(nn.Module):
+    """
+    DisentangledASLNet v3: Refactored architecture with a distinct encoder
+    and regression heads to support two-stage training (pre-training + fine-tuning).
+    """
+    def __init__(self, 
+                 input_size: int,
+                 hidden_sizes: List[int] = [256, 128, 64],
+                 n_plds: int = 6,
+                 norm_type: str = 'batch',
+                 log_var_cbf_min: float = 0.0,
+                 log_var_cbf_max: float = 7.0,
+                 log_var_att_min: float = 0.0,
+                 log_var_att_max: float = 14.0,
+                 **kwargs):
+        super().__init__()
         
+        self.encoder = DisentangledEncoder(n_plds=n_plds, **kwargs)
+        
+        # Fused features will be concatenation of attention output and original amplitude features
+        fused_feature_size = self.encoder.att_d_model + 64 # From query and amplitude_features
+        dropout_rate = kwargs.get('dropout_rate', 0.1)
+
+        # Regression Heads
+        self.joint_mlp = nn.Sequential(
+            nn.Linear(fused_feature_size, hidden_sizes[0]),
+            self._get_norm_layer(hidden_sizes[0], norm_type),
+            nn.ReLU(),
+            nn.Dropout(dropout_rate),
+            nn.Linear(hidden_sizes[0], hidden_sizes[1])
+        )
+        self.att_head = UncertaintyHead(hidden_sizes[1], 1, log_var_min=log_var_att_min, log_var_max=log_var_att_max)
+        self.cbf_head = UncertaintyHead(hidden_sizes[1], 1, log_var_min=log_var_cbf_min, log_var_max=log_var_cbf_max)
+
+    def forward(self, x: torch.Tensor) -> Tuple[torch.Tensor, ...]:
+        fused_features = self.encoder(x)
+        joint_features = self.joint_mlp(fused_features)
         cbf_mean, cbf_log_var = self.cbf_head(joint_features)
         att_mean, att_log_var = self.att_head(joint_features)
-
-        # Return in the standard order expected by the trainer and loss function
         return cbf_mean, att_mean, cbf_log_var, att_log_var, None, None
 
     def _get_norm_layer(self, size: int, norm_type: str) -> nn.Module:
@@ -556,25 +540,18 @@ class DisentangledASLNet(nn.Module):
         elif norm_type == 'layer': return nn.LayerNorm(size)
         else: return nn.BatchNorm1d(size)
 
-    def get_shape_stream_params(self):
-        """Returns all parameters related to shape processing and ATT prediction."""
-        return list(self.pcasl_input_proj.parameters()) + \
-               list(self.vsasl_input_proj.parameters()) + \
-               list(self.transformer_encoder.parameters()) + \
-               list(self.joint_mlp.parameters()) + \
-               list(self.att_head.parameters())
-
-    def get_amplitude_stream_params(self):
-        """Returns all parameters related to amplitude processing and CBF prediction."""
-        # Note: The joint_mlp is trained in the ATT stage, so it's frozen here.
-        return list(self.amplitude_mlp.parameters()) + list(self.cbf_head.parameters())
+    def get_head_parameters(self):
+        """Returns all parameters related to the regression heads."""
+        return list(self.joint_mlp.parameters()) + \
+               list(self.att_head.parameters()) + \
+               list(self.cbf_head.parameters())
     
-    def freeze_shape_stream(self):
-        """Freezes all parameters related to the shape stream (ATT prediction)."""
-        for param in self.get_shape_stream_params():
+    def freeze_encoder(self):
+        """Freezes all parameters in the encoder for fine-tuning."""
+        for param in self.encoder.parameters():
             param.requires_grad = False
     
-    def unfreeze_all_params(self):
+    def unfreeze_all(self):
         """Sets requires_grad=True for all model parameters."""
         for param in self.parameters():
             param.requires_grad = True
