@@ -18,8 +18,8 @@ source /cm/shared/apps/anaconda3/2023.09/etc/profile.d/conda.sh
 conda activate asl_multiverse # Use your environment name
 
 # --- Define Output Directory for the Dataset ---
-# MODIFIED: Changed directory name to reflect the new v2 data strategy
-DATASET_DIR="asl_offline_dataset_10M_v2"
+# MODIFIED: Changed directory name to reflect the new v3 data strategy
+DATASET_DIR="asl_offline_dataset_10M_v3"
 
 # --- Clean up any previous partial run ---
 echo "Checking for and removing previous dataset directory: ${DATASET_DIR}"
