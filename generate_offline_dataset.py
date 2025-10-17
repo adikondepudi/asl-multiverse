@@ -1,3 +1,4 @@
+# FILE: generate_offline_dataset.py
 # generate_offline_dataset.py
 import numpy as np
 import multiprocessing as mp
@@ -29,19 +30,14 @@ def generate_and_save_chunk(args):
         
     for _ in range(num_samples_per_chunk):
         # --- MODIFIED: Structured Sampling Logic for v2 Data Strategy ---
-        p = np.random.rand()
-        if p < 0.60:  # 60% Healthy/Elderly Regime
-            true_cbf = np.random.uniform(30.0, 80.0)
-            true_att = np.random.uniform(800.0, 2500.0)
-        elif p < 0.75:  # 15% Stroke Mimic Regime
-            true_cbf = np.random.uniform(5.0, 30.0)
-            true_att = np.random.uniform(1800.0, 4500.0)
-        elif p < 0.90:  # 15% High Perfusion Regime
-            true_cbf = np.random.uniform(100.0, 150.0)
-            true_att = np.random.uniform(500.0, 1500.0)
-        else:  # 10% Chaotic/Random Regime
-            true_cbf = np.random.uniform(*physio_var.cbf_range)
-            true_att = np.random.uniform(*physio_var.att_range)
+        # === DELETED STATIC SAMPLING LOGIC ===
+        # The entire if/elif/else block for static oversampling has been removed.
+        
+        # === REPLACED WITH UNBIASED SAMPLING for v3 ===
+        # This now reflects the true data distribution, long tail and all.
+        # OHEM in the trainer will handle the hard examples dynamically.
+        true_cbf = np.random.uniform(*physio_var.cbf_range)
+        true_att = np.random.uniform(*physio_var.att_range)
         # --- END MODIFICATION ---
         
         true_t1_artery = np.random.uniform(*physio_var.t1_artery_range)

@@ -1,4 +1,5 @@
 # FILE: asl_trainer.py
+# FILE: asl_trainer.py
 # FINAL, DEFINITIVE, CORRECTED VERSION
 
 import torch
@@ -96,6 +97,7 @@ class EnhancedASLTrainer:
         self.best_states = [None] * self.n_ensembles
         loss_params = {'w_cbf': model_config.get('loss_weight_cbf', 1.0), 'w_att': model_config.get('loss_weight_att', 1.0),
                        'log_var_reg_lambda': model_config.get('loss_log_var_reg_lambda', 0.0), 'pinn_weight': model_config.get('loss_pinn_weight', 0.0),
+                       'residual_pinn_weight': model_config.get('residual_pinn_weight', 0.0), # NEW for v3
                        'model_params': model_config}; self.custom_loss_fn = CustomLoss(**loss_params)
         self.global_step = 0; self.norm_stats = None
 
@@ -127,10 +129,13 @@ class EnhancedASLTrainer:
             if state: getattr(self.models[i], '_orig_mod', self.models[i]).load_state_dict(state)
         return {'final_mean_val_loss': np.nanmean(self.overall_best_val_losses)}
 
-    # --- FIX: Major changes to the training epoch to remove GradScaler ---
+    # --- MODIFIED: Major changes for Online Hard Example Mining (OHEM) ---
     def _train_epoch(self, models, loader, optimizers, schedulers, epoch, steps):
         for m in models: m.train()
         total_loss = 0.0; loader_iter = iter(loader)
+        # Get OHEM fraction from config, default to 1.0 (no OHEM)
+        ohem_fraction = self.model_config.get('ohem_fraction', 1.0)
+
         for i in range(steps):
             for model_idx, model in enumerate(models):
                 try: signals, params_norm = next(loader_iter)
@@ -140,19 +145,36 @@ class EnhancedASLTrainer:
                 
                 with torch.amp.autocast(device_type=self.device.type, dtype=torch.bfloat16):
                     cbf_mean, att_mean, cbf_lvar, att_lvar, cbf_r, att_r = model(signals)
-                    loss, comps = self.custom_loss_fn(
+                    # Calculate the full batch loss AND get the unreduced components
+                    loss_full_batch, comps = self.custom_loss_fn(
                         normalized_input_signal=signals, cbf_pred_norm=cbf_mean, att_pred_norm=att_mean,
                         cbf_true_norm=params_norm[:, 0:1], att_true_norm=params_norm[:, 1:2],
                         cbf_log_var=cbf_lvar, att_log_var=att_lvar,
                         cbf_rough_physical=cbf_r, att_rough_physical=att_r, global_epoch=epoch)
                 
-                # The GradScaler logic is removed. We call backward() directly on the loss.
-                loss.backward()
+                # --- OHEM LOGIC ---
+                if ohem_fraction < 1.0:
+                    # Get the per-sample NLL loss (now attached to the graph)
+                    unreduced_loss = comps['unreduced_loss']
+                    num_hard_examples = int(signals.shape[0] * ohem_fraction)
+                    
+                    # Select the top 'k' losses
+                    top_k_losses, _ = torch.topk(unreduced_loss.view(-1), k=num_hard_examples)
+                    
+                    # The final loss for backpropagation is the mean of only the hardest examples
+                    final_loss = top_k_losses.mean()
+                else:
+                    # Default behavior: use the mean loss of the full batch
+                    final_loss = loss_full_batch
+                # --- END OHEM LOGIC ---
+                
+                # The GradScaler logic is removed. We call backward() directly on the final_loss.
+                final_loss.backward() # Backpropagate only on the loss from the hardest examples
                 torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
                 optimizers[model_idx].step()
                 schedulers[model_idx].step()
                 
-                if model_idx == 0: total_loss += loss.item()
+                if model_idx == 0: total_loss += final_loss.item()
 
             self.global_step += 1
         return total_loss / steps, {}

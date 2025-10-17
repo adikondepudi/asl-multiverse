@@ -1,4 +1,5 @@
 # FILE: enhanced_asl_network.py
+# FILE: enhanced_asl_network.py
 
 import torch
 import torch.nn as nn
@@ -119,7 +120,7 @@ def _torch_physical_kinetic_model(
     lambda_blood = 0.90; M0_b = 1.0
 
     B = pred_cbf.shape[0]
-    plds_b = plds.unsqueeze(0).expand(B, -1)
+    plds_b = plds.unsqueeze(0).expand(B, -1) if B > 1 or plds.dim() == 1 else plds
 
     alpha1 = alpha_PCASL * (alpha_BS1**4)
     pcasl_prefactor = (2 * M0_b * pred_cbf_cgs * alpha1 / lambda_blood * T1_artery / 1000) * T2_factor
@@ -190,6 +191,41 @@ def _torch_analytic_gradients(
     )
 
     return dSdC_pcasl, dSdA_pcasl, dSdC_vsasl, dSdA_vsasl
+
+# NEW: Physics Residual PINN helper function
+def _calculate_pcasl_gkm_residual(pcasl_signal_curve, t_points, cbf_phys, att_phys, t1_tissue, t1_blood, labeling_duration):
+    """
+    Calculates the residual of the simplified 1-compartment GKM differential equation for PCASL.
+    The equation is: dM(t)/dt = 2 * f_cbf * AIF(t) - (f_cbf/lambda + 1/T1_tissue) * M(t)
+    All time units are in seconds.
+    """
+    t_points.requires_grad_(True)
+    
+    # Use autograd to get the time derivative of the signal curve
+    dM_dt = torch.autograd.grad(
+        outputs=pcasl_signal_curve,
+        inputs=t_points,
+        grad_outputs=torch.ones_like(pcasl_signal_curve),
+        create_graph=True
+    )[0]
+    
+    # Define the Arterial Input Function (AIF) for PCASL (boxcar)
+    aif = torch.zeros_like(t_points)
+    att_s = att_phys / 1000.0
+    tau_s = labeling_duration / 1000.0
+    
+    # Bolus arrives at ATT, lasts for labeling_duration
+    aif = torch.where((t_points > att_s) & (t_points <= att_s + tau_s), 1.0, 0.0)
+    
+    # The right-hand side of the differential equation
+    lambda_blood = 0.9
+    f_cbf_s = cbf_phys / 60.0 # to ml/g/s
+    k_clearance = f_cbf_s / lambda_blood + 1.0 / (t1_tissue / 1000.0)
+    
+    rhs = 2 * f_cbf_s * aif - k_clearance * pcasl_signal_curve
+    
+    residual = dM_dt - rhs
+    return residual
 
 class EnhancedASLNet(nn.Module):
     """
@@ -573,9 +609,8 @@ def torch_kinetic_model(pred_cbf_norm: torch.Tensor, pred_att_norm: torch.Tensor
 
 class CustomLoss(nn.Module):
     """
-    Custom loss for v2: A unified loss combining uncertainty-aware NLL for
-    multi-task learning and a physics-informed (PINN) reconstruction loss for
-    regularization.
+    Custom loss for v3: Unified loss with UW, Reconstruction PINN, and a true
+    Physics Residual PINN for guaranteed physical plausibility.
     """
     
     def __init__(self, 
@@ -583,6 +618,7 @@ class CustomLoss(nn.Module):
                  w_att: float = 1.0, 
                  log_var_reg_lambda: float = 0.0,
                  pinn_weight: float = 0.0,
+                 residual_pinn_weight: float = 0.0, # NEW: For GKM residual loss
                  model_params: Optional[Dict[str, Any]] = None,
                 ):
         super().__init__()
@@ -590,6 +626,7 @@ class CustomLoss(nn.Module):
         self.w_att = w_att
         self.log_var_reg_lambda = log_var_reg_lambda
         self.pinn_weight = pinn_weight
+        self.residual_pinn_weight = residual_pinn_weight # NEW
         self.model_params = model_params if model_params is not None else {}
         self.norm_stats = None
         self.mse_loss = nn.MSELoss()
@@ -616,29 +653,64 @@ class CustomLoss(nn.Module):
         # --- Apply weights and combine losses ---
         weighted_cbf_loss = self.w_cbf * cbf_nll_loss
         weighted_att_loss = self.w_att * att_nll_loss
-        total_param_loss = torch.mean(weighted_cbf_loss + weighted_att_loss)
-
+        
+        # MODIFIED: Get handle on unreduced loss for OHEM
+        combined_nll_loss = weighted_cbf_loss + weighted_att_loss
+        total_param_loss = torch.mean(combined_nll_loss)
+        
         # --- Optional regularization on the magnitude of predicted uncertainty ---
         log_var_regularization = torch.tensor(0.0, device=total_param_loss.device)
         if self.log_var_reg_lambda > 0:
             log_var_regularization = self.log_var_reg_lambda * (torch.mean(cbf_log_var**2) + torch.mean(att_log_var**2))
             
         # --- Physics-Informed (PINN) Regularization ---
-        pinn_loss = torch.tensor(0.0, device=total_param_loss.device)
-        if self.pinn_weight > 0 and self.norm_stats and self.model_params:
-            reconstructed_signal_norm = torch_kinetic_model(cbf_pred_norm, att_pred_norm, self.norm_stats, self.model_params)
+        recon_loss = torch.tensor(0.0, device=total_param_loss.device)
+        residual_loss = torch.tensor(0.0, device=total_param_loss.device)
+        
+        if (self.pinn_weight > 0 or self.residual_pinn_weight > 0) and self.norm_stats and self.model_params:
             num_raw_signal_feats = len(self.model_params.get('pld_values', [])) * 2
-            input_signal_norm = normalized_input_signal[:, :num_raw_signal_feats]
-            pinn_loss = self.mse_loss(reconstructed_signal_norm, input_signal_norm)
+            
+            # PINN 1: Reconstruction Consistency
+            if self.pinn_weight > 0:
+                reconstructed_signal_norm = torch_kinetic_model(cbf_pred_norm, att_pred_norm, self.norm_stats, self.model_params)
+                input_signal_norm = normalized_input_signal[:, :num_raw_signal_feats]
+                recon_loss = self.mse_loss(reconstructed_signal_norm, input_signal_norm)
 
+            # PINN 2: GKM Physics Residual (NEW)
+            if self.residual_pinn_weight > 0 and 'T1_tissue' in self.model_params:
+                # 1. Get network's predicted parameters in physical units
+                pred_cbf_phys = cbf_pred_norm * self.norm_stats['y_std_cbf'] + self.norm_stats['y_mean_cbf']
+                pred_att_phys = att_pred_norm * self.norm_stats['y_std_att'] + self.norm_stats['y_mean_att']
+
+                # 2. Create dense time points ("collocation points") in seconds
+                max_pld = self.model_params['pld_values'][-1]
+                t_collocation_ms = torch.linspace(0, max_pld * 1.1, 100, device=cbf_pred_norm.device)
+                t_collocation_s = t_collocation_ms.unsqueeze(0).expand(cbf_pred_norm.shape[0], -1) / 1000.0
+
+                # 3. Generate the continuous signal curve over the collocation points
+                pcasl_curve_continuous, _ = _torch_physical_kinetic_model(pred_cbf_phys, pred_att_phys, t_collocation_ms, self.model_params)
+                
+                # 4. Calculate the physics residual
+                gkm_residual = _calculate_pcasl_gkm_residual(
+                    pcasl_signal_curve=pcasl_curve_continuous, t_points=t_collocation_s,
+                    cbf_phys=pred_cbf_phys, att_phys=pred_att_phys,
+                    t1_tissue=self.model_params['T1_tissue'],
+                    t1_blood=self.model_params['T1_artery'],
+                    labeling_duration=self.model_params['T_tau']
+                )
+                residual_loss = torch.mean(gkm_residual**2)
+                
         # --- Final Unified Loss ---
-        total_loss = total_param_loss + log_var_regularization + self.pinn_weight * pinn_loss
+        total_loss = total_param_loss + log_var_regularization + self.pinn_weight * recon_loss + self.residual_pinn_weight * residual_loss
         
         loss_components = {
             'param_nll_loss': total_param_loss,
             'log_var_reg_loss': log_var_regularization,
-            'pinn_loss': pinn_loss,
-            'pre_estimator_loss': torch.tensor(0.0) # Placeholder for logging compatibility
+            'pinn_recon_loss': recon_loss,
+            'pinn_residual_loss': residual_loss, # NEW
+            'pre_estimator_loss': torch.tensor(0.0)
         }
+        # MODIFIED: Pass unreduced loss (NOT detached) to trainer for OHEM
+        loss_components['unreduced_loss'] = combined_nll_loss
         
         return total_loss, loss_components
