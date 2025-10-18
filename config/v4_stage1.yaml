@@ -1,36 +1,36 @@
 # FILE: config/v4_stage1.yaml
-# Configuration for the v4 pre-training stage (Stage 1).
-# Trains the full model from scratch on the complete dataset.
 
 training:
   # --- Key to activate the v3 model ---
   model_class_name: "DisentangledASLNet"
 
-  # --- Architecture & Regularization (Based on prior HPO) ---
+  # --- Architecture (Unchanged from HPO) ---
   hidden_sizes: [512, 256, 128]
-  dropout_rate: 0.0878
-  weight_decay: 0.0000138
 
-  # --- Learning Rate & Production Scale Parameters ---
-  learning_rate: 0.001       # Standard LR for training from scratch
+  dropout_rate: 0.25                        # AGGRESSIVE: High dropout to strongly prevent feature co-adaptation.
+  weight_decay: 0.0005                      # AGGRESSIVE: Strong L2 penalty to keep model weights small.
+  learning_rate: 0.0001                     # AGGRESSIVE: A very low LR to force stable, careful learning.
+  
+  loss_log_var_reg_lambda: 0.1              # AGGRESSIVE: Very high penalty on overconfidence.
+  log_var_att_min: -5.0                     # AGGRESSIVE: Hard cap on max confidence for ATT (Precision limited to ~148x).
+  log_var_cbf_min: -5.0                     # AGGRESSIVE: Hard cap on max confidence for CBF.
+  
+  # --- Production Scale Parameters ---
   batch_size: 8192
-  n_ensembles: 5
-  validation_steps_per_epoch: 50
+  n_ensembles: 1
+  validation_steps_per_epoch: 10
   norm_type: "batch"
-  n_epochs: 80               # Long run for full convergence
+  n_epochs: 10
 
-  # --- Principled Unified Loss Weights for Pre-training ---
+  # --- v4 Strategy: Generalist Training ---
   loss_pinn_weight: 0.5
   residual_pinn_weight: 0.01 
   loss_weight_cbf: 1.0
   loss_weight_att: 1.0
-  loss_log_var_reg_lambda: 0.001
-  ohem_fraction: 1.0         # CRITICAL: Use the full dataset (OHEM is disabled)
+  ohem_fraction: 1.0                        # CRITICAL: Keep at 1.0 to disable OHEM for this stage.
 
   # --- Core Model/Loss Parameters ---
-  log_var_cbf_min: -6.0
   log_var_cbf_max: 7.0
-  log_var_att_min: -2.0
   log_var_att_max: 14.0
   transformer_d_model_focused: 32
   transformer_nhead_model: 4
@@ -45,7 +45,7 @@ data:
 simulation:
   T1_artery: 1850.0
   T_tau: 1800.0
-  T2_factor: 1.0
+  T_factor: 1.0
   alpha_BS1: 1.0
   alpha_PCASL: 0.85
   alpha_VSASL: 0.56

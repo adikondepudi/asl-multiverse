@@ -614,9 +614,10 @@ class CustomLoss(nn.Module):
                 cbf_rough_physical: Optional[torch.Tensor], att_rough_physical: Optional[torch.Tensor],
                 global_epoch: int) -> Tuple[torch.Tensor, Dict[str, torch.Tensor]]:
         
+        # cbf_log_var and att_log_var tensors are now used directly
         # Prevents both exploding precision and pathologically negative loss.
-        cbf_log_var = torch.clamp(cbf_log_var, min=-10.0, max=10.0)
-        att_log_var = torch.clamp(att_log_var, min=-10.0, max=10.0)
+        # cbf_log_var = torch.clamp(cbf_log_var, min=-6.0, max=10.0)
+        # att_log_var = torch.clamp(att_log_var, min=-6.0, max=10.0)
 
         # --- Standard NLL calculation (Aleatoric Uncertainty Loss) ---
         cbf_precision = torch.exp(-cbf_log_var)

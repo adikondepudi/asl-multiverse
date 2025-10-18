@@ -20,9 +20,9 @@ training:
   learning_rate: 0.00005     # CRITICAL: Lower LR for fine-tuning
   batch_size: 8192
   n_ensembles: 5
-  validation_steps_per_epoch: 50
+  validation_steps_per_epoch: 10
   norm_type: "batch"
-  n_epochs: 40               # Shorter run for fine-tuning
+  n_epochs: 5               # Shorter run for fine-tuning
 
   # --- Loss Weights for Fine-tuning ---
   loss_pinn_weight: 0.1      # Reduced physics guidance
@@ -33,9 +33,9 @@ training:
   ohem_fraction: 0.75        # CRITICAL: Focus on 75% hardest examples
 
   # --- Core Model/Loss Parameters (must match Stage 1) ---
-  log_var_cbf_min: -6.0
+  log_var_cbf_min: -5.0
   log_var_cbf_max: 7.0
-  log_var_att_min: -2.0
+  log_var_att_min: -5.0
   log_var_att_max: 14.0
   transformer_d_model_focused: 32
   transformer_nhead_model: 4

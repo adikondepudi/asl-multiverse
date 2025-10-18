@@ -42,7 +42,7 @@ class ResearchConfig:
     use_offline_dataset: bool = False
     offline_dataset_path: Optional[str] = None
     n_epochs: int = 100
-    steps_per_epoch: int = 50
+    steps_per_epoch: int = 10
     loss_pinn_weight: float = 1.0
     weight_decay: float = 1e-5
     batch_size: int = 256
