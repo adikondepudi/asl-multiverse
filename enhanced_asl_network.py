@@ -1,6 +1,4 @@
 # FILE: enhanced_asl_network.py
-# FILE: enhanced_asl_network.py
-
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
@@ -408,29 +406,26 @@ class EnhancedASLNet(nn.Module):
         else:
             print(f"Warning: Unknown normalization type '{norm_type}'. Using BatchNorm1d.")
             return nn.BatchNorm1d(size)
-        
-    def get_param_groups(self):
-        """
-        Separates model parameters into groups for differential learning rates.
-        With the new unified architecture, the concept of a separate 'cbf_stream' is
-        obsolete as both parameters are predicted from a shared trunk. We assign all
-        parameters to the 'att_stream' and leave the 'cbf_stream' empty for
-        compatibility with the existing trainer which expects both groups.
-        """
-        # --- 'cbf_stream' is now conceptually empty ---
-        cbf_params = []
-        
-        # --- All other parameters belong to the main 'att_stream' ---
-        all_param_ids = set(id(p) for p in self.parameters())
-        cbf_param_ids = set(id(p) for p in cbf_params)
-        att_param_ids = all_param_ids - cbf_param_ids
-        
-        att_params = [p for p in self.parameters() if id(p) in att_param_ids]
-        
-        return [
-            {'params': cbf_params, 'name': 'cbf_stream'},
-            {'params': att_params, 'name': 'att_stream'}
+    
+    # --- NEW: Added freeze/unfreeze methods for fine-tuning compatibility ---
+    def freeze_encoder(self):
+        """Freezes all layers except the final regression head for fine-tuning."""
+        encoder_modules = [
+            self.pre_estimator, self.grad_norm_pcasl_cbf, self.grad_norm_pcasl_att,
+            self.grad_norm_vsasl_cbf, self.grad_norm_vsasl_att, self.pcasl_input_proj_att,
+            self.vsasl_input_proj_att, self.pcasl_transformer_att_long, self.vsasl_transformer_att_long,
+            self.pcasl_transformer_att_short, self.vsasl_transformer_att_short,
+            self.pcasl_to_vsasl_cross_attn, self.vsasl_to_pcasl_cross_attn,
+            self.pool_long, self.pool_short
         ]
+        for module in encoder_modules:
+            for param in module.parameters():
+                param.requires_grad = False
+    
+    def unfreeze_all(self):
+        """Sets requires_grad=True for all model parameters."""
+        for param in self.parameters():
+            param.requires_grad = True
 
 class DisentangledEncoder(nn.Module):
     """The feature extraction backbone for DisentangledASLNet."""

@@ -226,8 +226,9 @@ def run_comprehensive_asl_research(config: ResearchConfig, output_dir: Path, nor
     output_dir.mkdir(parents=True, exist_ok=True)
     torch.backends.cudnn.benchmark = True
 
-    run_name = f"run_{output_dir.name}"
-    wandb_run = wandb.init(project=config.wandb_project, entity=config.wandb_entity, config=asdict(config), name=run_name, job_type="research_pipeline")
+    # --- MODIFIED: More informative W&B run name ---
+    run_name = wandb.run.name if wandb.run and wandb.run.name else f"run_{output_dir.name}"
+    wandb_run = wandb.init(project=config.wandb_project, entity=config.wandb_entity, config=asdict(config), name=run_name, job_type="research_pipeline", reinit=True)
     if wandb_run: script_logger.info(f"W&B Run URL: {wandb_run.url}")
 
     with open(output_dir / 'research_config.json', 'w') as f: json.dump(asdict(config), f, indent=2)
@@ -237,7 +238,13 @@ def run_comprehensive_asl_research(config: ResearchConfig, output_dir: Path, nor
     asl_params_sim = ASLParameters(**{k:v for k,v in asdict(config).items() if k in ASLParameters.__annotations__})
     simulator = RealisticASLSimulator(params=asl_params_sim)
 
-    script_logger.info("Starting unified, single-stage ensemble training...")
+    # --- MODIFIED: Correctly log the training mode ---
+    is_finetuning = config.pretrained_encoder_path and Path(config.pretrained_encoder_path).exists()
+    if is_finetuning:
+        script_logger.info("Starting two-stage FINE-TUNING run...")
+    else:
+        script_logger.info("Starting training run FROM SCRATCH...")
+
     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
     script_logger.info(f"Using device: {device}")
 
@@ -304,8 +311,8 @@ def run_comprehensive_asl_research(config: ResearchConfig, output_dir: Path, nor
         if hasattr(model, 'set_norm_stats'):
             model.set_norm_stats(norm_stats)
 
-    # --- NEW: Load pre-trained encoder weights if specified ---
-    if config.pretrained_encoder_path and Path(config.pretrained_encoder_path).exists():
+    # --- MODIFIED: Load pre-trained encoder weights if specified ---
+    if is_finetuning:
         script_logger.info(f"Loading pre-trained encoder weights from: {config.pretrained_encoder_path}")
         encoder_state_dict = torch.load(config.pretrained_encoder_path, map_location=device)
         num_loaded = 0
@@ -314,15 +321,9 @@ def run_comprehensive_asl_research(config: ResearchConfig, output_dir: Path, nor
                 model.encoder.load_state_dict(encoder_state_dict, strict=False)
                 num_loaded += 1
         script_logger.info(f"Successfully loaded pre-trained weights into {num_loaded} model encoders.")
-    else:
-        script_logger.info("No pre-trained encoder path provided or found. Training from scratch.")
-    
-    # --- NEW: Prepare fine-tuning configuration to pass to the trainer ---
-    fine_tuning_cfg = None
-    if config.pretrained_encoder_path and Path(config.pretrained_encoder_path).exists():
-        script_logger.info("Fine-tuning mode activated.")
-        fine_tuning_cfg = {'freeze_epochs': config.fine_tuning_freeze_epochs}
 
+    fine_tuning_cfg = {'freeze_epochs': config.fine_tuning_freeze_epochs} if is_finetuning else None
+    
     script_logger.info(f"Training {config.n_ensembles}-model ensemble for {config.n_epochs} epochs...")
     training_start_time = time.time()
     
@@ -343,6 +344,14 @@ def run_comprehensive_asl_research(config: ResearchConfig, output_dir: Path, nor
     models_dir.mkdir(exist_ok=True)
     
     num_saved = 0
+    # --- NEW: Save the encoder separately after Stage 1 for Stage 2 to use ---
+    if not is_finetuning and hasattr(trainer.models[0], 'encoder'):
+        encoder_path = output_dir / 'encoder_pretrained.pt'
+        # Get the original, uncompiled model to save state_dict
+        unwrapped_model = getattr(trainer.models[0], '_orig_mod', trainer.models[0])
+        torch.save(unwrapped_model.encoder.state_dict(), encoder_path)
+        script_logger.info(f"Saved pre-trained encoder from model 0 to {encoder_path}")
+
     for i, state_dict in enumerate(trainer.best_states):
         if state_dict:
             model_path = models_dir / f'ensemble_model_{i}.pt'
@@ -368,13 +377,18 @@ def run_comprehensive_asl_research(config: ResearchConfig, output_dir: Path, nor
 if __name__ == "__main__":
     logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(name)s - %(levelname)s - %(message)s', handlers=[logging.StreamHandler(sys.stdout)], force=True) 
     
-    parser = argparse.ArgumentParser(description="Run ASL Multiverse Training or Hyperparameter Optimization.")
-    parser.add_argument("config_file", type=str, help="Path to the base YAML configuration file.")
-    parser.add_argument("output_dir", type=str, nargs='?', default=None, help="Path to the output directory. If not provided, a timestamped one will be created.")
-    parser.add_argument("--optimize", action="store_true", help="Run in hyperparameter optimization (HPO) mode instead of a full training run.")
-    parser.add_argument("--study-name", type=str, default=None, help="Name for the Optuna study. Used for resuming HPO runs.")
+    # --- MODIFIED: Add arguments for two-stage training curriculum ---
+    parser = argparse.ArgumentParser(description="Run ASL Multiverse v4 Training Pipeline.")
+    parser.add_argument("config_file", type=str, help="Path to the YAML configuration file for the desired stage.")
+    parser.add_argument("--stage", type=int, choices=[1, 2], required=True, help="Specify the training stage (1 for pre-training, 2 for fine-tuning).")
+    parser.add_argument("--load-weights-from", type=str, help="Path to the Stage 1 output directory containing the 'encoder_pretrained.pt' file. Required for Stage 2.")
+    parser.add_argument("--run-name", type=str, help="Optional specific name for the W&B run.")
+    parser.add_argument("--output-dir", type=str, help="Optional path to the output directory. If not provided, a timestamped one will be created.")
 
     args = parser.parse_args()
+    
+    if args.stage == 2 and not args.load_weights_from:
+        parser.error("--load-weights-from is required for --stage 2.")
 
     config_obj = ResearchConfig()
     if Path(args.config_file).exists():
@@ -390,16 +404,26 @@ if __name__ == "__main__":
             if hasattr(config_obj, key):
                 setattr(config_obj, key, value)
 
+    # --- MODIFIED: Create output directory and handle stage-specific logic ---
     if args.output_dir:
         output_path = Path(args.output_dir)
     else:
         timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
-        mode = "hpo" if args.optimize else "train"
-        output_path = Path(f'comprehensive_results/asl_research_{mode}_{timestamp}')
+        run_name_prefix = args.run_name if args.run_name else f"asl_research_v4_stage{args.stage}"
+        output_path = Path(f'comprehensive_results/{run_name_prefix}_{timestamp}')
     output_path.mkdir(parents=True, exist_ok=True)
     
-    if args.study_name:
-        config_obj.optuna_study_name = args.study_name
+    # Override config with command-line arguments for Stage 2
+    if args.stage == 2:
+        encoder_path = Path(args.load_weights_from) / 'encoder_pretrained.pt'
+        if not encoder_path.exists():
+            script_logger.error(f"FATAL: Encoder file not found at expected path: {encoder_path}")
+            sys.exit(1)
+        config_obj.pretrained_encoder_path = str(encoder_path)
+
+    if args.run_name:
+        # This will be picked up by the wandb.init call
+        os.environ['WANDB_RUN_NAME'] = args.run_name
 
     norm_stats_path = output_path / 'norm_stats.json'
     if norm_stats_path.exists():
@@ -423,7 +447,5 @@ if __name__ == "__main__":
         with open(norm_stats_path, 'w') as f:
             json.dump(norm_stats, f, indent=2)
 
-    if args.optimize:
-        run_hyperparameter_optimization(config=config_obj, output_dir=output_path, norm_stats=norm_stats)
-    else:
-        pipeline_results_dict = run_comprehensive_asl_research(config=config_obj, output_dir=output_path, norm_stats=norm_stats)
+    # Run the main pipeline with the configured object
+    pipeline_results_dict = run_comprehensive_asl_research(config=config_obj, output_dir=output_path, norm_stats=norm_stats)

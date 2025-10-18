@@ -1,3 +1,4 @@
+# FILE: asl_trainer.py
 import torch
 import torch.nn as nn
 import torch.optim as optim
@@ -88,11 +89,12 @@ class EnhancedASLTrainer:
         logger.info("Compiling models with torch.compile()..."); self.models = [torch.compile(m, mode="max-autotune") for m in self.models]
         logger.info("Model compilation complete.")
         if wandb.run:
-            for i, model in enumerate(self.models): wandb.watch(model, log='all', log_freq=200, idx=i)
+            # --- MODIFIED: Changed wandb.watch to be less verbose ---
+            for i, model in enumerate(self.models): wandb.watch(model, log='gradients', log_freq=200, idx=i)
         self.best_states = [None] * self.n_ensembles
         loss_params = {'w_cbf': model_config.get('loss_weight_cbf', 1.0), 'w_att': model_config.get('loss_weight_att', 1.0),
                        'log_var_reg_lambda': model_config.get('loss_log_var_reg_lambda', 0.0), 'pinn_weight': model_config.get('loss_pinn_weight', 0.0),
-                       'residual_pinn_weight': model_config.get('residual_pinn_weight', 0.0), # NEW for v3
+                       'residual_pinn_weight': model_config.get('residual_pinn_weight', 0.0),
                        'model_params': model_config}; self.custom_loss_fn = CustomLoss(**loss_params)
         self.global_step = 0; self.norm_stats = None
 
@@ -102,7 +104,10 @@ class EnhancedASLTrainer:
                        early_stopping_patience: int = 20, optuna_trial: Optional[Any] = None,
                        fine_tuning_config: Optional[Dict] = None):
         if steps_per_epoch is None: steps_per_epoch = len(train_loader)
-        logger.info(f"--- Starting Unified Training for {n_epochs} epochs ---")
+        
+        # --- MODIFIED: Log is now dynamic based on run type ---
+        run_type = "Fine-Tuning" if fine_tuning_config else "Training"
+        logger.info(f"--- Starting {run_type} for {n_epochs} epochs ---")
         
         self.optimizers = [torch.optim.AdamW(m.parameters(), lr=self.lr_base, weight_decay=self.weight_decay) for m in self.models]
         total_steps = steps_per_epoch * n_epochs
@@ -112,17 +117,20 @@ class EnhancedASLTrainer:
         freeze_epochs = fine_tuning_config.get('freeze_epochs', 0) if fine_tuning_config else 0
 
         for epoch in range(n_epochs):
-            # --- FINE-TUNING LOGIC: Adjust optimizers and model state based on epoch ---
+            # --- MODIFIED: Added specific logging for freeze/unfreeze actions ---
             if fine_tuning_config:
                 if epoch == 0 and freeze_epochs > 0:
                     logger.info(f"--- Fine-tuning Stage 1/2: Freezing encoder for {freeze_epochs} epochs. ---")
-                    for m in self.models: m.freeze_encoder()
+                    for m in self.models:
+                        if hasattr(m, 'freeze_encoder'): m.freeze_encoder()
+                    # Re-create optimizer for only trainable parameters
                     self.optimizers = [torch.optim.AdamW(filter(lambda p: p.requires_grad, m.parameters()), lr=self.lr_base, weight_decay=self.weight_decay) for m in self.models]
                     self.schedulers = [torch.optim.lr_scheduler.OneCycleLR(opt, max_lr=self.lr_base, total_steps=steps_per_epoch * freeze_epochs) for opt in self.optimizers]
                 
                 if epoch == freeze_epochs:
-                    logger.info(f"--- Fine-tuning Stage 2/2: Unfreezing all layers. ---")
-                    for m in self.models: m.unfreeze_all()
+                    logger.info(f"--- Fine-tuning Stage 2/2: Unfreezing all layers and resetting optimizer. ---")
+                    for m in self.models:
+                        if hasattr(m, 'unfreeze_all'): m.unfreeze_all()
                     self.optimizers = [torch.optim.AdamW(m.parameters(), lr=self.lr_base, weight_decay=self.weight_decay) for m in self.models]
                     remaining_steps = steps_per_epoch * (n_epochs - freeze_epochs)
                     self.schedulers = [torch.optim.lr_scheduler.OneCycleLR(opt, max_lr=self.lr_base, total_steps=remaining_steps) for opt in self.optimizers]
@@ -164,7 +172,7 @@ class EnhancedASLTrainer:
                         cbf_log_var=outputs[2], att_log_var=outputs[3],
                         cbf_rough_physical=outputs[4], att_rough_physical=outputs[5], global_epoch=epoch)
                 
-                if ohem_fraction < 1.0:
+                if ohem_fraction < 1.0 and ohem_fraction > 0:
                     unreduced_loss = comps['unreduced_loss']
                     num_hard_examples = int(signals.shape[0] * ohem_fraction)
                     top_k_losses, _ = torch.topk(unreduced_loss.view(-1), k=num_hard_examples)
@@ -178,6 +186,24 @@ class EnhancedASLTrainer:
                 schedulers[model_idx].step()
                 
                 if model_idx == 0: total_loss += final_loss.item()
+                
+                # --- MODIFIED: Added comprehensive diagnostic logging to W&B ---
+                if wandb.run and model_idx == 0 and self.global_step % 20 == 0:
+                    cbf_lvar, att_lvar = outputs[2], outputs[3]
+                    with torch.no_grad():
+                        cbf_std_learned = torch.mean(torch.exp(cbf_lvar * 0.5))
+                        att_std_learned = torch.mean(torch.exp(att_lvar * 0.5))
+
+                    wandb.log({
+                        "train/total_loss": final_loss.item(),
+                        "train_comps/nll_loss": comps.get('param_nll_loss', torch.tensor(0.0)).item(),
+                        "train_comps/pinn_recon_loss": comps.get('pinn_recon_loss', torch.tensor(0.0)).item(),
+                        "train_comps/pinn_residual_loss": comps.get('pinn_residual_loss', torch.tensor(0.0)).item(),
+                        "train_comps/log_var_reg": comps.get('log_var_reg_loss', torch.tensor(0.0)).item(),
+                        "uncertainty/cbf_std_learned_norm": cbf_std_learned.item(),
+                        "uncertainty/att_std_learned_norm": att_std_learned.item(),
+                        "train/learning_rate": schedulers[model_idx].get_last_lr()[0]
+                    }, step=self.global_step)
 
             self.global_step += 1
         return total_loss / steps, {}
