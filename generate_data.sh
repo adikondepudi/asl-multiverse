@@ -1,5 +1,5 @@
 #!/bin/bash
-#SBATCH --job-name=asl-data-gen-v2
+#SBATCH --job-name=asl-data-gen-v3
 #SBATCH --partition=cpu          # Use the CPU partition for this task
 #SBATCH --nodes=1
 #SBATCH --cpus-per-task=48       # Request a lot of CPU cores for parallelism
@@ -26,7 +26,7 @@ echo "Checking for and removing previous dataset directory: ${DATASET_DIR}"
 rm -rf "${DATASET_DIR}"
 
 # --- Run the Data Generation Script ---
-echo "Starting offline dataset generation for 10,000,000 samples (v2 Strategy)..."
+echo "Starting offline dataset generation for 10,000,000 samples (v3 Strategy)..."
 python generate_offline_dataset.py "${DATASET_DIR}" --total_samples 10000000 --chunk_size 25000
 
 echo "Job finished at $(date)"

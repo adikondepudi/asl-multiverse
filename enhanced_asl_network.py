@@ -1,3 +1,6 @@
+# FILE: enhanced_asl_network.py
+# FILE: enhanced_asl_network.py
+
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
@@ -431,7 +434,7 @@ class EnhancedASLNet(nn.Module):
 
 class DisentangledEncoder(nn.Module):
     """The feature extraction backbone for DisentangledASLNet."""
-    def __init__(self, n_plds, dropout_rate, transformer_d_model_focused, transformer_nhead, transformer_nlayers, **kwargs):
+    def __init__(self, n_plds, dropout_rate, transformer_d_model_focused, transformer_nhead_model, transformer_nlayers_model, **kwargs):
         super().__init__()
         self.n_plds = n_plds
         self.num_shape_features = n_plds * 2
@@ -443,8 +446,8 @@ class DisentangledEncoder(nn.Module):
         self.pcasl_input_proj = nn.Linear(1, self.att_d_model)
         self.vsasl_input_proj = nn.Linear(1, self.att_d_model)
         
-        encoder_layer = nn.TransformerEncoderLayer(self.att_d_model, transformer_nhead, self.att_d_model * 2, dropout_rate, batch_first=True)
-        self.transformer_encoder = nn.TransformerEncoder(encoder_layer, transformer_nlayers)
+        encoder_layer = nn.TransformerEncoderLayer(self.att_d_model, transformer_nhead_model, self.att_d_model * 2, dropout_rate, batch_first=True)
+        self.transformer_encoder = nn.TransformerEncoder(encoder_layer, transformer_nlayers_model)
         
         # --- 2. AMPLITUDE STREAM (Simple MLP for energy mapping) ---
         self.amplitude_mlp = nn.Sequential(
@@ -459,7 +462,7 @@ class DisentangledEncoder(nn.Module):
         self.query_proj = nn.Linear(amplitude_feature_size, self.att_d_model)
 
         self.cross_attention = nn.MultiheadAttention(
-            embed_dim=self.att_d_model, num_heads=transformer_nhead, 
+            embed_dim=self.att_d_model, num_heads=transformer_nhead_model, 
             dropout=dropout_rate, batch_first=True
         )
         self.fusion_norm = nn.LayerNorm(self.att_d_model)
