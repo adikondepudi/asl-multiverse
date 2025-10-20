@@ -15,7 +15,7 @@ from joblib import Parallel, delayed
 import multiprocessing
 
 # Import both model classes
-from enhanced_asl_network import EnhancedASLNet, DisentangledASLNet
+from enhanced_asl_network import DisentangledASLNet
 from multiverse_functions import fit_PCVSASL_misMatchPLD_vectInit_pep
 from utils import engineer_signal_features, get_grid_search_initial_guess
 

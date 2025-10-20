@@ -13,7 +13,7 @@ import matplotlib.pyplot as plt
 import seaborn as sns
 
 # --- Import from your project codebase ---
-from enhanced_asl_network import EnhancedASLNet, DisentangledASLNet
+from enhanced_asl_network import DisentangledASLNet
 from enhanced_simulation import RealisticASLSimulator, ASLParameters, PhysiologicalVariation
 from multiverse_functions import fit_PCVSASL_misMatchPLD_vectInit_pep
 from utils import engineer_signal_features, get_grid_search_initial_guess

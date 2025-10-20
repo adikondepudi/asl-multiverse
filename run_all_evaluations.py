@@ -18,7 +18,7 @@ from scipy.stats import pearsonr
 import warnings
 
 # --- Import necessary functions from other project files ---
-from enhanced_asl_network import EnhancedASLNet, DisentangledASLNet
+from enhanced_asl_network import DisentangledASLNet
 from predict_on_invivo import batch_predict_nn, fit_ls_robust
 from prepare_invivo_data import find_and_sort_files_by_pld
 

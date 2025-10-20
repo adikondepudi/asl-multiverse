@@ -25,7 +25,7 @@ import copy
 warnings.filterwarnings('ignore', category=UserWarning)
 
 # === MODIFICATION: Import the new model ===
-from enhanced_asl_network import EnhancedASLNet, DisentangledASLNet
+from enhanced_asl_network import DisentangledASLNet
 from asl_simulation import ASLParameters
 from enhanced_simulation import RealisticASLSimulator
 from asl_trainer import EnhancedASLTrainer, ASLIterableDataset, ASLInMemoryDataset

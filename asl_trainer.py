@@ -15,7 +15,7 @@ from itertools import islice
 import traceback
 import optuna
 
-from enhanced_asl_network import EnhancedASLNet, CustomLoss, DisentangledASLNet
+from enhanced_asl_network import CustomLoss, DisentangledASLNet
 from enhanced_simulation import RealisticASLSimulator
 from utils import engineer_signal_features
 
