@@ -82,9 +82,9 @@ class ResearchConfig:
     wandb_project: str = "asl-multiverse-project"
     wandb_entity: Optional[str] = None
     num_samples: int = 1000000
-    # --- NEW: Fields for Two-Stage Fine-Tuning ---
+    # --- MODIFIED: Fields for new training strategies ---
     pretrained_encoder_path: Optional[str] = None
-    fine_tuning_freeze_epochs: int = 10
+    moe: Optional[Dict[str, Any]] = None
 
 def create_att_weighted_sampler(dataset: ASLInMemoryDataset) -> WeightedRandomSampler:
     """Creates a sampler that over-samples the tails of the ATT distribution."""
@@ -241,7 +241,7 @@ def run_comprehensive_asl_research(config: ResearchConfig, output_dir: Path, nor
     # --- MODIFIED: Correctly log the training mode ---
     is_finetuning = config.pretrained_encoder_path and Path(config.pretrained_encoder_path).exists()
     if is_finetuning:
-        script_logger.info("Starting two-stage FINE-TUNING run...")
+        script_logger.info("Starting FINE-TUNING run...")
     else:
         script_logger.info("Starting training run FROM SCRATCH...")
 
@@ -322,7 +322,8 @@ def run_comprehensive_asl_research(config: ResearchConfig, output_dir: Path, nor
                 num_loaded += 1
         script_logger.info(f"Successfully loaded pre-trained weights into {num_loaded} model encoders.")
 
-    fine_tuning_cfg = {'freeze_epochs': config.fine_tuning_freeze_epochs} if is_finetuning else None
+    # --- MODIFIED: Simplified fine-tuning config passed to trainer ---
+    fine_tuning_cfg = {'enabled': True} if is_finetuning else None
     
     script_logger.info(f"Training {config.n_ensembles}-model ensemble for {config.n_epochs} epochs...")
     training_start_time = time.time()
@@ -400,6 +401,10 @@ if __name__ == "__main__":
             if isinstance(params, dict):
                 flat_config.update(params)
         
+        # Manually handle nested moe dictionary
+        if 'moe' in config_from_yaml:
+            flat_config['moe'] = config_from_yaml['moe']
+
         for key, value in flat_config.items():
             if hasattr(config_obj, key):
                 setattr(config_obj, key, value)

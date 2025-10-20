@@ -87,36 +87,28 @@ class EnhancedASLTrainer:
                        fine_tuning_config: Optional[Dict] = None):
         if steps_per_epoch is None: steps_per_epoch = len(train_loader)
         
-        # --- MODIFIED: Log is now dynamic based on run type ---
-        run_type = "Fine-Tuning" if fine_tuning_config else "Training"
+        is_finetuning = fine_tuning_config is not None and fine_tuning_config.get('enabled', False)
+        run_type = "Fine-Tuning" if is_finetuning else "Training"
         logger.info(f"--- Starting {run_type} for {n_epochs} epochs ---")
         
-        self.optimizers = [torch.optim.AdamW(m.parameters(), lr=self.lr_base, weight_decay=self.weight_decay) for m in self.models]
+        # --- MODIFIED: Simplified fine-tuning setup, happens once before training loop ---
+        if is_finetuning:
+            logger.info(f"--- Fine-tuning Mode: Freezing encoder and creating optimizer for head parameters. ---")
+            for m in self.models:
+                if hasattr(m, 'freeze_encoder'): m.freeze_encoder()
+            # Optimizer will now only see the unfrozen head parameters
+            self.optimizers = [torch.optim.AdamW(filter(lambda p: p.requires_grad, m.parameters()), lr=self.lr_base, weight_decay=self.weight_decay) for m in self.models]
+        else:
+            logger.info(f"--- Standard Training Mode: Creating optimizer for all parameters. ---")
+            self.optimizers = [torch.optim.AdamW(m.parameters(), lr=self.lr_base, weight_decay=self.weight_decay) for m in self.models]
+        
         total_steps = steps_per_epoch * n_epochs
         self.schedulers = [torch.optim.lr_scheduler.OneCycleLR(opt, max_lr=self.lr_base, total_steps=total_steps) for opt in self.optimizers]
         
         patience_counters = [0] * self.n_ensembles; self.overall_best_val_losses = [float('inf')] * self.n_ensembles
-        freeze_epochs = fine_tuning_config.get('freeze_epochs', 0) if fine_tuning_config else 0
 
         for epoch in range(n_epochs):
-            # --- MODIFIED: Added specific logging for freeze/unfreeze actions ---
-            if fine_tuning_config:
-                if epoch == 0 and freeze_epochs > 0:
-                    logger.info(f"--- Fine-tuning Stage 1/2: Freezing encoder for {freeze_epochs} epochs. ---")
-                    for m in self.models:
-                        if hasattr(m, 'freeze_encoder'): m.freeze_encoder()
-                    # Re-create optimizer for only trainable parameters
-                    self.optimizers = [torch.optim.AdamW(filter(lambda p: p.requires_grad, m.parameters()), lr=self.lr_base, weight_decay=self.weight_decay) for m in self.models]
-                    self.schedulers = [torch.optim.lr_scheduler.OneCycleLR(opt, max_lr=self.lr_base, total_steps=steps_per_epoch * freeze_epochs) for opt in self.optimizers]
-                
-                if epoch == freeze_epochs:
-                    logger.info(f"--- Fine-tuning Stage 2/2: Unfreezing all layers and resetting optimizer. ---")
-                    for m in self.models:
-                        if hasattr(m, 'unfreeze_all'): m.unfreeze_all()
-                    self.optimizers = [torch.optim.AdamW(m.parameters(), lr=self.lr_base, weight_decay=self.weight_decay) for m in self.models]
-                    remaining_steps = steps_per_epoch * (n_epochs - freeze_epochs)
-                    self.schedulers = [torch.optim.lr_scheduler.OneCycleLR(opt, max_lr=self.lr_base, total_steps=remaining_steps) for opt in self.optimizers]
-
+            # --- MODIFIED: All epoch-dependent freeze/unfreeze logic has been removed. ---
             train_loss, _ = self._train_epoch(self.models, train_loader, self.optimizers, self.schedulers, epoch, steps_per_epoch)
             val_metrics = self._validate(self.models, val_loader, epoch)
             mean_val_loss = np.nanmean([m.get('val_loss', np.nan) for m in val_metrics])
@@ -137,8 +129,7 @@ class EnhancedASLTrainer:
     def _train_epoch(self, models, loader, optimizers, schedulers, epoch, steps):
         for m in models: m.train()
         total_loss = 0.0; loader_iter = iter(loader)
-        ohem_fraction = self.model_config.get('ohem_fraction', 1.0)
-
+        
         for i in range(steps):
             for model_idx, model in enumerate(models):
                 try: signals, params_norm = next(loader_iter)
@@ -154,13 +145,8 @@ class EnhancedASLTrainer:
                         cbf_log_var=outputs[2], att_log_var=outputs[3],
                         cbf_rough_physical=outputs[4], att_rough_physical=outputs[5], global_epoch=epoch)
                 
-                if ohem_fraction < 1.0 and ohem_fraction > 0:
-                    unreduced_loss = comps['unreduced_loss']
-                    num_hard_examples = int(signals.shape[0] * ohem_fraction)
-                    top_k_losses, _ = torch.topk(unreduced_loss.view(-1), k=num_hard_examples)
-                    final_loss = top_k_losses.mean()
-                else:
-                    final_loss = loss_full_batch
+                # --- MODIFIED: OHEM logic has been removed. ---
+                final_loss = loss_full_batch
                 
                 final_loss.backward()
                 torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)

@@ -99,6 +99,91 @@ class UncertaintyHead(nn.Module):
         log_var = self.log_var_min_val + (torch.tanh(raw_log_var) + 1.0) * 0.5 * log_var_range
         return mean, log_var
 
+# --- NEW: MoE Gating Network ---
+class GatingNetwork(nn.Module):
+    """A simple MLP to produce expert weights from input features."""
+    def __init__(self, input_dim: int, num_experts: int, dropout_rate: float):
+        super().__init__()
+        hidden_dim = (input_dim + num_experts) // 2
+        self.network = nn.Sequential(
+            nn.Linear(input_dim, hidden_dim),
+            nn.ReLU(),
+            nn.Dropout(dropout_rate),
+            nn.Linear(hidden_dim, num_experts)
+        )
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        """Returns a probability distribution over the experts."""
+        logits = self.network(x)
+        return F.softmax(logits, dim=-1)
+
+# --- NEW: Encapsulated Expert Module ---
+class Expert(nn.Module):
+    """An individual expert in the MoE head, containing a full prediction pipeline."""
+    def __init__(self, input_dim: int, hidden_sizes: List[int], norm_type: str, dropout_rate: float,
+                 log_var_att_min: float, log_var_att_max: float, log_var_cbf_min: float, log_var_cbf_max: float):
+        super().__init__()
+        # Helper function to get normalization layer
+        def _get_norm_layer(size: int, norm_type: str) -> nn.Module:
+            if norm_type == 'batch': return nn.BatchNorm1d(size)
+            elif norm_type == 'layer': return nn.LayerNorm(size)
+            else: return nn.BatchNorm1d(size)
+
+        self.joint_mlp = nn.Sequential(
+            nn.Linear(input_dim, hidden_sizes[0]),
+            _get_norm_layer(hidden_sizes[0], norm_type),
+            nn.ReLU(),
+            nn.Dropout(dropout_rate),
+            nn.Linear(hidden_sizes[0], hidden_sizes[1])
+        )
+        self.att_head = UncertaintyHead(hidden_sizes[1], 1, log_var_min=log_var_att_min, log_var_max=log_var_att_max)
+        self.cbf_head = UncertaintyHead(hidden_sizes[1], 1, log_var_min=log_var_cbf_min, log_var_max=log_var_cbf_max)
+
+    def forward(self, x: torch.Tensor) -> Tuple[torch.Tensor, ...]:
+        joint_features = self.joint_mlp(x)
+        cbf_mean, cbf_log_var = self.cbf_head(joint_features)
+        att_mean, att_log_var = self.att_head(joint_features)
+        return cbf_mean, att_mean, cbf_log_var, att_log_var
+
+# --- NEW: Mixture of Experts Head ---
+class MixtureOfExpertsHead(nn.Module):
+    """Combines a gating network and multiple expert predictors."""
+    def __init__(self, input_dim: int, hidden_sizes: List[int], norm_type: str, dropout_rate: float,
+                 log_var_cbf_min: float, log_var_cbf_max: float, log_var_att_min: float, log_var_att_max: float,
+                 num_experts: int, gating_dropout_rate: float):
+        super().__init__()
+        self.gating_network = GatingNetwork(input_dim, num_experts, gating_dropout_rate)
+        self.experts = nn.ModuleList([
+            Expert(input_dim, hidden_sizes, norm_type, dropout_rate, 
+                   log_var_att_min, log_var_att_max, log_var_cbf_min, log_var_cbf_max)
+            for _ in range(num_experts)
+        ])
+
+    def forward(self, x: torch.Tensor) -> Tuple[torch.Tensor, ...]:
+        # Get weights for each expert: [batch_size, num_experts]
+        expert_weights = self.gating_network(x)
+
+        # Get predictions from all experts
+        expert_outputs = [expert(x) for expert in self.experts]
+
+        # Stack the outputs from each expert
+        # e.g., cbf_means_stacked shape: [batch_size, num_experts, 1]
+        cbf_means_stacked = torch.stack([out[0] for out in expert_outputs], dim=1)
+        att_means_stacked = torch.stack([out[1] for out in expert_outputs], dim=1)
+        cbf_log_vars_stacked = torch.stack([out[2] for out in expert_outputs], dim=1)
+        att_log_vars_stacked = torch.stack([out[3] for out in expert_outputs], dim=1)
+
+        # Calculate the weighted average of the predictions
+        # Unsqueeze weights to [batch_size, 1, num_experts] for bmm
+        weights = expert_weights.unsqueeze(1)
+        
+        final_cbf_mean = torch.bmm(weights, cbf_means_stacked).squeeze(1)
+        final_att_mean = torch.bmm(weights, att_means_stacked).squeeze(1)
+        final_cbf_log_var = torch.bmm(weights, cbf_log_vars_stacked).squeeze(1)
+        final_att_log_var = torch.bmm(weights, att_log_vars_stacked).squeeze(1)
+        
+        return final_cbf_mean, final_att_mean, final_cbf_log_var, final_att_log_var
+
 def _torch_physical_kinetic_model(
     pred_cbf: torch.Tensor, pred_att: torch.Tensor,
     plds: torch.Tensor, model_params: Dict[str, Any]
@@ -292,8 +377,8 @@ class DisentangledEncoder(nn.Module):
 
 class DisentangledASLNet(nn.Module):
     """
-    DisentangledASLNet v3: Refactored architecture with a distinct encoder
-    and regression heads to support two-stage training (pre-training + fine-tuning).
+    DisentangledASLNet v5: Refactored architecture with a Mixture-of-Experts (MoE) head
+    to replace the single regression head for improved specialization.
     """
     def __init__(self, 
                  input_size: int,
@@ -304,6 +389,7 @@ class DisentangledASLNet(nn.Module):
                  log_var_cbf_max: float = 7.0,
                  log_var_att_min: float = 0.0,
                  log_var_att_max: float = 14.0,
+                 moe: Optional[Dict[str, Any]] = None,
                  **kwargs):
         super().__init__()
         
@@ -313,22 +399,42 @@ class DisentangledASLNet(nn.Module):
         fused_feature_size = self.encoder.att_d_model + 64 # From query and amplitude_features
         dropout_rate = kwargs.get('dropout_rate', 0.1)
 
-        # Regression Heads
-        self.joint_mlp = nn.Sequential(
-            nn.Linear(fused_feature_size, hidden_sizes[0]),
-            self._get_norm_layer(hidden_sizes[0], norm_type),
-            nn.ReLU(),
-            nn.Dropout(dropout_rate),
-            nn.Linear(hidden_sizes[0], hidden_sizes[1])
-        )
-        self.att_head = UncertaintyHead(hidden_sizes[1], 1, log_var_min=log_var_att_min, log_var_max=log_var_att_max)
-        self.cbf_head = UncertaintyHead(hidden_sizes[1], 1, log_var_min=log_var_cbf_min, log_var_max=log_var_cbf_max)
+        # --- MODIFIED: Replace single head with Mixture of Experts Head ---
+        if moe and moe.get('num_experts', 0) > 0:
+            self.moe_head = MixtureOfExpertsHead(
+                input_dim=fused_feature_size,
+                hidden_sizes=hidden_sizes,
+                norm_type=norm_type,
+                dropout_rate=dropout_rate,
+                log_var_cbf_min=log_var_cbf_min,
+                log_var_cbf_max=log_var_cbf_max,
+                log_var_att_min=log_var_att_min,
+                log_var_att_max=log_var_att_max,
+                num_experts=moe['num_experts'],
+                gating_dropout_rate=moe['gating_dropout_rate']
+            )
+        else: # Fallback to original single head if MoE is not configured
+            self.joint_mlp = nn.Sequential(
+                nn.Linear(fused_feature_size, hidden_sizes[0]),
+                self._get_norm_layer(hidden_sizes[0], norm_type),
+                nn.ReLU(),
+                nn.Dropout(dropout_rate),
+                nn.Linear(hidden_sizes[0], hidden_sizes[1])
+            )
+            self.att_head = UncertaintyHead(hidden_sizes[1], 1, log_var_min=log_var_att_min, log_var_max=log_var_att_max)
+            self.cbf_head = UncertaintyHead(hidden_sizes[1], 1, log_var_min=log_var_cbf_min, log_var_max=log_var_cbf_max)
+            self.moe_head = None
 
     def forward(self, x: torch.Tensor) -> Tuple[torch.Tensor, ...]:
         fused_features = self.encoder(x)
-        joint_features = self.joint_mlp(fused_features)
-        cbf_mean, cbf_log_var = self.cbf_head(joint_features)
-        att_mean, att_log_var = self.att_head(joint_features)
+        
+        if self.moe_head:
+            cbf_mean, att_mean, cbf_log_var, att_log_var = self.moe_head(fused_features)
+        else: # Fallback for non-MoE configuration
+            joint_features = self.joint_mlp(fused_features)
+            cbf_mean, cbf_log_var = self.cbf_head(joint_features)
+            att_mean, att_log_var = self.att_head(joint_features)
+
         return cbf_mean, att_mean, cbf_log_var, att_log_var, None, None
 
     def _get_norm_layer(self, size: int, norm_type: str) -> nn.Module:
@@ -338,9 +444,12 @@ class DisentangledASLNet(nn.Module):
 
     def get_head_parameters(self):
         """Returns all parameters related to the regression heads."""
-        return list(self.joint_mlp.parameters()) + \
-               list(self.att_head.parameters()) + \
-               list(self.cbf_head.parameters())
+        if self.moe_head:
+            return list(self.moe_head.parameters())
+        else:
+            return list(self.joint_mlp.parameters()) + \
+                   list(self.att_head.parameters()) + \
+                   list(self.cbf_head.parameters())
     
     def freeze_encoder(self):
         """Freezes all parameters in the encoder for fine-tuning."""
