@@ -1,16 +1,12 @@
-# FILE: config/v5_MoE_finetune.yaml
-# Configuration for the v5 Mixture of Experts fine-tuning stage.
+# FILE: config/v5_stage2_MoE_finetune.yaml
+# Configuration for the v5 Mixture of Experts fine-tuning stage (Stage 2).
 # Loads a pre-trained encoder, freezes it, and fine-tunes the MoE head.
 
 training:
-  # --- Key to activate the v3/v5 model ---
+  # --- Key model class ---
   model_class_name: "DisentangledASLNet"
-
-  # --- Key Fine-Tuning Parameters ---
-  # NOTE: This path is a placeholder; it will be overwritten by the run script.
-  pretrained_encoder_path: "path/to/stage1/encoder_pretrained.pt" 
   
-  # --- Architecture & Regularization (must match Stage 1) ---
+  # --- Architecture & Regularization ---
   hidden_sizes: [512, 256, 128]
   dropout_rate: 0.0878
   weight_decay: 0.0000138
@@ -21,17 +17,13 @@ training:
   n_ensembles: 5
   validation_steps_per_epoch: 10
   norm_type: "batch"
-  n_epochs: 50               # Substantial run time for fine-tuning convergence
+  n_epochs: 50               # Substantial run time, will use early stopping
 
   # --- Loss Weights for Fine-tuning ---
   loss_pinn_weight: 0.1      # Reduced physics guidance
-  residual_pinn_weight: 0.0
-  loss_weight_cbf: 1.0
-  loss_weight_att: 1.0
-  loss_log_var_reg_lambda: 0.001
   ohem_fraction: 1.0         # CRITICAL: OHEM is permanently disabled.
 
-  # --- Core Model/Loss Parameters (must match Stage 1) ---
+  # --- Core Model/Loss Parameters ---
   log_var_cbf_min: -5.0
   log_var_cbf_max: 7.0
   log_var_att_min: -5.0
@@ -41,7 +33,7 @@ training:
   transformer_nlayers_model: 2
 
 moe:
-  num_experts: 4 # One generalist, one for short ATT, one for long ATT, one for noise/low signal
+  num_experts: 4 # One generalist, one short ATT, one long ATT, one noise/low signal
   gating_dropout_rate: 0.1
 
 data:
@@ -60,5 +52,5 @@ simulation:
   T1_tissue: 1331.0 
 
 wandb:
-  wandb_project: "asl-multiverse-prod-v5-MoE"
+  wandb_project: "asl-multiverse-prod-v5"
   wandb_entity: "adikondepudi"
