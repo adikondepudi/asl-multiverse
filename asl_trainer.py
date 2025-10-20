@@ -24,24 +24,6 @@ logger = logging.getLogger(__name__)
 if not logger.hasHandlers():
     logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(name)s - %(levelname)s - %(message)s')
 
-# --- Helper classes ---
-class ASLNet(nn.Module):
-    def __init__(self, input_size: int, hidden_sizes: List[int] = [64, 32, 16]):
-        super().__init__()
-        layers = []
-        prev_size = input_size
-        for hs in hidden_sizes: layers.extend([nn.Linear(prev_size, hs), nn.ReLU(), nn.BatchNorm1d(hs), nn.Dropout(0.1)]); prev_size = hs
-        layers.append(nn.Linear(prev_size, 2)); self.network = nn.Sequential(*layers)
-    def forward(self, x: torch.Tensor) -> torch.Tensor: return self.network(x)
-
-class ASLDataset(Dataset):
-    def __init__(self, signals: np.ndarray, params: np.ndarray): self.signals, self.params = torch.FloatTensor(signals), torch.FloatTensor(params)
-    def __len__(self) -> int: return len(self.signals)
-    def __getitem__(self, idx: int) -> Tuple[torch.Tensor, torch.Tensor]: return self.signals[idx], self.params[idx]
-
-class ASLTrainer: # Old trainer
-    def train(self): pass
-
 class EnhancedASLDataset(Dataset):
     def __init__(self, signals: np.ndarray, params: np.ndarray, **kwargs): self.signals, self.params = torch.FloatTensor(signals), torch.FloatTensor(params)
     def __len__(self) -> int: return len(self.signals)
