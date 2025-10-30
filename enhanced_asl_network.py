@@ -99,7 +99,6 @@ class UncertaintyHead(nn.Module):
         log_var = self.log_var_min_val + (torch.tanh(raw_log_var) + 1.0) * 0.5 * log_var_range
         return mean, log_var
 
-# --- NEW: MoE Gating Network ---
 class GatingNetwork(nn.Module):
     """A simple MLP to produce expert weights from input features."""
     def __init__(self, input_dim: int, num_experts: int, dropout_rate: float):
@@ -117,7 +116,6 @@ class GatingNetwork(nn.Module):
         logits = self.network(x)
         return F.softmax(logits, dim=-1)
 
-# --- NEW: Encapsulated Expert Module ---
 class Expert(nn.Module):
     """An individual expert in the MoE head, containing a full prediction pipeline."""
     def __init__(self, input_dim: int, hidden_sizes: List[int], norm_type: str, dropout_rate: float,
@@ -145,7 +143,6 @@ class Expert(nn.Module):
         att_mean, att_log_var = self.att_head(joint_features)
         return cbf_mean, att_mean, cbf_log_var, att_log_var
 
-# --- NEW: Mixture of Experts Head ---
 class MixtureOfExpertsHead(nn.Module):
     """Combines a gating network and multiple expert predictors."""
     def __init__(self, input_dim: int, hidden_sizes: List[int], norm_type: str, dropout_rate: float,
@@ -275,7 +272,6 @@ def _torch_analytic_gradients(
 
     return dSdC_pcasl, dSdA_pcasl, dSdC_vsasl, dSdA_vsasl
 
-# NEW: Physics Residual PINN helper function
 def _calculate_pcasl_gkm_residual(pcasl_signal_curve, t_points, cbf_phys, att_phys, t1_tissue, t1_blood, labeling_duration):
     """
     Calculates the residual of the simplified 1-compartment GKM differential equation for PCASL.
@@ -310,24 +306,55 @@ def _calculate_pcasl_gkm_residual(pcasl_signal_curve, t_points, cbf_phys, att_ph
     residual = dM_dt - rhs
     return residual
 
-class DisentangledEncoder(nn.Module):
-    """The feature extraction backbone for DisentangledASLNet."""
-    def __init__(self, n_plds, dropout_rate, transformer_d_model_focused, transformer_nhead_model, transformer_nlayers_model, **kwargs):
+class Conv1DFeatureExtractor(nn.Module):
+    """
+    A dedicated 1D-ConvNet to extract local, shape-based features from the ASL signal.
+    This is the direct replacement for the TransformerEncoder.
+    """
+    def __init__(self, in_channels: int, feature_dim: int, dropout_rate: float):
+        super().__init__()
+        self.conv_stack = nn.Sequential(
+            nn.Conv1d(in_channels, 32, kernel_size=3, padding='same'),
+            nn.BatchNorm1d(32),
+            nn.ReLU(),
+            nn.Dropout(dropout_rate),
+            
+            nn.Conv1d(32, 64, kernel_size=3, padding='same'),
+            nn.BatchNorm1d(64),
+            nn.ReLU(),
+            nn.Dropout(dropout_rate),
+            
+            nn.Conv1d(64, feature_dim, kernel_size=1)
+        )
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        """
+        Args:
+            x (torch.Tensor): Input tensor of shape (batch, in_channels, seq_len).
+        Returns:
+            torch.Tensor: Output tensor of shape (batch, feature_dim, seq_len).
+        """
+        return self.conv_stack(x)
+
+class DisentangledEncoderConv1D(nn.Module):
+    """
+    The feature extraction backbone using a 1D-ConvNet for the shape stream.
+    The Amplitude Stream and Dynamic Fusion Engine are identical to the Transformer version.
+    """
+    def __init__(self, n_plds, dropout_rate, transformer_d_model_focused, transformer_nhead_model, **kwargs):
         super().__init__()
         self.n_plds = n_plds
         self.num_shape_features = n_plds * 2
         self.num_engineered_features = 4  # TTP_p, TTP_v, CoM_p, CoM_v
         self.num_amplitude_features = 1
-        
-        # --- 1. SHAPE STREAM (Transformers for temporal features) ---
         self.att_d_model = transformer_d_model_focused
-        self.pcasl_input_proj = nn.Linear(1, self.att_d_model)
-        self.vsasl_input_proj = nn.Linear(1, self.att_d_model)
+
+        self.shape_feature_extractor = Conv1DFeatureExtractor(
+            in_channels=1, 
+            feature_dim=self.att_d_model, 
+            dropout_rate=dropout_rate
+        )
         
-        encoder_layer = nn.TransformerEncoderLayer(self.att_d_model, transformer_nhead_model, self.att_d_model * 2, dropout_rate, batch_first=True)
-        self.transformer_encoder = nn.TransformerEncoder(encoder_layer, transformer_nlayers_model)
-        
-        # --- 2. AMPLITUDE STREAM (Simple MLP for energy mapping) ---
         self.amplitude_mlp = nn.Sequential(
             nn.Linear(self.num_amplitude_features + self.num_engineered_features, 32),
             nn.ReLU(),
@@ -335,7 +362,6 @@ class DisentangledEncoder(nn.Module):
             nn.ReLU()
         )
         
-        # --- 3. DYNAMIC FUSION ENGINE (Cross-Attention) ---
         amplitude_feature_size = 64
         self.query_proj = nn.Linear(amplitude_feature_size, self.att_d_model)
 
@@ -351,19 +377,15 @@ class DisentangledEncoder(nn.Module):
         engineered_features = x[:, self.num_shape_features : self.num_shape_features + self.num_engineered_features]
         amplitude_scalar = x[:, -self.num_amplitude_features:]
 
-        # --- SHAPE STREAM ---
         pcasl_shape = shape_vector[:, :self.n_plds].unsqueeze(-1)
         vsasl_shape = shape_vector[:, self.n_plds:].unsqueeze(-1)
-        pcasl_proj = self.pcasl_input_proj(pcasl_shape)
-        vsasl_proj = self.vsasl_input_proj(vsasl_shape)
-        pcasl_encoded = self.transformer_encoder(pcasl_proj)
-        vsasl_encoded = self.transformer_encoder(vsasl_proj)
+
+        pcasl_encoded = self.shape_feature_extractor(pcasl_shape.transpose(1, 2)).transpose(1, 2)
+        vsasl_encoded = self.shape_feature_extractor(vsasl_shape.transpose(1, 2)).transpose(1, 2)
         
-        # --- AMPLITUDE STREAM ---
         amplitude_input = torch.cat([amplitude_scalar, engineered_features], dim=1)
         amplitude_features = self.amplitude_mlp(amplitude_input)
 
-        # --- DYNAMIC FUSION ENGINE ---
         shape_sequence = torch.cat([pcasl_encoded, vsasl_encoded], dim=1)
         query_proj = self.query_proj(amplitude_features)
         query = query_proj.unsqueeze(1)
@@ -371,14 +393,71 @@ class DisentangledEncoder(nn.Module):
         contextualized_query_unnorm = query + self.fusion_dropout(attn_output)
         contextualized_query = self.fusion_norm(contextualized_query_unnorm).squeeze(1)
 
-        # Final feature vector for prediction, combining context-aware and original features
+        fused_features = torch.cat([contextualized_query, amplitude_features], dim=1)
+        return fused_features
+
+class DisentangledEncoder(nn.Module):
+    """The feature extraction backbone for DisentangledASLNet."""
+    def __init__(self, n_plds, dropout_rate, transformer_d_model_focused, transformer_nhead_model, transformer_nlayers_model, **kwargs):
+        super().__init__()
+        self.n_plds = n_plds
+        self.num_shape_features = n_plds * 2
+        self.num_engineered_features = 4  # TTP_p, TTP_v, CoM_p, CoM_v
+        self.num_amplitude_features = 1
+        
+        self.att_d_model = transformer_d_model_focused
+        self.pcasl_input_proj = nn.Linear(1, self.att_d_model)
+        self.vsasl_input_proj = nn.Linear(1, self.att_d_model)
+        
+        encoder_layer = nn.TransformerEncoderLayer(self.att_d_model, transformer_nhead_model, self.att_d_model * 2, dropout_rate, batch_first=True)
+        self.transformer_encoder = nn.TransformerEncoder(encoder_layer, transformer_nlayers_model)
+        
+        self.amplitude_mlp = nn.Sequential(
+            nn.Linear(self.num_amplitude_features + self.num_engineered_features, 32),
+            nn.ReLU(),
+            nn.Linear(32, 64),
+            nn.ReLU()
+        )
+        
+        amplitude_feature_size = 64
+        self.query_proj = nn.Linear(amplitude_feature_size, self.att_d_model)
+
+        self.cross_attention = nn.MultiheadAttention(
+            embed_dim=self.att_d_model, num_heads=transformer_nhead_model, 
+            dropout=dropout_rate, batch_first=True
+        )
+        self.fusion_norm = nn.LayerNorm(self.att_d_model)
+        self.fusion_dropout = nn.Dropout(dropout_rate)
+    
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        shape_vector = x[:, :self.num_shape_features]
+        engineered_features = x[:, self.num_shape_features : self.num_shape_features + self.num_engineered_features]
+        amplitude_scalar = x[:, -self.num_amplitude_features:]
+
+        pcasl_shape = shape_vector[:, :self.n_plds].unsqueeze(-1)
+        vsasl_shape = shape_vector[:, self.n_plds:].unsqueeze(-1)
+        pcasl_proj = self.pcasl_input_proj(pcasl_shape)
+        vsasl_proj = self.vsasl_input_proj(vsasl_shape)
+        pcasl_encoded = self.transformer_encoder(pcasl_proj)
+        vsasl_encoded = self.transformer_encoder(vsasl_proj)
+        
+        amplitude_input = torch.cat([amplitude_scalar, engineered_features], dim=1)
+        amplitude_features = self.amplitude_mlp(amplitude_input)
+
+        shape_sequence = torch.cat([pcasl_encoded, vsasl_encoded], dim=1)
+        query_proj = self.query_proj(amplitude_features)
+        query = query_proj.unsqueeze(1)
+        attn_output, _ = self.cross_attention(query=query, key=shape_sequence, value=shape_sequence)
+        contextualized_query_unnorm = query + self.fusion_dropout(attn_output)
+        contextualized_query = self.fusion_norm(contextualized_query_unnorm).squeeze(1)
+
         fused_features = torch.cat([contextualized_query, amplitude_features], dim=1)
         return fused_features
 
 class DisentangledASLNet(nn.Module):
     """
     DisentangledASLNet v5: Refactored architecture with a Mixture-of-Experts (MoE) head
-    to replace the single regression head for improved specialization.
+    and a switchable encoder backbone (Transformer vs. Conv1D).
     """
     def __init__(self, 
                  input_size: int,
@@ -390,16 +469,22 @@ class DisentangledASLNet(nn.Module):
                  log_var_att_min: float = 0.0,
                  log_var_att_max: float = 14.0,
                  moe: Optional[Dict[str, Any]] = None,
+                 encoder_type: str = 'transformer',
                  **kwargs):
         super().__init__()
         
-        self.encoder = DisentangledEncoder(n_plds=n_plds, **kwargs)
+        if encoder_type.lower() == 'conv1d':
+            print("INFO: Initializing DisentangledASLNet with Conv1D Encoder.")
+            self.encoder = DisentangledEncoderConv1D(n_plds=n_plds, **kwargs)
+        elif encoder_type.lower() == 'transformer':
+            print("INFO: Initializing DisentangledASLNet with Transformer Encoder.")
+            self.encoder = DisentangledEncoder(n_plds=n_plds, **kwargs)
+        else:
+            raise ValueError(f"Unknown encoder_type: '{encoder_type}'. Must be 'conv1d' or 'transformer'.")
         
-        # Fused features will be concatenation of attention output and original amplitude features
-        fused_feature_size = self.encoder.att_d_model + 64 # From query and amplitude_features
+        fused_feature_size = self.encoder.att_d_model + 64
         dropout_rate = kwargs.get('dropout_rate', 0.1)
 
-        # --- MODIFIED: Replace single head with Mixture of Experts Head ---
         if moe and moe.get('num_experts', 0) > 0:
             self.moe_head = MixtureOfExpertsHead(
                 input_dim=fused_feature_size,
@@ -413,7 +498,7 @@ class DisentangledASLNet(nn.Module):
                 num_experts=moe['num_experts'],
                 gating_dropout_rate=moe['gating_dropout_rate']
             )
-        else: # Fallback to original single head if MoE is not configured
+        else: 
             self.joint_mlp = nn.Sequential(
                 nn.Linear(fused_feature_size, hidden_sizes[0]),
                 self._get_norm_layer(hidden_sizes[0], norm_type),
@@ -430,7 +515,7 @@ class DisentangledASLNet(nn.Module):
         
         if self.moe_head:
             cbf_mean, att_mean, cbf_log_var, att_log_var = self.moe_head(fused_features)
-        else: # Fallback for non-MoE configuration
+        else:
             joint_features = self.joint_mlp(fused_features)
             cbf_mean, cbf_log_var = self.cbf_head(joint_features)
             att_mean, att_log_var = self.att_head(joint_features)
@@ -500,7 +585,7 @@ class CustomLoss(nn.Module):
                  w_att: float = 1.0, 
                  log_var_reg_lambda: float = 0.0,
                  pinn_weight: float = 0.0,
-                 residual_pinn_weight: float = 0.0, # NEW: For GKM residual loss
+                 residual_pinn_weight: float = 0.0,
                  model_params: Optional[Dict[str, Any]] = None,
                 ):
         super().__init__()
@@ -508,7 +593,7 @@ class CustomLoss(nn.Module):
         self.w_att = w_att
         self.log_var_reg_lambda = log_var_reg_lambda
         self.pinn_weight = pinn_weight
-        self.residual_pinn_weight = residual_pinn_weight # NEW
+        self.residual_pinn_weight = residual_pinn_weight
         self.model_params = model_params if model_params is not None else {}
         self.norm_stats = None
         self.mse_loss = nn.MSELoss()
@@ -521,59 +606,43 @@ class CustomLoss(nn.Module):
                 cbf_rough_physical: Optional[torch.Tensor], att_rough_physical: Optional[torch.Tensor],
                 global_epoch: int) -> Tuple[torch.Tensor, Dict[str, torch.Tensor]]:
         
-        # cbf_log_var and att_log_var tensors are now used directly
-        # Prevents both exploding precision and pathologically negative loss.
-        # cbf_log_var = torch.clamp(cbf_log_var, min=-6.0, max=10.0)
-        # att_log_var = torch.clamp(att_log_var, min=-6.0, max=10.0)
-
-        # --- Standard NLL calculation (Aleatoric Uncertainty Loss) ---
         cbf_precision = torch.exp(-cbf_log_var)
         att_precision = torch.exp(-att_log_var)
 
         cbf_nll_loss = 0.5 * (cbf_precision * (cbf_pred_norm - cbf_true_norm)**2 + cbf_log_var)
         att_nll_loss = 0.5 * (att_precision * (att_pred_norm - att_true_norm)**2 + att_log_var)
 
-        # --- Apply weights and combine losses ---
         weighted_cbf_loss = self.w_cbf * cbf_nll_loss
         weighted_att_loss = self.w_att * att_nll_loss
         
-        # MODIFIED: Get handle on unreduced loss for OHEM
         combined_nll_loss = weighted_cbf_loss + weighted_att_loss
         total_param_loss = torch.mean(combined_nll_loss)
         
-        # --- Optional regularization on the magnitude of predicted uncertainty ---
         log_var_regularization = torch.tensor(0.0, device=total_param_loss.device)
         if self.log_var_reg_lambda > 0:
             log_var_regularization = self.log_var_reg_lambda * (torch.mean(cbf_log_var**2) + torch.mean(att_log_var**2))
             
-        # --- Physics-Informed (PINN) Regularization ---
         recon_loss = torch.tensor(0.0, device=total_param_loss.device)
         residual_loss = torch.tensor(0.0, device=total_param_loss.device)
         
         if (self.pinn_weight > 0 or self.residual_pinn_weight > 0) and self.norm_stats and self.model_params:
             num_raw_signal_feats = len(self.model_params.get('pld_values', [])) * 2
             
-            # PINN 1: Reconstruction Consistency
             if self.pinn_weight > 0:
                 reconstructed_signal_norm = torch_kinetic_model(cbf_pred_norm, att_pred_norm, self.norm_stats, self.model_params)
                 input_signal_norm = normalized_input_signal[:, :num_raw_signal_feats]
                 recon_loss = self.mse_loss(reconstructed_signal_norm, input_signal_norm)
 
-            # PINN 2: GKM Physics Residual (NEW)
             if self.residual_pinn_weight > 0 and 'T1_tissue' in self.model_params:
-                # 1. Get network's predicted parameters in physical units
                 pred_cbf_phys = cbf_pred_norm * self.norm_stats['y_std_cbf'] + self.norm_stats['y_mean_cbf']
                 pred_att_phys = att_pred_norm * self.norm_stats['y_std_att'] + self.norm_stats['y_mean_att']
 
-                # 2. Create dense time points ("collocation points") in seconds
                 max_pld = self.model_params['pld_values'][-1]
                 t_collocation_ms = torch.linspace(0, max_pld * 1.1, 100, device=cbf_pred_norm.device)
                 t_collocation_s = t_collocation_ms.unsqueeze(0).expand(cbf_pred_norm.shape[0], -1) / 1000.0
 
-                # 3. Generate the continuous signal curve over the collocation points
                 pcasl_curve_continuous, _ = _torch_physical_kinetic_model(pred_cbf_phys, pred_att_phys, t_collocation_ms, self.model_params)
                 
-                # 4. Calculate the physics residual
                 gkm_residual = _calculate_pcasl_gkm_residual(
                     pcasl_signal_curve=pcasl_curve_continuous, t_points=t_collocation_s,
                     cbf_phys=pred_cbf_phys, att_phys=pred_att_phys,
@@ -583,17 +652,15 @@ class CustomLoss(nn.Module):
                 )
                 residual_loss = torch.mean(gkm_residual**2)
                 
-        # --- Final Unified Loss ---
         total_loss = total_param_loss + log_var_regularization + self.pinn_weight * recon_loss + self.residual_pinn_weight * residual_loss
         
         loss_components = {
             'param_nll_loss': total_param_loss,
             'log_var_reg_loss': log_var_regularization,
             'pinn_recon_loss': recon_loss,
-            'pinn_residual_loss': residual_loss, # NEW
+            'pinn_residual_loss': residual_loss,
             'pre_estimator_loss': torch.tensor(0.0)
         }
-        # MODIFIED: Pass unreduced loss (NOT detached) to trainer for OHEM
         loss_components['unreduced_loss'] = combined_nll_loss
         
         return total_loss, loss_components

@@ -37,6 +37,7 @@ script_logger = logging.getLogger(__name__)
 @dataclass
 class ResearchConfig:
     model_class_name: str = "DisentangledASLNet"
+    encoder_type: str = 'transformer' # Default to original for backward compatibility
     hidden_sizes: List[int] = field(default_factory=lambda: [256, 128, 64])
     learning_rate: float = 0.001
     use_offline_dataset: bool = False
@@ -153,8 +154,8 @@ def objective(trial: optuna.Trial, base_config: ResearchConfig, output_dir: Path
         model_class = DisentangledASLNet
         base_input_size_nn = num_plds * 2 + 4 + 1
     else:
-        model_class = EnhancedASLNet
-        base_input_size_nn = num_plds * 2 + 4
+        model_class = DisentangledASLNet
+        base_input_size_nn = num_plds * 2 + 4 + 1
     
     model_config = asdict(trial_config)
     trainer = EnhancedASLTrainer(model_config=model_config, model_class=lambda **kwargs: model_class(input_size=base_input_size_nn, **kwargs),
@@ -254,9 +255,9 @@ def run_comprehensive_asl_research(config: ResearchConfig, output_dir: Path, nor
         model_class = DisentangledASLNet
         base_input_size_nn = num_plds * 2 + 4 + 1
     else:
-        script_logger.info("Selected model architecture: EnhancedASLNet (Unified)")
-        model_class = EnhancedASLNet
-        base_input_size_nn = num_plds * 2 + 4
+        script_logger.info("Selected model architecture: DisentangledASLNet)")
+        model_class = DisentangledASLNet
+        base_input_size_nn = num_plds * 2 + 4 + 1
     
     # --- Create a fixed, diverse validation set for stable evaluation ---
     script_logger.info("Generating a fixed validation dataset for stable evaluation metrics...")
