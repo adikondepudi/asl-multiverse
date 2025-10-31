@@ -473,6 +473,8 @@ class DisentangledASLNet(nn.Module):
                  **kwargs):
         super().__init__()
         
+        self.encoder_frozen = False
+        
         if encoder_type.lower() == 'conv1d':
             print("INFO: Initializing DisentangledASLNet with Conv1D Encoder.")
             self.encoder = DisentangledEncoderConv1D(n_plds=n_plds, **kwargs)
@@ -540,11 +542,20 @@ class DisentangledASLNet(nn.Module):
         """Freezes all parameters in the encoder for fine-tuning."""
         for param in self.encoder.parameters():
             param.requires_grad = False
+        self.encoder_frozen = True
     
     def unfreeze_all(self):
         """Sets requires_grad=True for all model parameters."""
         for param in self.parameters():
             param.requires_grad = True
+        self.encoder_frozen = False
+    
+    def train(self, mode: bool = True):
+        """Override train method to keep frozen encoder in eval mode."""
+        super().train(mode)
+        if self.encoder_frozen:
+            self.encoder.eval()
+        return self
 
 def torch_kinetic_model(pred_cbf_norm: torch.Tensor, pred_att_norm: torch.Tensor,
                         norm_stats: Dict, model_params: Dict) -> torch.Tensor:

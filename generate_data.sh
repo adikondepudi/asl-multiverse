@@ -2,9 +2,9 @@
 #SBATCH --job-name=asl-data-gen-v3
 #SBATCH --partition=cpu          # Use the CPU partition for this task
 #SBATCH --nodes=1
-#SBATCH --cpus-per-task=48       # Request a lot of CPU cores for parallelism
-#SBATCH --mem=128G               # Request a good amount of RAM
-#SBATCH --time=12:00:00          # Set a 12-hour time limit (should be plenty)
+#SBATCH --cpus-per-task=24       # Request a lot of CPU cores for parallelism
+#SBATCH --mem=64G               # Request a good amount of RAM
+#SBATCH --time=1:00:00          # Set a 12-hour time limit (should be plenty)
 #SBATCH --output=slurm_logs/data_gen_%j.out
 #SBATCH --error=slurm_logs/data_gen_%j.err
 
