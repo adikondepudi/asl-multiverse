@@ -71,7 +71,6 @@ class EnhancedASLTrainer:
         logger.info("Compiling models with torch.compile()..."); self.models = [torch.compile(m, mode="max-autotune") for m in self.models]
         logger.info("Model compilation complete.")
         if wandb.run:
-            # --- MODIFIED: Changed wandb.watch to be less verbose ---
             for i, model in enumerate(self.models): wandb.watch(model, log='gradients', log_freq=200, idx=i)
         self.best_states = [None] * self.n_ensembles
         loss_params = {'w_cbf': model_config.get('loss_weight_cbf', 1.0), 'w_att': model_config.get('loss_weight_att', 1.0),
@@ -91,12 +90,10 @@ class EnhancedASLTrainer:
         run_type = "Fine-Tuning" if is_finetuning else "Training"
         logger.info(f"--- Starting {run_type} for {n_epochs} epochs ---")
         
-        # --- MODIFIED: Simplified fine-tuning setup, happens once before training loop ---
         if is_finetuning:
             logger.info(f"--- Fine-tuning Mode: Freezing encoder and creating optimizer for head parameters. ---")
             for m in self.models:
                 if hasattr(m, 'freeze_encoder'): m.freeze_encoder()
-            # Optimizer will now only see the unfrozen head parameters
             self.optimizers = [torch.optim.AdamW(filter(lambda p: p.requires_grad, m.parameters()), lr=self.lr_base, weight_decay=self.weight_decay) for m in self.models]
         else:
             logger.info(f"--- Standard Training Mode: Creating optimizer for all parameters. ---")
@@ -108,7 +105,6 @@ class EnhancedASLTrainer:
         patience_counters = [0] * self.n_ensembles; self.overall_best_val_losses = [float('inf')] * self.n_ensembles
 
         for epoch in range(n_epochs):
-            # --- MODIFIED: All epoch-dependent freeze/unfreeze logic has been removed. ---
             train_loss, _ = self._train_epoch(self.models, train_loader, self.optimizers, self.schedulers, epoch, steps_per_epoch)
             val_metrics = self._validate(self.models, val_loader, epoch)
             mean_val_loss = np.nanmean([m.get('val_loss', np.nan) for m in val_metrics])
@@ -145,7 +141,6 @@ class EnhancedASLTrainer:
                         cbf_log_var=outputs[2], att_log_var=outputs[3],
                         cbf_rough_physical=outputs[4], att_rough_physical=outputs[5], global_epoch=epoch)
                 
-                # --- MODIFIED: OHEM logic has been removed. ---
                 final_loss = loss_full_batch
                 
                 final_loss.backward()
@@ -155,7 +150,6 @@ class EnhancedASLTrainer:
                 
                 if model_idx == 0: total_loss += final_loss.item()
                 
-                # --- MODIFIED: Added comprehensive diagnostic logging to W&B ---
                 if wandb.run and model_idx == 0 and self.global_step % 20 == 0:
                     cbf_lvar, att_lvar = outputs[2], outputs[3]
                     with torch.no_grad():
