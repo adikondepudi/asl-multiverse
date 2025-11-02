@@ -1,32 +1,30 @@
-# FILE: config/v5_stage2_MoE_finetune.yaml
-# Configuration for the v5 Mixture of Experts fine-tuning stage (Stage 2).
-# Loads a pre-trained encoder, freezes it, and fine-tunes the MoE head.
+# FILE: config/v5_stage2_fast_test.yaml
+# FAST TEST configuration for Stage 2.
+# Runs a few batches to ensure the fine-tuning pipeline works without errors.
 
 training:
   model_class_name: "DisentangledASLNet"
   encoder_type: "conv1d"
   
-  # Architecture & Regularization for the head
   hidden_sizes: [512, 256, 128]
   dropout_rate: 0.0878
   weight_decay: 0.0000138
   log_var_reg_lambda: 0.05
 
-  # Learning Rate & Production Scale Parameters
-  learning_rate: 0.00005     # CRITICAL: Very low LR for fine-tuning
+  learning_rate: 0.00005
   batch_size: 8192
   n_ensembles: 5
-  validation_steps_per_epoch: 10
-  norm_type: "batch"
-  n_epochs: 50               # Substantial run time, will use early stopping
 
-  # Core Model/Loss Parameters for NLL Loss
+  # FAST TEST SETTINGS
+  n_epochs: 2                     # Run for only 2 epochs
+  steps_per_epoch: 10             # Process only 10 batches per epoch
+  validation_steps_per_epoch: 5   # Do a very short validation
+
+  norm_type: "batch"
   log_var_cbf_min: -5.0
   log_var_cbf_max: 7.0
   log_var_att_min: -5.0
   log_var_att_max: 14.0
-  
-  # Encoder architecture must match Stage 1
   transformer_d_model_focused: 32
   transformer_nhead_model: 4
   transformer_nlayers_model: 2
@@ -37,9 +35,10 @@ moe:
 
 data:
   use_offline_dataset: true
-  offline_dataset_path: "asl_offline_dataset_10M_v3"
+  # IMPORTANT: Make sure this points to a SMALL, test version of the dataset
+  offline_dataset_path: "asl_offline_dataset_TEST"
   pld_values: [500, 1000, 1500, 2000, 2500, 3000]
-  num_samples: 1000000 
+  num_samples: 50000 
 
 simulation:
   T1_artery: 1850.0

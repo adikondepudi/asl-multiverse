@@ -1,40 +1,39 @@
-# FILE: config/v5_stage1_pretrain.yaml
-# Configuration for the v5 self-supervised pre-training stage (Stage 1).
-# Trains a generalist encoder via denoising.
+# FILE: config/v5_stage1_fast_test.yaml
+# FAST TEST configuration for Stage 1.
+# Runs a few batches to ensure the denoising pipeline works without errors.
 
 training:
   model_class_name: "DisentangledASLNet"
   encoder_type: "conv1d"
   hidden_sizes: [256, 128, 128]
 
-  # Regularization for the denoising autoencoder
   dropout_rate: 0.1
   weight_decay: 0.0001
   learning_rate: 0.0003
   
-  # Production Scale Parameters
   batch_size: 8192
-  n_ensembles: 1 # Only need one expert encoder
-  validation_steps_per_epoch: 25
-  norm_type: "batch"
-  n_epochs: 15
+  n_ensembles: 1 
+  
+  # FAST TEST SETTINGS
+  n_epochs: 2                     # Run for only 2 epochs
+  steps_per_epoch: 10             # Process only 10 batches per epoch
+  validation_steps_per_epoch: 5   # Do a very short validation
 
-  # Denoising autoencoder does not use these
+  norm_type: "batch"
   log_var_cbf_min: 0.0
   log_var_cbf_max: 0.0
   log_var_att_min: 0.0
   log_var_att_max: 0.0
-  
-  # Architecture details for the encoder
   transformer_d_model_focused: 32
   transformer_nhead_model: 4
   transformer_nlayers_model: 2
 
 data:
   use_offline_dataset: true
-  offline_dataset_path: "asl_offline_dataset_10M_v3"
+  # IMPORTANT: Make sure this points to a SMALL, test version of the dataset
+  offline_dataset_path: "asl_offline_dataset_TEST"
   pld_values: [500, 1000, 1500, 2000, 2500, 3000]
-  num_samples: 1000000 
+  num_samples: 50000 
 
 simulation:
   T1_artery: 1850.0

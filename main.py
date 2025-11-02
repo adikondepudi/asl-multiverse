@@ -24,39 +24,31 @@ import copy
 
 warnings.filterwarnings('ignore', category=UserWarning)
 
-# === MODIFICATION: Import the new model ===
-from enhanced_asl_network import DisentangledASLNet
+from enhanced_asl_network import DisentangledASLNet, CustomLoss
 from asl_simulation import ASLParameters
 from enhanced_simulation import RealisticASLSimulator
 from asl_trainer import EnhancedASLTrainer, ASLIterableDataset, ASLInMemoryDataset
-from torch.utils.data import DataLoader, WeightedRandomSampler
-from utils import engineer_signal_features, ParallelStreamingStatsCalculator
+from torch.utils.data import DataLoader
+from utils import ParallelStreamingStatsCalculator
 
 script_logger = logging.getLogger(__name__)
 
 @dataclass
 class ResearchConfig:
     model_class_name: str = "DisentangledASLNet"
-    encoder_type: str = 'transformer' # Default to original for backward compatibility
+    encoder_type: str = 'conv1d'
     hidden_sizes: List[int] = field(default_factory=lambda: [256, 128, 64])
     learning_rate: float = 0.001
-    use_offline_dataset: bool = False
+    use_offline_dataset: bool = True
     offline_dataset_path: Optional[str] = None
     n_epochs: int = 100
-    steps_per_epoch: int = 10
-    loss_pinn_weight: float = 1.0
+    steps_per_epoch: int = 1000
     weight_decay: float = 1e-5
     batch_size: int = 256
     validation_steps_per_epoch: int = 50
     n_ensembles: int = 5
     dropout_rate: float = 0.1
     norm_type: str = 'batch'
-    m0_input_feature_model: bool = False
-    use_transformer_temporal_model: bool = True
-    use_focused_transformer_model: bool = True
-    transformer_d_model_focused: int = 32      
-    transformer_nhead_model: int = 4
-    transformer_nlayers_model: int = 2
     log_var_cbf_min: float = -6.0
     log_var_cbf_max: float = 7.0
     log_var_att_min: float = -2.0
@@ -64,172 +56,25 @@ class ResearchConfig:
     loss_weight_cbf: float = 1.0
     loss_weight_att: float = 1.0
     loss_log_var_reg_lambda: float = 0.0
-    optuna_n_trials: int = 50
-    optuna_timeout_hours: float = 4.0
-    optuna_n_subjects_for_norm: int = 2000
-    optuna_n_epochs: int = 25
-    optuna_steps_per_epoch: int = 15
-    optuna_study_name: str = "asl_multiverse_hpo"
     pld_values: List[int] = field(default_factory=lambda: list(range(500, 3001, 500)))
-    att_ranges_config: List[Tuple[float, float, str]] = field(default_factory=lambda: [(500.0, 1500.0, "Short ATT"),(1500.0, 2500.0, "Medium ATT"),(2500.0, 4000.0, "Long ATT")])
     T1_artery: float = 1850.0; T2_factor: float = 1.0; alpha_BS1: float = 1.0
     alpha_PCASL: float = 0.85; alpha_VSASL: float = 0.56; T_tau: float = 1800.0
     training_noise_levels: List[float] = field(default_factory=lambda: [3.0, 5.0, 10.0, 15.0, 20.0])
-    n_test_subjects_per_att_range: int = 200 
-    test_snr_levels: List[float] = field(default_factory=lambda: [5.0, 10.0])
-    test_conditions: List[str] = field(default_factory=lambda: ['healthy', 'stroke'])
-    n_clinical_scenario_subjects: int = 100 
-    clinical_scenario_definitions: Dict[str, Dict[str, Any]] = field(default_factory=lambda: {'healthy_adult': {'cbf_range': (50.0, 80.0), 'att_range': (800.0, 1800.0), 'snr': 8.0},'elderly_patient': {'cbf_range': (30.0, 60.0), 'att_range': (1500.0, 3000.0), 'snr': 5.0},'stroke_patient': {'cbf_range': (10.0, 40.0), 'att_range': (2000.0, 4000.0), 'snr': 3.0},'tumor_patient': {'cbf_range': (20.0, 120.0), 'att_range': (1000.0, 3000.0), 'snr': 6.0}})
     wandb_project: str = "asl-multiverse-project"
     wandb_entity: Optional[str] = None
     num_samples: int = 1000000
-    # --- MODIFIED: Fields for new training strategies ---
     pretrained_encoder_path: Optional[str] = None
     moe: Optional[Dict[str, Any]] = None
+    transformer_d_model_focused: int = 32      
+    transformer_nhead_model: int = 4
+    transformer_nlayers_model: int = 2
 
-def create_att_weighted_sampler(dataset: ASLInMemoryDataset) -> WeightedRandomSampler:
-    """Creates a sampler that over-samples the tails of the ATT distribution."""
-    script_logger.info("Creating attribute-weighted sampler to focus on ATT extremes...")
-    params = dataset.params_unnormalized
-    atts = params[:, 1]
-    
-    # Define "easy" vs "hard" ATT ranges
-    # We'll up-weight samples outside the "easy" middle range
-    easy_att_min, easy_att_max = 1500.0, 2500.0
-    
-    # Assign weights: higher weight for hard samples
-    sample_weights = np.ones(len(atts))
-    hard_sample_mask = (atts < easy_att_min) | (atts > easy_att_max)
-    sample_weights[hard_sample_mask] = 4.0 # Make hard samples 4x more likely to be picked
-    
-    script_logger.info(f"Up-weighting {np.sum(hard_sample_mask)}/{len(atts)} samples for training.")
-    
-    sampler = WeightedRandomSampler(
-        weights=torch.DoubleTensor(sample_weights),
-        num_samples=len(sample_weights),
-        replacement=True
-    )
-    return sampler
-
-def objective(trial: optuna.Trial, base_config: ResearchConfig, output_dir: Path, norm_stats: Dict) -> float:
-    """
-    The objective function for Optuna hyperparameter optimization.
-    Trains a model with a given set of hyperparameters and returns the validation loss.
-    """
-    trial_config = copy.deepcopy(base_config)
-    
-    trial_config.learning_rate = trial.suggest_float("learning_rate", 1e-4, 1e-2, log=True)
-    trial_config.weight_decay = trial.suggest_float("weight_decay", 1e-6, 1e-3, log=True)
-    trial_config.dropout_rate = trial.suggest_float("dropout_rate", 0.05, 0.4)
-    hidden_size_1 = trial.suggest_categorical("hidden_size_1", [128, 256, 512])
-    hidden_size_2 = trial.suggest_categorical("hidden_size_2", [64, 128, 256])
-    hidden_size_3 = trial.suggest_categorical("hidden_size_3", [32, 64, 128])
-    trial_config.hidden_sizes = [hidden_size_1, hidden_size_2, hidden_size_3]
-    trial_config.loss_pinn_weight = trial.suggest_float("loss_pinn_weight", 0.1, 10.0, log=True)
-    
-    script_logger.info(f"--- Optuna Trial {trial.number} ---")
-    script_logger.info(f"  Params: lr={trial_config.learning_rate:.5f}, wd={trial_config.weight_decay:.6f}, dropout={trial_config.dropout_rate:.3f}")
-    
-    trial_config.n_ensembles = 1
-    trial_config.n_epochs = base_config.optuna_n_epochs
-    trial_config.steps_per_epoch = base_config.optuna_steps_per_epoch
-    
-    plds_np = np.array(trial_config.pld_values)
-    num_plds = len(plds_np)
-    asl_params_sim = ASLParameters(**{k:v for k,v in asdict(trial_config).items() if k in ASLParameters.__annotations__})
-    simulator = RealisticASLSimulator(params=asl_params_sim)
-    
-    is_disentangled = trial_config.model_class_name == "DisentangledASLNet"
-    
-    train_dataset = ASLIterableDataset(simulator, plds_np, trial_config.training_noise_levels, norm_stats=norm_stats, disentangled_mode=is_disentangled)
-    val_dataset = ASLIterableDataset(simulator, plds_np, trial_config.training_noise_levels, norm_stats=norm_stats, disentangled_mode=is_disentangled)
-    
-    num_workers = min(4, os.cpu_count())
-    train_loader = DataLoader(train_dataset, batch_size=trial_config.batch_size, num_workers=num_workers, pin_memory=True, persistent_workers=False)
-    val_loader = DataLoader(val_dataset, batch_size=trial_config.batch_size, num_workers=num_workers, pin_memory=True, persistent_workers=False)
-
-    device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
-    
-    if is_disentangled:
-        model_class = DisentangledASLNet
-        base_input_size_nn = num_plds * 2 + 4 + 1
-    else:
-        model_class = DisentangledASLNet
-        base_input_size_nn = num_plds * 2 + 4 + 1
-    
-    model_config = asdict(trial_config)
-    trainer = EnhancedASLTrainer(model_config=model_config, model_class=lambda **kwargs: model_class(input_size=base_input_size_nn, **kwargs),
-                                 input_size=base_input_size_nn,
-                                 weight_decay=trial_config.weight_decay, 
-                                 batch_size=trial_config.batch_size, n_ensembles=trial_config.n_ensembles, device=device)
-    
-    trainer.norm_stats = norm_stats
-    trainer.custom_loss_fn.norm_stats = norm_stats
-    for model in trainer.models: model.set_norm_stats(norm_stats)
-
-    try:
-        train_results = trainer.train_ensemble(
-            train_loader=train_loader, val_loader=val_loader,
-            n_epochs=trial_config.n_epochs,
-            steps_per_epoch=trial_config.steps_per_epoch,
-            early_stopping_patience=5,
-            optuna_trial=trial
-        )
-        return train_results.get('final_mean_val_loss', float('inf'))
-
-    except optuna.exceptions.TrialPruned:
-        script_logger.info(f"Trial {trial.number} pruned.")
-        return float('inf')
-
-def run_hyperparameter_optimization(config: ResearchConfig, output_dir: Path, norm_stats: Dict):
-    """Manages the Optuna HPO study, including saving and resuming."""
-    study_name = config.optuna_study_name
-    storage_path = output_dir / f"{study_name}.db"
-    study_journal_path = output_dir / f"{study_name}_study.pkl"
-
-    script_logger.info(f"--- Starting Hyperparameter Optimization ---")
-    script_logger.info(f"Study Name: {study_name}")
-    script_logger.info(f"Output Directory: {output_dir}")
-    
-    if study_journal_path.exists():
-        script_logger.info(f"Resuming study from {study_journal_path}")
-        study = joblib.load(study_journal_path)
-    else:
-        study = optuna.create_study(direction="minimize", study_name=study_name)
-        script_logger.info("Created a new Optuna study.")
-
-    try:
-        study.optimize(
-            lambda trial: objective(trial, config, output_dir, norm_stats),
-            n_trials=config.optuna_n_trials,
-            timeout=config.optuna_timeout_hours * 3600,
-            callbacks=[lambda s, t: joblib.dump(s, study_journal_path)]
-        )
-    except KeyboardInterrupt:
-        script_logger.warning("HPO interrupted. Saving current state.")
-    
-    joblib.dump(study, study_journal_path)
-    script_logger.info(f"HPO finished. Study saved to {study_journal_path}")
-    
-    best_params_path = output_dir / "best_params.json"
-    with open(best_params_path, 'w') as f:
-        json.dump(study.best_trial.params, f, indent=2)
-        
-    script_logger.info(f"Best trial: {study.best_trial.number}")
-    script_logger.info(f"  Value (Validation Loss): {study.best_trial.value:.4f}")
-    script_logger.info("  Best Parameters:")
-    for key, value in study.best_trial.params.items():
-        script_logger.info(f"    {key}: {value}")
-    script_logger.info(f"Best parameters saved to {best_params_path}")
-
-def run_comprehensive_asl_research(config: ResearchConfig, output_dir: Path, norm_stats: Dict) -> Dict:
-    """The main research pipeline for a full training run."""
+def run_comprehensive_asl_research(config: ResearchConfig, stage: int, output_dir: Path, norm_stats: Dict) -> Dict:
     output_dir.mkdir(parents=True, exist_ok=True)
     torch.backends.cudnn.benchmark = True
 
-    # --- MODIFIED: More informative W&B run name ---
     run_name = wandb.run.name if wandb.run and wandb.run.name else f"run_{output_dir.name}"
-    wandb_run = wandb.init(project=config.wandb_project, entity=config.wandb_entity, config=asdict(config), name=run_name, job_type="research_pipeline", reinit=True)
+    wandb_run = wandb.init(project=config.wandb_project, entity=config.wandb_entity, config=asdict(config), name=run_name, job_type=f"stage_{stage}", reinit=True)
     if wandb_run: script_logger.info(f"W&B Run URL: {wandb_run.url}")
 
     with open(output_dir / 'research_config.json', 'w') as f: json.dump(asdict(config), f, indent=2)
@@ -239,93 +84,55 @@ def run_comprehensive_asl_research(config: ResearchConfig, output_dir: Path, nor
     asl_params_sim = ASLParameters(**{k:v for k,v in asdict(config).items() if k in ASLParameters.__annotations__})
     simulator = RealisticASLSimulator(params=asl_params_sim)
 
-    # --- MODIFIED: Correctly log the training mode ---
-    is_finetuning = config.pretrained_encoder_path and Path(config.pretrained_encoder_path).exists()
-    if is_finetuning:
-        script_logger.info("Starting FINE-TUNING run...")
-    else:
-        script_logger.info("Starting training run FROM SCRATCH...")
+    script_logger.info(f"--- Starting Stage {stage} Run ---")
+    if stage == 1:
+        script_logger.info("Mode: Self-supervised denoising autoencoder training.")
+    elif stage == 2:
+        script_logger.info("Mode: Supervised regression head fine-tuning with frozen encoder.")
 
     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
     script_logger.info(f"Using device: {device}")
 
-    is_disentangled = config.model_class_name == "DisentangledASLNet"
-    if is_disentangled:
-        script_logger.info("Selected model architecture: DisentangledASLNet")
-        model_class = DisentangledASLNet
-        base_input_size_nn = num_plds * 2 + 4 + 1
-    else:
-        script_logger.info("Selected model architecture: DisentangledASLNet)")
-        model_class = DisentangledASLNet
-        base_input_size_nn = num_plds * 2 + 4 + 1
-    
-    # --- Create a fixed, diverse validation set for stable evaluation ---
-    script_logger.info("Generating a fixed validation dataset for stable evaluation metrics...")
-    validation_data_dict = simulator.generate_diverse_dataset(
-        plds=plds_np, n_subjects=200, 
-        conditions=['healthy', 'stroke', 'tumor', 'elderly'], 
-        noise_levels=[5.0, 10.0, 15.0]
-    )
-    val_signals_raw = validation_data_dict['signals']
-    val_features_eng = engineer_signal_features(val_signals_raw, num_plds)
-    val_signals_full = np.concatenate([val_signals_raw, val_features_eng], axis=1)
-    
-    val_dataset = ASLInMemoryDataset(data_dir=None, norm_stats=norm_stats, disentangled_mode=is_disentangled)
-    val_dataset.signals_unnormalized = val_signals_full
-    val_dataset.params_unnormalized = validation_data_dict['parameters']
-    val_dataset.signals_processed = val_dataset._process_signals(val_dataset.signals_unnormalized)
-    val_dataset.params_normalized = val_dataset._normalize_params(val_dataset.params_unnormalized)
-    val_dataset.signals_tensor = torch.from_numpy(val_dataset.signals_processed.astype(np.float32))
-    val_dataset.params_tensor = torch.from_numpy(val_dataset.params_normalized.astype(np.float32))
-    script_logger.info(f"Fixed validation dataset created with {len(val_dataset)} samples.")
+    base_input_size_nn = num_plds * 2 + 4 + 1
     
     use_offline = config.use_offline_dataset
     offline_path = config.offline_dataset_path
-    
     num_workers = min(os.cpu_count() or 1, 32)
     script_logger.info(f"Using a capped number of {num_workers} CPU cores for data loading.")
 
     if use_offline and offline_path:
         script_logger.info(f"Using OFFLINE In-Memory dataset from: {offline_path}")
-        full_dataset = ASLInMemoryDataset(data_dir=offline_path, norm_stats=norm_stats, disentangled_mode=is_disentangled)
-        train_loader = DataLoader(full_dataset, batch_size=config.batch_size, num_workers=num_workers,
+        train_dataset = ASLInMemoryDataset(data_dir=offline_path, norm_stats=norm_stats, stage=stage, disentangled_mode=True)
+        train_loader = DataLoader(train_dataset, batch_size=config.batch_size, num_workers=num_workers,
                                      pin_memory=True, persistent_workers=(num_workers > 0), shuffle=True)
     else:
         script_logger.info("Using ON-THE-FLY IterableDataset for training.")
-        iterable_dataset = ASLIterableDataset(simulator, plds_np, config.training_noise_levels, norm_stats=norm_stats, disentangled_mode=is_disentangled)
-        train_loader = DataLoader(iterable_dataset, batch_size=config.batch_size, num_workers=num_workers, pin_memory=True, persistent_workers=(num_workers > 0))
-
-    val_loader = DataLoader(val_dataset, batch_size=config.batch_size, num_workers=num_workers, pin_memory=True, shuffle=False)
+        train_dataset = ASLInMemoryDataset(simulator, plds_np, config.training_noise_levels, norm_stats, stage=stage, disentangled_mode=True)
+        train_loader = DataLoader(train_dataset, batch_size=config.batch_size, num_workers=num_workers, pin_memory=True, persistent_workers=(num_workers > 0))
+    
+    val_dataset = ASLIterableDataset(simulator, plds_np, config.training_noise_levels, norm_stats, stage=stage, disentangled_mode=True)
+    val_loader = DataLoader(val_dataset, batch_size=config.batch_size, num_workers=num_workers, pin_memory=True, persistent_workers=(num_workers > 0))
     
     model_creation_config = asdict(config)
-    def create_model_closure(**kwargs): return model_class(input_size=base_input_size_nn, **kwargs)
+    model_mode = 'denoising' if stage == 1 else 'regression'
+    def create_model_closure(**kwargs): return DisentangledASLNet(mode=model_mode, input_size=base_input_size_nn, **kwargs)
 
-    trainer = EnhancedASLTrainer(model_config=model_creation_config, model_class=create_model_closure, 
-                                 input_size=base_input_size_nn, 
+    trainer = EnhancedASLTrainer(stage=stage, model_config=model_creation_config, model_class=create_model_closure, 
                                  weight_decay=config.weight_decay, batch_size=config.batch_size, 
                                  n_ensembles=config.n_ensembles, device=device)
     
-    trainer.norm_stats = norm_stats
-    trainer.custom_loss_fn.norm_stats = norm_stats
-    for model in trainer.models: 
-        model.to(device)
-        if hasattr(model, 'set_norm_stats'):
-            model.set_norm_stats(norm_stats)
-
-    # --- MODIFIED: Load pre-trained encoder weights if specified ---
-    if is_finetuning:
+    fine_tuning_cfg = None
+    if stage == 2:
         script_logger.info(f"Loading pre-trained encoder weights from: {config.pretrained_encoder_path}")
         encoder_state_dict = torch.load(config.pretrained_encoder_path, map_location=device)
         num_loaded = 0
         for model in trainer.models:
             if hasattr(model, 'encoder'):
-                model.encoder.load_state_dict(encoder_state_dict, strict=False)
+                model.encoder.load_state_dict(encoder_state_dict, strict=True)
                 num_loaded += 1
         script_logger.info(f"Successfully loaded pre-trained weights into {num_loaded} model encoders.")
+        fine_tuning_cfg = {'enabled': True}
 
-    # --- MODIFIED: Simplified fine-tuning config passed to trainer ---
-    fine_tuning_cfg = {'enabled': True} if is_finetuning else None
-    
     script_logger.info(f"Training {config.n_ensembles}-model ensemble for {config.n_epochs} epochs...")
     training_start_time = time.time()
     
@@ -333,7 +140,7 @@ def run_comprehensive_asl_research(config: ResearchConfig, output_dir: Path, nor
         train_loader=train_loader,
         val_loader=val_loader,
         n_epochs=config.n_epochs,
-        steps_per_epoch=config.steps_per_epoch if not use_offline else None,
+        steps_per_epoch=config.steps_per_epoch,
         early_stopping_patience=25,
         fine_tuning_config=fine_tuning_cfg
     )
@@ -341,36 +148,28 @@ def run_comprehensive_asl_research(config: ResearchConfig, output_dir: Path, nor
     training_duration_hours = (time.time() - training_start_time) / 3600
     script_logger.info(f"Training completed in {training_duration_hours:.2f} hours.")
     
-    script_logger.info("Saving final trained ensemble models...")
-    models_dir = output_dir / 'trained_models'
-    models_dir.mkdir(exist_ok=True)
-    
-    num_saved = 0
-    # --- NEW: Save the encoder separately after Stage 1 for Stage 2 to use ---
-    if not is_finetuning and hasattr(trainer.models[0], 'encoder'):
+    if stage == 1:
+        script_logger.info("Saving pre-trained encoder...")
         encoder_path = output_dir / 'encoder_pretrained.pt'
-        # Get the original, uncompiled model to save state_dict
         unwrapped_model = getattr(trainer.models[0], '_orig_mod', trainer.models[0])
         torch.save(unwrapped_model.encoder.state_dict(), encoder_path)
         script_logger.info(f"Saved pre-trained encoder from model 0 to {encoder_path}")
+    else: # stage 2
+        script_logger.info("Saving final trained ensemble models...")
+        models_dir = output_dir / 'trained_models'
+        models_dir.mkdir(exist_ok=True)
+        num_saved = 0
+        for i, state_dict in enumerate(trainer.best_states):
+            if state_dict:
+                model_path = models_dir / f'ensemble_model_{i}.pt'
+                torch.save(state_dict, model_path)
+                num_saved += 1
+        script_logger.info(f"Successfully saved {num_saved} models.")
+        if wandb.run and num_saved > 0:
+            model_artifact = wandb.Artifact(name=f"asl_ensemble_{wandb_run.id}", type="model")
+            model_artifact.add_dir(str(models_dir))
+            wandb_run.log_artifact(model_artifact)
 
-    for i, state_dict in enumerate(trainer.best_states):
-        if state_dict:
-            model_path = models_dir / f'ensemble_model_{i}.pt'
-            torch.save(state_dict, model_path)
-            script_logger.info(f"  - Saved model {i} to {model_path}")
-            num_saved += 1
-        else:
-            script_logger.warning(f"  - No best state found for model {i}, not saving.")
-    
-    script_logger.info(f"Successfully saved {num_saved} models.")
-
-    if wandb.run and num_saved > 0:
-        model_artifact = wandb.Artifact(name=f"asl_ensemble_{wandb_run.id}", type="model")
-        model_artifact.add_dir(str(models_dir))
-        wandb_run.log_artifact(model_artifact)
-        script_logger.info("Logged trained models as a W&B artifact.")
-    
     if wandb.run:
         wandb.finish()
         
@@ -379,8 +178,7 @@ def run_comprehensive_asl_research(config: ResearchConfig, output_dir: Path, nor
 if __name__ == "__main__":
     logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(name)s - %(levelname)s - %(message)s', handlers=[logging.StreamHandler(sys.stdout)], force=True) 
     
-    # --- MODIFIED: Add arguments for two-stage training curriculum ---
-    parser = argparse.ArgumentParser(description="Run ASL Multiverse v4 Training Pipeline.")
+    parser = argparse.ArgumentParser(description="Run ASL Multiverse v5 Training Pipeline.")
     parser.add_argument("config_file", type=str, help="Path to the YAML configuration file for the desired stage.")
     parser.add_argument("--stage", type=int, choices=[1, 2], required=True, help="Specify the training stage (1 for pre-training, 2 for fine-tuning).")
     parser.add_argument("--load-weights-from", type=str, help="Path to the Stage 1 output directory containing the 'encoder_pretrained.pt' file. Required for Stage 2.")
@@ -402,7 +200,6 @@ if __name__ == "__main__":
             if isinstance(params, dict):
                 flat_config.update(params)
         
-        # Manually handle nested moe dictionary
         if 'moe' in config_from_yaml:
             flat_config['moe'] = config_from_yaml['moe']
 
@@ -410,16 +207,14 @@ if __name__ == "__main__":
             if hasattr(config_obj, key):
                 setattr(config_obj, key, value)
 
-    # --- MODIFIED: Create output directory and handle stage-specific logic ---
     if args.output_dir:
         output_path = Path(args.output_dir)
     else:
         timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
-        run_name_prefix = args.run_name if args.run_name else f"asl_research_v4_stage{args.stage}"
+        run_name_prefix = args.run_name if args.run_name else f"asl_research_v5_stage{args.stage}"
         output_path = Path(f'comprehensive_results/{run_name_prefix}_{timestamp}')
     output_path.mkdir(parents=True, exist_ok=True)
     
-    # Override config with command-line arguments for Stage 2
     if args.stage == 2:
         encoder_path = Path(args.load_weights_from) / 'encoder_pretrained.pt'
         if not encoder_path.exists():
@@ -428,7 +223,6 @@ if __name__ == "__main__":
         config_obj.pretrained_encoder_path = str(encoder_path)
 
     if args.run_name:
-        # This will be picked up by the wandb.init call
         os.environ['WANDB_RUN_NAME'] = args.run_name
 
     norm_stats_path = output_path / 'norm_stats.json'
@@ -441,17 +235,13 @@ if __name__ == "__main__":
         plds_np = np.array(config_obj.pld_values)
         asl_params_sim = ASLParameters(**{k:v for k,v in asdict(config_obj).items() if k in ASLParameters.__annotations__})
         simulator = RealisticASLSimulator(params=asl_params_sim)
-        
         num_stat_workers = os.cpu_count() or 1
-
         stats_calculator = ParallelStreamingStatsCalculator(
             simulator=simulator, plds=plds_np, num_samples=config_obj.num_samples, num_workers=num_stat_workers
         )
         norm_stats = stats_calculator.calculate()
-        
         script_logger.info(f"Saving unified normalization stats to {norm_stats_path}")
         with open(norm_stats_path, 'w') as f:
             json.dump(norm_stats, f, indent=2)
 
-    # Run the main pipeline with the configured object
-    pipeline_results_dict = run_comprehensive_asl_research(config=config_obj, output_dir=output_path, norm_stats=norm_stats)
+    run_comprehensive_asl_research(config=config_obj, stage=args.stage, output_dir=output_path, norm_stats=norm_stats)
