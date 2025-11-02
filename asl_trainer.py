@@ -56,6 +56,8 @@ class ASLInMemoryDataset(Dataset):
         else:
             logger.info("ASLInMemoryDataset initialized in manual mode.")
             self.signals_tensor = torch.empty(0); self.targets_tensor = torch.empty(0)
+            self.signals_noisy_unprocessed = np.empty(0)
+            self.params_unnormalized = np.empty(0)
 
     def _process_signals(self, signals_unnorm: np.ndarray) -> np.ndarray:
         raw, eng = signals_unnorm[:, :self.num_plds*2], signals_unnorm[:, self.num_plds*2:]
@@ -144,7 +146,10 @@ class EnhancedASLTrainer:
                        n_epochs: int, steps_per_epoch: Optional[int],
                        early_stopping_patience: int = 20, optuna_trial: Optional[Any] = None,
                        fine_tuning_config: Optional[Dict] = None):
-        if steps_per_epoch is None: steps_per_epoch = len(train_loader)
+        if steps_per_epoch is None:
+            if isinstance(train_loader.dataset, IterableDataset):
+                raise ValueError("steps_per_epoch must be specified for an IterableDataset.")
+            steps_per_epoch = len(train_loader)
         
         is_finetuning = fine_tuning_config is not None and fine_tuning_config.get('enabled', False)
         run_type = "Fine-Tuning" if is_finetuning else "Training"
@@ -226,8 +231,11 @@ class EnhancedASLTrainer:
         if not loader: return [{'val_loss': float('inf')} for _ in models]
         for m in models: m.eval()
         val_losses = [0.0] * len(models)
-        val_iterator = islice(loader, self.validation_steps_per_epoch) if isinstance(loader.dataset, IterableDataset) else loader
+        
+        is_iterable = isinstance(loader.dataset, IterableDataset)
+        val_iterator = islice(loader, self.validation_steps_per_epoch) if is_iterable else loader
         num_steps = 0
+
         with torch.no_grad():
             for signals, targets in val_iterator:
                 signals, targets = signals.to(self.device), targets.to(self.device)
@@ -237,6 +245,9 @@ class EnhancedASLTrainer:
                         loss, _ = self.custom_loss_fn(model_outputs=outputs, targets=targets, global_epoch=epoch)
                     val_losses[i] += loss.item()
                 num_steps += 1
+                if is_iterable and num_steps >= self.validation_steps_per_epoch:
+                    break
+        
         return [{'val_loss': v / num_steps if num_steps > 0 else float('inf')} for v in val_losses]
     
     def predict(self, signals: np.ndarray): pass

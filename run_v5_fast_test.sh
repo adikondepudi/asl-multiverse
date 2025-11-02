@@ -1,4 +1,3 @@
-# FILE: run_v5_fast_test.sh
 #!/bin/bash
 # Master script to run the FAST TEST of the v5 two-stage training pipeline.
 # This script uses minimal settings to quickly verify the code integrity.

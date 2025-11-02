@@ -1,4 +1,3 @@
-# FILE: sbatch_v5_fast_test.sh
 #!/bin/bash
 #SBATCH --job-name=asl-v5-fast-test
 #SBATCH --partition=gpu

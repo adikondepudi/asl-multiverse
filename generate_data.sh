@@ -27,6 +27,6 @@ rm -rf "${DATASET_DIR}"
 
 # --- Run the Data Generation Script ---
 echo "Starting offline dataset generation for 10,000,000 samples (v3 Strategy)..."
-python generate_offline_dataset.py "${DATASET_DIR}" --total_samples 10000000 --chunk_size 25000
+python generate_offline_dataset.py "${DATASET_DIR}" --total_samples 500000 --chunk_size 25000
 
 echo "Job finished at $(date)"

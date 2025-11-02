@@ -29,7 +29,7 @@ from asl_simulation import ASLParameters
 from enhanced_simulation import RealisticASLSimulator
 from asl_trainer import EnhancedASLTrainer, ASLIterableDataset, ASLInMemoryDataset
 from torch.utils.data import DataLoader
-from utils import ParallelStreamingStatsCalculator
+from utils import ParallelStreamingStatsCalculator, engineer_signal_features
 
 script_logger = logging.getLogger(__name__)
 
@@ -107,11 +107,39 @@ def run_comprehensive_asl_research(config: ResearchConfig, stage: int, output_di
                                      pin_memory=True, persistent_workers=(num_workers > 0), shuffle=True)
     else:
         script_logger.info("Using ON-THE-FLY IterableDataset for training.")
-        train_dataset = ASLInMemoryDataset(simulator, plds_np, config.training_noise_levels, norm_stats, stage=stage, disentangled_mode=True)
+        train_dataset = ASLIterableDataset(simulator, plds_np, config.training_noise_levels, norm_stats, stage=stage, disentangled_mode=True)
         train_loader = DataLoader(train_dataset, batch_size=config.batch_size, num_workers=num_workers, pin_memory=True, persistent_workers=(num_workers > 0))
     
-    val_dataset = ASLIterableDataset(simulator, plds_np, config.training_noise_levels, norm_stats, stage=stage, disentangled_mode=True)
-    val_loader = DataLoader(val_dataset, batch_size=config.batch_size, num_workers=num_workers, pin_memory=True, persistent_workers=(num_workers > 0))
+    script_logger.info("Generating a fixed validation dataset for stable evaluation metrics...")
+    validation_data_dict = simulator.generate_diverse_dataset(
+        plds=plds_np, n_subjects=200, 
+        conditions=['healthy', 'stroke', 'tumor', 'elderly'], 
+        noise_levels=[5.0, 10.0, 15.0]
+    )
+    val_signals_noisy_raw = validation_data_dict['signals']
+    val_signals_clean_raw = validation_data_dict['perturbed_params'] 
+    val_features_eng = engineer_signal_features(val_signals_noisy_raw, num_plds)
+    val_signals_noisy_full = np.concatenate([val_signals_noisy_raw, val_features_eng], axis=1)
+
+    val_dataset = ASLInMemoryDataset(data_dir=None, norm_stats=norm_stats, stage=stage, disentangled_mode=True)
+    val_dataset.signals_noisy_unprocessed = val_signals_noisy_full
+    val_dataset.params_unnormalized = validation_data_dict['parameters']
+    
+    val_dataset.signals_processed = val_dataset._process_signals(val_dataset.signals_noisy_unprocessed)
+    val_dataset.signals_tensor = torch.from_numpy(val_dataset.signals_processed.astype(np.float32))
+
+    if stage == 1:
+        clean_signals_for_val = []
+        for params in tqdm(validation_data_dict['perturbed_params'], desc="Generating clean validation signals", leave=False):
+            vsasl_c = simulator._generate_vsasl_signal(plds_np, validation_data_dict['parameters'][len(clean_signals_for_val), 1], validation_data_dict['parameters'][len(clean_signals_for_val), 0], params['t1_artery'], params['alpha_vsasl'])
+            pcasl_c = simulator._generate_pcasl_signal(plds_np, validation_data_dict['parameters'][len(clean_signals_for_val), 1], validation_data_dict['parameters'][len(clean_signals_for_val), 0], params['t1_artery'], params['t_tau'], params['alpha_pcasl'])
+            clean_signals_for_val.append(np.concatenate([pcasl_c, vsasl_c]))
+        val_dataset.targets_tensor = torch.from_numpy(np.array(clean_signals_for_val).astype(np.float32))
+    else: # stage 2
+        val_dataset.params_normalized = val_dataset._normalize_params(val_dataset.params_unnormalized)
+        val_dataset.targets_tensor = torch.from_numpy(val_dataset.params_normalized.astype(np.float32))
+
+    val_loader = DataLoader(val_dataset, batch_size=config.batch_size, num_workers=num_workers, pin_memory=True, shuffle=False)
     
     model_creation_config = asdict(config)
     model_mode = 'denoising' if stage == 1 else 'regression'

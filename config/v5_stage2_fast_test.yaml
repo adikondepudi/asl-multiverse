@@ -36,7 +36,7 @@ moe:
 data:
   use_offline_dataset: true
   # IMPORTANT: Make sure this points to a SMALL, test version of the dataset
-  offline_dataset_path: "asl_offline_dataset_TEST"
+  offline_dataset_path: "asl_offline_dataset_10M_v3"
   pld_values: [500, 1000, 1500, 2000, 2500, 3000]
   num_samples: 50000 
 
