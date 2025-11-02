@@ -1,7 +1,6 @@
 # utils.py
 import numpy as np
 import multiprocessing as mp
-from tqdm import tqdm
 import time
 from asl_simulation import _generate_pcasl_signal_jit, _generate_vsasl_signal_jit
 
@@ -118,7 +117,7 @@ class ParallelStreamingStatsCalculator:
             # Use imap_unordered for efficiency, as order doesn't matter for stats
             results_iterator = pool.imap_unordered(_worker_generate_sample, worker_args)
             
-            for pcasl, vsasl, cbf, att, amp in tqdm(results_iterator, total=len(worker_args), desc="Streaming Stats"):
+            for pcasl, vsasl, cbf, att, amp in results_iterator:
                 self.count += 1
                 self.pcasl_mean, self.pcasl_m2 = self._update_stats((self.pcasl_mean, self.pcasl_m2), pcasl)
                 self.vsasl_mean, self.vsasl_m2 = self._update_stats((self.vsasl_mean, self.vsasl_m2), vsasl)
