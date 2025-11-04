@@ -251,6 +251,105 @@ class DisentangledEncoderConv1D(nn.Module):
         fused_features = torch.cat([contextualized_query, amplitude_features], dim=1)
         return fused_features
 
+class PhysicsInformedASLProcessor(nn.Module):
+    """
+    A specialized, four-stage encoder for MULTIVERSE ASL data. It mimics an expert's
+    workflow: Decompose & Denoise -> Detect Events -> Reconcile -> Estimate.
+    """
+    def __init__(self, n_plds: int, feature_dim: int, nhead: int, dropout_rate: float, **kwargs):
+        super().__init__()
+        self.n_plds = n_plds
+        self.num_engineered_features = 4
+        self.num_amplitude_features = 1
+
+        # --- STATION 1: THE CLEANERS (Independent Denoising Towers) ---
+        # We need two separate 1D Conv towers. They DO NOT share weights.
+        # This is critical because they are learning the unique shapes of two different signals.
+        self.pcasl_denoising_tower = Conv1DFeatureExtractor(
+            in_channels=1, feature_dim=feature_dim, dropout_rate=dropout_rate
+        )
+        self.vsasl_denoising_tower = Conv1DFeatureExtractor(
+            in_channels=1, feature_dim=feature_dim, dropout_rate=dropout_rate
+        )
+
+        # --- STATION 2: THE SPOTTERS (Kinetic Event Detectors) ---
+        # These modules will learn to find the most important part of each feature sequence.
+        # We will use the existing AttentionPooling class for this.
+        self.pcasl_event_detector = AttentionPooling(d_model=feature_dim)
+        self.vsasl_event_detector = AttentionPooling(d_model=feature_dim)
+
+        # --- STATION 3: THE SUPERVISOR (Cross-Modal Reconciliation) ---
+        # This module forces the model to compare its findings.
+        # It uses the PCASL event as a query to "ask" the VSASL sequence for confirmation.
+        self.reconciliation_attention = CrossAttentionBlock(
+            d_model=feature_dim, nhead=nhead, dropout=dropout_rate
+        )
+
+        # --- STATION 4: THE MANAGER (Final Fusion & Estimation) ---
+        # An MLP for processing the simple amplitude/engineered features.
+        self.amplitude_processor = nn.Sequential(
+            nn.Linear(self.num_amplitude_features + self.num_engineered_features, 64),
+            nn.ReLU(),
+            nn.Linear(64, 128)
+        )
+        
+        # The final MLP that combines all our expert knowledge into one vector for the head.
+        # Input size: reconciled_vector (feature_dim) + amplitude_vector (128)
+        self.final_fusion_mlp = nn.Sequential(
+            nn.Linear(feature_dim + 128, 256),
+            nn.ReLU(),
+            nn.LayerNorm(256)
+        )
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        # --- PREPARATION: Separate Inputs ---
+        shape_vector = x[:, :self.n_plds * 2]
+        engineered_features = x[:, self.n_plds * 2 : self.n_plds * 2 + self.num_engineered_features]
+        amplitude_scalar = x[:, -self.num_amplitude_features:]
+
+        # Reshape for Conv1D: [Batch, Channels, Length]
+        pcasl_shape_input = shape_vector[:, :self.n_plds].unsqueeze(1)
+        vsasl_shape_input = shape_vector[:, self.n_plds:].unsqueeze(1)
+
+        # --- EXECUTE ASSEMBLY LINE ---
+
+        # STATION 1: Pass each signal through its dedicated Cleaner tower.
+        # Output shape: [Batch, feature_dim, n_plds]
+        pcasl_feature_sequence = self.pcasl_denoising_tower(pcasl_shape_input)
+        vsasl_feature_sequence = self.vsasl_denoising_tower(vsasl_shape_input)
+
+        # Reshape for Attention: [Batch, Sequence_Length, feature_dim]
+        pcasl_seq = pcasl_feature_sequence.transpose(1, 2)
+        vsasl_seq = vsasl_feature_sequence.transpose(1, 2)
+
+        # STATION 2: The Spotters find the most salient event in each sequence.
+        # Output shape: [Batch, feature_dim]
+        pcasl_event_vector = self.pcasl_event_detector(pcasl_seq)
+        # We don't use the vsasl_event_vector directly, but the tower needs to process it for the next step.
+
+        # STATION 3: The Supervisor reconciles the information.
+        # The PCASL event vector is the "question" (query).
+        # The VSASL sequence is the "textbook" to find the answer in (key/value).
+        # Query shape must be [Batch, 1, feature_dim] for the CrossAttentionBlock.
+        reconciled_vector = self.reconciliation_attention(
+            query=pcasl_event_vector.unsqueeze(1), 
+            key_value=vsasl_seq
+        )
+        # Squeeze to remove the sequence dimension: [Batch, feature_dim]
+        reconciled_vector = reconciled_vector.squeeze(1)
+
+        # STATION 4: The Manager makes the final decision.
+        # Process the amplitude information in parallel.
+        amplitude_input = torch.cat([amplitude_scalar, engineered_features], dim=1)
+        amplitude_vector = self.amplitude_processor(amplitude_input)
+
+        # Combine the expert timing report with the amplitude report.
+        final_output_vector = self.final_fusion_mlp(
+            torch.cat([reconciled_vector, amplitude_vector], dim=1)
+        )
+        
+        return final_output_vector
+
 class DisentangledASLNet(nn.Module):
     """
     DisentangledASLNet v6: A two-stage model with a self-supervised denoising autoencoder
@@ -274,12 +373,28 @@ class DisentangledASLNet(nn.Module):
         self.mode = mode
         self.encoder_frozen = False
         
-        if encoder_type.lower() == 'conv1d':
-            self.encoder = DisentangledEncoderConv1D(n_plds=n_plds, **kwargs)
-        else:
-            raise ValueError(f"Unknown encoder_type: '{encoder_type}'. Must be 'conv1d'.")
+        # --- START OF MODIFICATION ---
+        # We add a new option for our superior encoder.
+        if encoder_type.lower() == 'physics_processor':
+            self.encoder = PhysicsInformedASLProcessor(
+                n_plds=n_plds, 
+                feature_dim=kwargs.get('transformer_d_model_focused'), # Re-use existing config value
+                nhead=kwargs.get('transformer_nhead_model'),         # Re-use existing config value
+                dropout_rate=kwargs.get('dropout_rate'),
+                **kwargs
+            )
+            # The output size of our new encoder's fusion MLP is 256. This is CRITICAL.
+            fused_feature_size = 256
         
-        fused_feature_size = self.encoder.att_d_model + 64
+        # This is the old code. Keep it for backward compatibility.
+        elif encoder_type.lower() == 'conv1d':
+            self.encoder = DisentangledEncoderConv1D(n_plds=n_plds, **kwargs)
+            fused_feature_size = self.encoder.att_d_model + 64
+        # --- END OF MODIFICATION ---
+        
+        else:
+            raise ValueError(f"Unknown encoder_type: '{encoder_type}'. Must be 'conv1d' or 'physics_processor'.")
+        
         dropout_rate = kwargs.get('dropout_rate', 0.1)
 
         if self.mode == 'denoising':

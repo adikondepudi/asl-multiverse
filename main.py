@@ -24,7 +24,7 @@ import copy
 
 warnings.filterwarnings('ignore', category=UserWarning)
 
-from enhanced_asl_network import DisentangledASLNet, CustomLoss
+from enhanced_asl_network import DisentangledASLNet, CustomLoss, PhysicsInformedASLProcessor
 from asl_simulation import ASLParameters
 from enhanced_simulation import RealisticASLSimulator
 from asl_trainer import EnhancedASLTrainer, ASLIterableDataset, ASLInMemoryDataset
@@ -47,6 +47,7 @@ class ResearchConfig:
     weight_decay: float = 1e-5
     batch_size: int = 256
     validation_steps_per_epoch: int = 50
+    early_stopping_patience: int = 10
     early_stopping_min_delta: float = 0.0
     n_ensembles: int = 5
     dropout_rate: float = 0.1
@@ -177,7 +178,7 @@ def run_comprehensive_asl_research(config: ResearchConfig, stage: int, output_di
         n_epochs=config.n_epochs,
         steps_per_epoch=config.steps_per_epoch,
         output_dir=output_dir,
-        early_stopping_patience=25,
+        early_stopping_patience=config.early_stopping_patience,
         early_stopping_min_delta=config.early_stopping_min_delta,
         fine_tuning_config=fine_tuning_cfg
     )

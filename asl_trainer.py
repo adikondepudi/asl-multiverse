@@ -15,7 +15,7 @@ from itertools import islice
 import traceback
 import optuna
 
-from enhanced_asl_network import CustomLoss, DisentangledASLNet
+from enhanced_asl_network import CustomLoss, DisentangledASLNet, PhysicsInformedASLProcessor
 from enhanced_simulation import RealisticASLSimulator
 from utils import engineer_signal_features
 
@@ -152,7 +152,8 @@ class EnhancedASLTrainer:
     def train_ensemble(self,
                        train_loader: DataLoader, val_loader: Optional[DataLoader],
                        n_epochs: int, steps_per_epoch: Optional[int], output_dir: Path,
-                       early_stopping_patience: int = 10, early_stopping_min_delta: float = 0.0,
+                       early_stopping_patience: int = 10,
+                       early_stopping_min_delta: float = 0.0,
                        optuna_trial: Optional[Any] = None, fine_tuning_config: Optional[Dict] = None):
         if steps_per_epoch is None:
             if isinstance(train_loader.dataset, IterableDataset):

@@ -4,7 +4,7 @@
 
 training:
   model_class_name: "DisentangledASLNet"
-  encoder_type: "conv1d"
+  encoder_type: "physics_processor"
   hidden_sizes: [256, 128, 128]
 
   # Regularization for the denoising autoencoder

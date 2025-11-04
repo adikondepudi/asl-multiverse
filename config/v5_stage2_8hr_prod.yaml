@@ -1,10 +1,10 @@
-# FILE: config/v5_stage2_8hr_prod.yaml
-# ACCELERATED configuration for Stage 2.
-# Fine-tunes on a 1M sample subset for a fast, high-quality result.
+# FILE: config/v5_stage2_tuned_8hr.yaml
+# TUNED 8-hour configuration for Stage 2.
+# Fine-tunes on a larger, 4M sample subset to improve generalization.
 
 training:
   model_class_name: "DisentangledASLNet"
-  encoder_type: "conv1d"
+  encoder_type: "physics_processor"
   
   hidden_sizes: [512, 256, 128]
   dropout_rate: 0.0878
@@ -15,10 +15,13 @@ training:
   batch_size: 8192
   n_ensembles: 5
 
-  n_epochs: 30 # Reduced epochs for faster convergence
-  steps_per_epoch: 125 # 125 steps * 8192 batch_size = ~1M samples
-  validation_steps_per_epoch: 10
-  early_stopping_min_delta: 0.001
+  # STRATEGY: Fine-tune on a much larger dataset to prevent memorization.
+  n_epochs: 15 
+  steps_per_epoch: 488 # 488 steps * 8192 batch_size = ~4M samples per epoch
+
+  validation_steps_per_epoch: 25
+  early_stopping_patience: 25 # Be patient; fine-tuning improvements can be small.
+  early_stopping_min_delta: 0.0005
 
   norm_type: "batch"
   log_var_cbf_min: -5.0
@@ -36,7 +39,7 @@ moe:
 data:
   use_offline_dataset: true
   offline_dataset_path: "asl_offline_dataset_10M_v3"
-  num_samples_to_load: 1000000 # KEY CHANGE: Load only 1M samples
+  num_samples_to_load: 4000000 # KEY CHANGE: Load 4M samples
   pld_values: [500, 1000, 1500, 2000, 2500, 3000]
 
 simulation:

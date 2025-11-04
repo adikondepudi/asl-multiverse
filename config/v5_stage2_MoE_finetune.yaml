@@ -4,7 +4,7 @@
 
 training:
   model_class_name: "DisentangledASLNet"
-  encoder_type: "conv1d"
+  encoder_type: "physics_processor"
   
   # Architecture & Regularization for the head
   hidden_sizes: [512, 256, 128]
