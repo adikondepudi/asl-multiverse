@@ -1,0 +1,38 @@
+# FILE: config/v5_stage1_8hr_prod.yaml
+# ACCELERATED configuration for Stage 1.
+# Trains on a 1M sample subset for a fast, high-quality result.
+
+training:
+  model_class_name: "DisentangledASLNet"
+  encoder_type: "conv1d"
+  hidden_sizes: [256, 128, 128]
+
+  dropout_rate: 0.1
+  weight_decay: 0.0001
+  learning_rate: 0.0003
+  
+  batch_size: 8192
+  n_ensembles: 1 
+  
+  n_epochs: 15
+  steps_per_epoch: 125 # 125 steps * 8192 batch_size = ~1M samples
+  validation_steps_per_epoch: 25
+
+  norm_type: "batch"
+  transformer_d_model_focused: 32
+  transformer_nhead_model: 4
+  transformer_nlayers_model: 2
+
+data:
+  use_offline_dataset: true
+  offline_dataset_path: "asl_offline_dataset_10M_v3"
+  num_samples_to_load: 1000000  # KEY CHANGE: Load only 1M samples
+  pld_values: [500, 1000, 1500, 2000, 2500, 3000]
+
+simulation:
+  T1_artery: 1850.0; T_tau: 1800.0; T2_factor: 1.0; alpha_BS1: 1.0
+  alpha_PCASL: 0.85; alpha_VSASL: 0.56
+
+wandb:
+  wandb_project: "asl-multiverse-prod-v5"
+  wandb_entity: "adikondepudi"

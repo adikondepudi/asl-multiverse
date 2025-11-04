@@ -41,6 +41,7 @@ class ResearchConfig:
     learning_rate: float = 0.001
     use_offline_dataset: bool = True
     offline_dataset_path: Optional[str] = None
+    num_samples_to_load: Optional[int] = None
     n_epochs: int = 100
     steps_per_epoch: int = 1000
     weight_decay: float = 1e-5
@@ -102,7 +103,10 @@ def run_comprehensive_asl_research(config: ResearchConfig, stage: int, output_di
 
     if use_offline and offline_path:
         script_logger.info(f"Using OFFLINE In-Memory dataset from: {offline_path}")
-        train_dataset = ASLInMemoryDataset(data_dir=offline_path, norm_stats=norm_stats, stage=stage, disentangled_mode=True)
+        train_dataset = ASLInMemoryDataset(
+            data_dir=offline_path, norm_stats=norm_stats, stage=stage, 
+            disentangled_mode=True, num_samples_to_load=config.num_samples_to_load
+        )
         train_loader = DataLoader(train_dataset, batch_size=config.batch_size, num_workers=num_workers,
                                      pin_memory=True, persistent_workers=(num_workers > 0), shuffle=True)
     else:
@@ -130,9 +134,11 @@ def run_comprehensive_asl_research(config: ResearchConfig, stage: int, output_di
 
     if stage == 1:
         clean_signals_for_val = []
-        for params in tqdm(validation_data_dict['perturbed_params'], desc="Generating clean validation signals", leave=False):
-            vsasl_c = simulator._generate_vsasl_signal(plds_np, validation_data_dict['parameters'][len(clean_signals_for_val), 1], validation_data_dict['parameters'][len(clean_signals_for_val), 0], params['t1_artery'], params['alpha_vsasl'])
-            pcasl_c = simulator._generate_pcasl_signal(plds_np, validation_data_dict['parameters'][len(clean_signals_for_val), 1], validation_data_dict['parameters'][len(clean_signals_for_val), 0], params['t1_artery'], params['t_tau'], params['alpha_pcasl'])
+        for idx, params in enumerate(tqdm(validation_data_dict['perturbed_params'], desc="Generating clean validation signals", leave=False)):
+            true_cbf_val = validation_data_dict['parameters'][idx, 0]
+            true_att_val = validation_data_dict['parameters'][idx, 1]
+            vsasl_c = simulator._generate_vsasl_signal(plds_np, true_att_val, true_cbf_val, params['t1_artery'], params['alpha_vsasl'])
+            pcasl_c = simulator._generate_pcasl_signal(plds_np, true_att_val, true_cbf_val, params['t1_artery'], params['t_tau'], params['alpha_pcasl'])
             clean_signals_for_val.append(np.concatenate([pcasl_c, vsasl_c]))
         val_dataset.targets_tensor = torch.from_numpy(np.array(clean_signals_for_val).astype(np.float32))
     else: # stage 2
@@ -169,6 +175,7 @@ def run_comprehensive_asl_research(config: ResearchConfig, stage: int, output_di
         val_loader=val_loader,
         n_epochs=config.n_epochs,
         steps_per_epoch=config.steps_per_epoch,
+        output_dir=output_dir,
         early_stopping_patience=25,
         fine_tuning_config=fine_tuning_cfg
     )
@@ -177,25 +184,15 @@ def run_comprehensive_asl_research(config: ResearchConfig, stage: int, output_di
     script_logger.info(f"Training completed in {training_duration_hours:.2f} hours.")
     
     if stage == 1:
-        script_logger.info("Saving pre-trained encoder...")
         encoder_path = output_dir / 'encoder_pretrained.pt'
         unwrapped_model = getattr(trainer.models[0], '_orig_mod', trainer.models[0])
         torch.save(unwrapped_model.encoder.state_dict(), encoder_path)
-        script_logger.info(f"Saved pre-trained encoder from model 0 to {encoder_path}")
+        logger.info(f"Saved final pre-trained encoder from model 0 to {encoder_path}")
     else: # stage 2
-        script_logger.info("Saving final trained ensemble models...")
-        models_dir = output_dir / 'trained_models'
-        models_dir.mkdir(exist_ok=True)
-        num_saved = 0
-        for i, state_dict in enumerate(trainer.best_states):
-            if state_dict:
-                model_path = models_dir / f'ensemble_model_{i}.pt'
-                torch.save(state_dict, model_path)
-                num_saved += 1
-        script_logger.info(f"Successfully saved {num_saved} models.")
-        if wandb.run and num_saved > 0:
+        logger.info(f"Best models were saved during training to {output_dir / 'trained_models'}")
+        if wandb.run:
             model_artifact = wandb.Artifact(name=f"asl_ensemble_{wandb_run.id}", type="model")
-            model_artifact.add_dir(str(models_dir))
+            model_artifact.add_dir(str(output_dir / 'trained_models'))
             wandb_run.log_artifact(model_artifact)
 
     if wandb.run:

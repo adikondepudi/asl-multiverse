@@ -25,7 +25,7 @@ if not logger.hasHandlers():
     logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(name)s - %(levelname)s - %(message)s')
 
 class ASLInMemoryDataset(Dataset):
-    def __init__(self, data_dir: Optional[str], norm_stats: dict, stage: int, disentangled_mode: bool = False):
+    def __init__(self, data_dir: Optional[str], norm_stats: dict, stage: int, disentangled_mode: bool = False, num_samples_to_load: Optional[int] = None):
         self.data_dir = Path(data_dir) if data_dir else None; self.norm_stats = norm_stats
         self.stage = stage; self.disentangled_mode = disentangled_mode
         self.num_plds = len(norm_stats.get('pcasl_mean', []))
@@ -43,6 +43,14 @@ class ASLInMemoryDataset(Dataset):
             
             all_params = [np.load(f)['params'] for f in files]
             self.params_unnormalized = np.concatenate(all_params, axis=0)
+
+            if num_samples_to_load is not None and num_samples_to_load < len(self.signals_noisy_unprocessed):
+                logger.info(f"Subsetting data to {num_samples_to_load} samples for accelerated training.")
+                indices = np.random.permutation(len(self.signals_noisy_unprocessed))[:num_samples_to_load]
+                self.signals_noisy_unprocessed = self.signals_noisy_unprocessed[indices]
+                if self.stage == 1:
+                    self.signals_clean_unprocessed = self.signals_clean_unprocessed[indices]
+                self.params_unnormalized = self.params_unnormalized[indices]
             
             logger.info(f"Loaded {len(self.signals_noisy_unprocessed)} samples. Processing..."); 
             self.signals_processed = self._process_signals(self.signals_noisy_unprocessed)
@@ -136,14 +144,14 @@ class EnhancedASLTrainer:
         logger.info("Model compilation complete.")
         if wandb.run:
             for i, model in enumerate(self.models): wandb.watch(model, log='gradients', log_freq=200, idx=i)
-        self.best_states = [None] * self.n_ensembles
+        
         loss_params = {'training_stage': stage, 'w_cbf': model_config.get('loss_weight_cbf', 1.0), 'w_att': model_config.get('loss_weight_att', 1.0),
                        'log_var_reg_lambda': model_config.get('loss_log_var_reg_lambda', 0.0)}; self.custom_loss_fn = CustomLoss(**loss_params)
         self.global_step = 0; self.norm_stats = None
 
     def train_ensemble(self,
                        train_loader: DataLoader, val_loader: Optional[DataLoader],
-                       n_epochs: int, steps_per_epoch: Optional[int],
+                       n_epochs: int, steps_per_epoch: Optional[int], output_dir: Path,
                        early_stopping_patience: int = 20, optuna_trial: Optional[Any] = None,
                        fine_tuning_config: Optional[Dict] = None):
         if steps_per_epoch is None:
@@ -168,6 +176,9 @@ class EnhancedASLTrainer:
         self.schedulers = [torch.optim.lr_scheduler.OneCycleLR(opt, max_lr=self.lr_base, total_steps=total_steps) for opt in self.optimizers]
         
         patience_counters = [0] * self.n_ensembles; self.overall_best_val_losses = [float('inf')] * self.n_ensembles
+        
+        models_save_dir = output_dir / 'trained_models'
+        models_save_dir.mkdir(exist_ok=True)
 
         for epoch in range(n_epochs):
             train_loss, _ = self._train_epoch(self.models, train_loader, self.optimizers, self.schedulers, epoch, steps_per_epoch)
@@ -179,12 +190,14 @@ class EnhancedASLTrainer:
                 val_loss = vm.get('val_loss', float('inf'))
                 if val_loss < self.overall_best_val_losses[i]:
                     self.overall_best_val_losses[i] = val_loss; patience_counters[i] = 0
-                    unwrapped = getattr(self.models[i], '_orig_mod', self.models[i]); self.best_states[i] = unwrapped.state_dict()
-                else: patience_counters[i] += 1
+                    unwrapped_model = getattr(self.models[i], '_orig_mod', self.models[i])
+                    model_path = models_save_dir / f'ensemble_model_{i}.pt'
+                    torch.save(unwrapped_model.state_dict(), model_path)
+                    logger.info(f"Saved new best model for ensemble {i} to {model_path} (Val Loss: {val_loss:.6f})")
+                else:
+                    patience_counters[i] += 1
             if all(p >= early_stopping_patience for p in patience_counters): logger.info("All models early stopped."); break
         
-        for i, state in enumerate(self.best_states):
-            if state: getattr(self.models[i], '_orig_mod', self.models[i]).load_state_dict(state)
         return {'final_mean_val_loss': np.nanmean(self.overall_best_val_losses)}
 
     def _train_epoch(self, models, loader, optimizers, schedulers, epoch, steps):
