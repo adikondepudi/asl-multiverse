@@ -1,5 +1,7 @@
 # FILE: diagnose_simulation_and_model.py
-# Corrected version, removes global variable bug.
+# FINAL CORRECTED VERSION
+# This version removes the "inverse crime" by simulating realistic physiological
+# uncertainty for every data point, creating a fair comparison for both models.
 
 import torch
 import numpy as np
@@ -17,13 +19,13 @@ import warnings
 warnings.filterwarnings("ignore", category=RuntimeWarning, message="Mean of empty slice")
 
 # --- Import from project codebase ---
-# Ensure this script is run from the root of the `adikondepudi-asl-multiverse` directory
 try:
     from asl_simulation import ASLSimulator, ASLParameters
+    # CORRECT: Import PhysiologicalVariation to introduce realistic uncertainty
+    from enhanced_simulation import PhysiologicalVariation
     from enhanced_asl_network import DisentangledASLNet
     from multiverse_functions import fit_PCVSASL_misMatchPLD_vectInit_pep
     from utils import get_grid_search_initial_guess, engineer_signal_features
-    # Re-using the robust normalization function from the prediction script
     from predict_on_invivo import apply_normalization_disentangled, denormalize_predictions
 except ImportError as e:
     print(f"FATAL: Could not import necessary project files. Error: {e}")
@@ -31,11 +33,12 @@ except ImportError as e:
     sys.exit(1)
 
 # --- Configuration ---
-NUM_SIMS_PER_DATAPOINT = 500 # Number of noise realizations per ground truth point for fixed-param scenarios
+NUM_SIMS_PER_DATAPOINT = 500 # Number of unique realizations per ground truth point
 
 # ==============================================================================
 # HELPER FUNCTIONS (LOADING & PREDICTION)
 # ==============================================================================
+# These functions remain unchanged as they correctly perform their specific tasks.
 
 def load_artifacts(model_results_root: Path) -> tuple:
     """Robustly loads the model ensemble, config, and norm stats."""
@@ -50,12 +53,11 @@ def load_artifacts(model_results_root: Path) -> tuple:
         models_dir = model_results_root / 'trained_models'
         num_plds = len(config['pld_values'])
         
-        # This diagnostic is specifically for the DisentangledASLNet
         model_class = DisentangledASLNet
-        base_input_size = num_plds * 2 + 4 + 1 # shape + eng + amp
+        base_input_size = num_plds * 2 + 4 + 1 
 
         for model_path in models_dir.glob('ensemble_model_*.pt'):
-            model = model_class(input_size=base_input_size, **config)
+            model = model_class(mode='regression', input_size=base_input_size, **config)
             model.to(dtype=torch.bfloat16)
             model.load_state_dict(torch.load(model_path, map_location=torch.device('cpu')))
             model.eval()
@@ -107,10 +109,10 @@ def predict_ls_single_voxel(noisy_signal: np.ndarray, plds: np.ndarray, ls_param
         ls_cbf_pred, ls_att_pred = np.nan, np.nan
     return ls_cbf_pred, ls_att_pred
 
-
 # ==============================================================================
 # PHASE 1: Build and Validate the 'Ground Truth' Simulation Engine
 # ==============================================================================
+# This function remains unchanged as it is meant to test the ideal kinetic model.
 
 def phase1_validate_simulation(simulator: ASLSimulator, plds: np.ndarray, output_dir: Path):
     """Generates and plots noiseless 'Golden Signals' to validate the kinetic model."""
@@ -141,45 +143,59 @@ def phase1_validate_simulation(simulator: ASLSimulator, plds: np.ndarray, output
         print(f"  -> Saved Golden Signal plot to: {fig_path}")
     print("✅ Phase 1 Complete.")
 
-
 # ==============================================================================
-# PHASE 2: Systematic Evaluation on the Trusted Ground Truth
+# PHASE 2: Systematic Evaluation on the Trusted Ground Truth (CORRECTED)
 # ==============================================================================
 
 def run_full_scenario(scenario_params: dict, simulator: ASLSimulator, plds: np.ndarray, nn_args: dict, ls_args: dict, output_dir: Path, num_sims: int):
-    """Manages the simulation loop for a given scenario and saves results."""
+    """
+    Manages the simulation loop for a given scenario with realistic parameter uncertainty.
+    This is the corrected function that prevents the "inverse crime".
+    """
     scenario_name = scenario_params['name']
-    print(f"\n--- PHASE 2: Running Diagnostic Scenario: {scenario_name} ---")
-    
-    # Use explicit comment as requested by the diagnostic plan
-    print("-> Using simple Gaussian noise via ASLSimulator.generate_synthetic_data to ensure a clear, controlled comparison.")
+    print(f"\n--- PHASE 2: Running FAIR Diagnostic Scenario: {scenario_name} ---")
+    print("-> Applying realistic physiological parameter variations to every simulated signal.")
 
     results = []
     
-    # The main loop iterates over the ground truth values for this scenario
+    # Instantiate the ranges for realistic physiological variation
+    physio_var = PhysiologicalVariation()
+    base_params = simulator.params
+
     param_iterator = scenario_params['iterator']
     for gt_cbf, gt_att in tqdm(param_iterator, desc=f"Simulating {scenario_name}"):
         
-        # For each ground truth point, run N simulations with different noise
-        data_dict = simulator.generate_synthetic_data(
-            plds,
-            att_values=np.array([gt_att]),
-            n_noise=num_sims, # USE THE PASSED ARGUMENT
-            tsnr=scenario_params['tsnr'],
-            cbf_val=gt_cbf
-        )
-        
-        # `data_dict['MULTIVERSE']` has shape (n_noise, n_att, n_plds, 2)
-        # We have n_att=1, so we squeeze it.
-        signals = data_dict['MULTIVERSE'][:, 0, :, :] # Shape: (n_noise, n_plds, 2)
-        
-        for i in range(num_sims): # USE THE PASSED ARGUMENT
-            # Concatenate PCASL and VSASL parts for one noise realization
-            pcasl_noisy = signals[i, :, 0]
-            vsasl_noisy = signals[i, :, 1]
-            noisy_signal = np.concatenate([pcasl_noisy, vsasl_noisy])
+        # For each ground truth (CBF, ATT) point, run 'num_sims' trials.
+        # CRUCIALLY, each trial has a different, unique set of underlying physical parameters.
+        for _ in range(num_sims):
             
-            # Get predictions from both models
+            # 1. PERTURB PARAMETERS: Create a realistic "subject" where the true physical
+            #    parameters are slightly different from the textbook values.
+            true_t1_artery = np.random.uniform(*physio_var.t1_artery_range)
+            perturbed_t_tau = base_params.T_tau * (1 + np.random.uniform(*physio_var.t_tau_perturb_range))
+            perturbed_alpha_pcasl = np.clip(base_params.alpha_PCASL * (1 + np.random.uniform(*physio_var.alpha_perturb_range)), 0.1, 1.1)
+            perturbed_alpha_vsasl = np.clip(base_params.alpha_VSASL * (1 + np.random.uniform(*physio_var.alpha_perturb_range)), 0.1, 1.0)
+
+            # 2. GENERATE SIGNAL: Create the noisy signal using these true, perturbed parameters.
+            data_dict = simulator.generate_synthetic_data(
+                plds,
+                att_values=np.array([gt_att]),
+                n_noise=1, # Generate one noise realization for this specific physical reality
+                tsnr=scenario_params['tsnr'],
+                cbf_val=gt_cbf,
+                t1_artery_val=true_t1_artery,
+                t_tau_val=perturbed_t_tau,
+                alpha_pcasl_val=perturbed_alpha_pcasl,
+                alpha_vsasl_val=perturbed_alpha_vsasl
+            )
+            
+            signals = data_dict['MULTIVERSE'][0, 0, :, :] # Shape (n_plds, 2)
+            noisy_signal = np.concatenate([signals[:, 0], signals[:, 1]])
+            
+            # 3. EVALUATE MODELS: Both models see the same realistically imperfect signal.
+            # The NN relies on its robust training.
+            # The LS model is fairly given the standard, *unperturbed* parameters, simulating
+            # how it's used in practice (with textbook values).
             nn_cbf, nn_att = predict_nn_single_voxel(noisy_signal, **nn_args)
             ls_cbf, ls_att = predict_ls_single_voxel(noisy_signal, plds, **ls_args)
 
@@ -195,10 +211,10 @@ def run_full_scenario(scenario_params: dict, simulator: ASLSimulator, plds: np.n
     print(f"  -> Saved raw simulation results to: {csv_path}")
     return csv_path
 
-
 # ==============================================================================
 # PHASE 3: Creating the Definitive Diagnostic Report
 # ==============================================================================
+# This function remains unchanged as it correctly processes the results CSV.
 
 def phase3_generate_report(csv_path: Path, scenario_params: dict, output_dir: Path):
     """Analyzes a results CSV and generates the final report plots."""
@@ -206,21 +222,17 @@ def phase3_generate_report(csv_path: Path, scenario_params: dict, output_dir: Pa
     print(f"\n--- PHASE 3: Generating Report for Scenario: {scenario_name} ---")
     df = pd.read_csv(csv_path)
 
-    # Determine the varying parameter for the x-axis and grouping
     x_param = scenario_params.get('x_axis_param', 'true_att')
     fixed_param_str = scenario_params.get('fixed_param_str', '')
 
-    # Calculate errors
     df['nn_cbf_err'] = df['nn_cbf_pred'] - df['true_cbf']
     df['ls_cbf_err'] = df['ls_cbf_pred'] - df['true_cbf']
     df['nn_att_err'] = df['nn_att_pred'] - df['true_att']
     df['ls_att_err'] = df['ls_att_pred'] - df['true_att']
 
-    # Bin data if the x-axis parameter is continuous from random sampling
     if scenario_params.get('bin_data', False):
         num_bins = 15
         df['bin'] = pd.cut(df[x_param], bins=num_bins)
-        # Use the midpoint of the bin for plotting
         summary = df.groupby('bin', observed=True).agg({
             x_param: 'mean',
             'nn_cbf_err': ['mean', 'std'], 'ls_cbf_err': ['mean', 'std'],
@@ -240,13 +252,11 @@ def phase3_generate_report(csv_path: Path, scenario_params: dict, output_dir: Pa
         summary.columns = ['_'.join(col).strip('_') for col in summary.columns.values]
         group_col = x_param
 
-    # Calculate CoV
     summary['nn_cbf_cov'] = summary['nn_cbf_pred_std'] / summary['nn_cbf_pred_mean']
     summary['ls_cbf_cov'] = summary['ls_cbf_pred_std'] / summary['ls_cbf_pred_mean']
     summary['nn_att_cov'] = summary['nn_att_pred_std'] / summary['nn_att_pred_mean']
     summary['ls_att_cov'] = summary['ls_att_pred_std'] / summary['ls_att_pred_mean']
     
-    # Plotting
     metrics = {
         'Bias (Prediction - Ground Truth)': {'cbf': ('nn_cbf_err_mean', 'ls_cbf_err_mean'), 'att': ('nn_att_err_mean', 'ls_att_err_mean')},
         'Coefficient of Variation': {'cbf': ('nn_cbf_cov', 'ls_cbf_cov'), 'att': ('nn_att_cov', 'ls_att_cov')}
@@ -285,7 +295,7 @@ def main():
         description="The Definitive Diagnostic Plan: Validating the Simulation & Evaluating the Model.",
         formatter_class=argparse.RawTextHelpFormatter
     )
-    parser.add_argument("model_artifacts_dir", type=str, help="Path to the trained model artifacts directory (e.g., a fine-tuning run folder).")
+    parser.add_argument("model_artifacts_dir", type=str, help="Path to the trained model artifacts directory.")
     parser.add_argument("output_dir", type=str, help="Path to the output directory where all plots and CSVs will be saved.")
     args = parser.parse_args()
 
@@ -293,30 +303,24 @@ def main():
     output_dir = Path(args.output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
     
-    print("="*80)
-    print("      STARTING DEFINITIVE DIAGNOSTIC PIPELINE")
-    print("="*80)
+    print("="*80); print("      STARTING DEFINITIVE DIAGNOSTIC PIPELINE (FAIR COMPARISON)"); print("="*80)
     
-    # --- Load all necessary artifacts once ---
     models, config, norm_stats, device = load_artifacts(model_dir)
     plds = np.array(config['pld_values'])
     asl_params = ASLParameters(**{k: v for k, v in config.items() if k in ASLParameters.__annotations__})
     simulator = ASLSimulator(params=asl_params)
+    
+    # IMPORTANT: The LS model is given the standard, "textbook" parameters from the config.
     ls_params_dict = {k:v for k,v in config.items() if k in ['T1_artery','T_tau','T2_factor','alpha_BS1','alpha_PCASL','alpha_VSASL']}
     
     nn_args = {'models': models, 'config': config, 'norm_stats': norm_stats, 'device': device}
     ls_args = {'ls_params': ls_params_dict}
 
-    # --- Phase 1 ---
     phase1_validate_simulation(simulator, plds, output_dir)
     
-    # --- Phase 2 & 3 ---
-    # Define the iterators for ground truth values for each scenario
     att_sweep = np.linspace(500, 4000, 20)
     cbf_sweep = np.linspace(20, 120, 20)
-    
-    # For scenarios C and D, we generate a large pool of random samples for robust binning later.
-    total_sims_random_scenarios = 20 * NUM_SIMS_PER_DATAPOINT # ~10k total simulations for smooth plots
+    total_sims_random_scenarios = 20 * NUM_SIMS_PER_DATAPOINT
     
     scenarios_to_run = [
         {
@@ -343,9 +347,6 @@ def main():
 
     all_csvs = {}
     for scenario in scenarios_to_run:
-        # Determine the number of simulations for this specific scenario.
-        # Scenarios C and D have unique ground truth for each run, so n_sims is 1.
-        # Scenarios A and B have fixed ground truth points, so we run many noise realizations.
         num_sims_for_this_run = 1 if scenario.get('bin_data', False) else NUM_SIMS_PER_DATAPOINT
 
         csv_path = run_full_scenario(
@@ -357,10 +358,7 @@ def main():
     for scenario_name, data in all_csvs.items():
         phase3_generate_report(data['path'], data['params'], output_dir)
         
-    print("\n="*80)
-    print("      DIAGNOSTIC PIPELINE FINISHED SUCCESSFULLY")
-    print(f"      All results saved in: {output_dir.resolve()}")
-    print("="*80)
+    print("\n" + "="*80); print("      DIAGNOSTIC PIPELINE FINISHED SUCCESSFULLY"); print(f"      All results saved in: {output_dir.resolve()}"); print("="*80)
 
 if __name__ == "__main__":
     main()

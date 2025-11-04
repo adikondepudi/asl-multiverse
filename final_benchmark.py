@@ -44,7 +44,7 @@ def load_artifacts(model_results_root: Path) -> tuple:
             base_input_size = num_plds * 2 + 4 # signal + eng
 
         for model_path in models_dir.glob('ensemble_model_*.pt'):
-            model = model_class(input_size=base_input_size, **config)
+            model = model_class(mode='regression', input_size=base_input_size, **config)
             model.to(dtype=torch.bfloat16) # Models are trained in bfloat16
             model.load_state_dict(torch.load(model_path, map_location=torch.device('cpu')))
             model.eval()
