@@ -18,10 +18,13 @@ training:
   n_epochs: 30 # Reduced epochs for faster convergence
   steps_per_epoch: 125 # 125 steps * 8192 batch_size = ~1M samples
   validation_steps_per_epoch: 10
+  early_stopping_min_delta: 0.001
 
   norm_type: "batch"
-  log_var_cbf_min: -5.0; log_var_cbf_max: 7.0
-  log_var_att_min: -5.0; log_var_att_max: 14.0
+  log_var_cbf_min: -5.0
+  log_var_cbf_max: 7.0
+  log_var_att_min: -5.0
+  log_var_att_max: 14.0
   transformer_d_model_focused: 32
   transformer_nhead_model: 4
   transformer_nlayers_model: 2

@@ -14,9 +14,10 @@ training:
   batch_size: 8192
   n_ensembles: 1 
   
-  n_epochs: 15
+  n_epochs: 10
   steps_per_epoch: 125 # 125 steps * 8192 batch_size = ~1M samples
   validation_steps_per_epoch: 25
+  early_stopping_min_delta: 0.0
 
   norm_type: "batch"
   transformer_d_model_focused: 32

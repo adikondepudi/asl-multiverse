@@ -47,6 +47,7 @@ class ResearchConfig:
     weight_decay: float = 1e-5
     batch_size: int = 256
     validation_steps_per_epoch: int = 50
+    early_stopping_min_delta: float = 0.0
     n_ensembles: int = 5
     dropout_rate: float = 0.1
     norm_type: str = 'batch'
@@ -177,6 +178,7 @@ def run_comprehensive_asl_research(config: ResearchConfig, stage: int, output_di
         steps_per_epoch=config.steps_per_epoch,
         output_dir=output_dir,
         early_stopping_patience=25,
+        early_stopping_min_delta=config.early_stopping_min_delta,
         fine_tuning_config=fine_tuning_cfg
     )
 
@@ -187,9 +189,9 @@ def run_comprehensive_asl_research(config: ResearchConfig, stage: int, output_di
         encoder_path = output_dir / 'encoder_pretrained.pt'
         unwrapped_model = getattr(trainer.models[0], '_orig_mod', trainer.models[0])
         torch.save(unwrapped_model.encoder.state_dict(), encoder_path)
-        logger.info(f"Saved final pre-trained encoder from model 0 to {encoder_path}")
+        script_logger.info(f"Saved final pre-trained encoder from model 0 to {encoder_path}")
     else: # stage 2
-        logger.info(f"Best models were saved during training to {output_dir / 'trained_models'}")
+        script_logger.info(f"Best models were saved during training to {output_dir / 'trained_models'}")
         if wandb.run:
             model_artifact = wandb.Artifact(name=f"asl_ensemble_{wandb_run.id}", type="model")
             model_artifact.add_dir(str(output_dir / 'trained_models'))

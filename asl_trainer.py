@@ -152,8 +152,8 @@ class EnhancedASLTrainer:
     def train_ensemble(self,
                        train_loader: DataLoader, val_loader: Optional[DataLoader],
                        n_epochs: int, steps_per_epoch: Optional[int], output_dir: Path,
-                       early_stopping_patience: int = 20, optuna_trial: Optional[Any] = None,
-                       fine_tuning_config: Optional[Dict] = None):
+                       early_stopping_patience: int = 10, early_stopping_min_delta: float = 0.0,
+                       optuna_trial: Optional[Any] = None, fine_tuning_config: Optional[Dict] = None):
         if steps_per_epoch is None:
             if isinstance(train_loader.dataset, IterableDataset):
                 raise ValueError("steps_per_epoch must be specified for an IterableDataset.")
@@ -188,11 +188,17 @@ class EnhancedASLTrainer:
             if wandb.run: wandb.log({'epoch': epoch, 'mean_train_loss': train_loss, 'mean_val_loss': mean_val_loss}, step=self.global_step)
             for i, vm in enumerate(val_metrics):
                 val_loss = vm.get('val_loss', float('inf'))
-                if val_loss < self.overall_best_val_losses[i]:
+                if val_loss < self.overall_best_val_losses[i] - early_stopping_min_delta:
                     self.overall_best_val_losses[i] = val_loss; patience_counters[i] = 0
                     unwrapped_model = getattr(self.models[i], '_orig_mod', self.models[i])
-                    model_path = models_save_dir / f'ensemble_model_{i}.pt'
-                    torch.save(unwrapped_model.state_dict(), model_path)
+                    
+                    if self.stage == 1:
+                        model_path = output_dir / 'encoder_pretrained.pt'
+                        torch.save(unwrapped_model.encoder.state_dict(), model_path)
+                    else: # stage 2
+                        model_path = models_save_dir / f'ensemble_model_{i}.pt'
+                        torch.save(unwrapped_model.state_dict(), model_path)
+                    
                     logger.info(f"Saved new best model for ensemble {i} to {model_path} (Val Loss: {val_loss:.6f})")
                 else:
                     patience_counters[i] += 1
