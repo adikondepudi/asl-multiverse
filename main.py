@@ -219,21 +219,33 @@ if __name__ == "__main__":
         parser.error("--load-weights-from is required for --stage 2.")
 
     config_obj = ResearchConfig()
+    config_loaded_successfully = False
     if Path(args.config_file).exists():
         with open(args.config_file, 'r') as f_yaml:
             config_from_yaml = yaml.safe_load(f_yaml) or {}
         
-        flat_config = {}
-        for section, params in config_from_yaml.items():
-            if isinstance(params, dict):
-                flat_config.update(params)
-        
-        if 'moe' in config_from_yaml:
-            flat_config['moe'] = config_from_yaml['moe']
+        if config_from_yaml:
+            config_loaded_successfully = True
+            flat_config = {}
+            for section, params in config_from_yaml.items():
+                if isinstance(params, dict):
+                    flat_config.update(params)
+            
+            if 'moe' in config_from_yaml:
+                flat_config['moe'] = config_from_yaml['moe']
 
-        for key, value in flat_config.items():
-            if hasattr(config_obj, key):
-                setattr(config_obj, key, value)
+            for key, value in flat_config.items():
+                if hasattr(config_obj, key):
+                    setattr(config_obj, key, value)
+    
+    # --- FAILSAFE WARNING ---
+    if not config_loaded_successfully:
+        script_logger.warning("="*80)
+        script_logger.warning(f"  WARNING: Could not load or parse YAML config file: {args.config_file}")
+        script_logger.warning("  The program will proceed using hardcoded default parameters.")
+        script_logger.warning("  This may result in incorrect behavior (e.g., 100 epochs).")
+        script_logger.warning("  Please check the YAML file for syntax errors (e.g., tabs instead of spaces).")
+        script_logger.warning("="*80)
 
     if args.output_dir:
         output_path = Path(args.output_dir)

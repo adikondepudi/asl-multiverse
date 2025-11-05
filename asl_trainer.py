@@ -187,20 +187,24 @@ class EnhancedASLTrainer:
             mean_val_loss = np.nanmean([m.get('val_loss', np.nan) for m in val_metrics])
             logger.info(f"Epoch {epoch + 1}/{n_epochs}: Train Loss = {train_loss:.6f}, Val Loss = {mean_val_loss:.6f}")
             if wandb.run: wandb.log({'epoch': epoch, 'mean_train_loss': train_loss, 'mean_val_loss': mean_val_loss}, step=self.global_step)
+            
             for i, vm in enumerate(val_metrics):
                 val_loss = vm.get('val_loss', float('inf'))
                 if val_loss < self.overall_best_val_losses[i] - early_stopping_min_delta:
-                    self.overall_best_val_losses[i] = val_loss; patience_counters[i] = 0
+                    self.overall_best_val_losses[i] = val_loss
+                    patience_counters[i] = 0
                     unwrapped_model = getattr(self.models[i], '_orig_mod', self.models[i])
                     
                     if self.stage == 1:
-                        model_path = output_dir / 'encoder_pretrained.pt'
-                        torch.save(unwrapped_model.encoder.state_dict(), model_path)
+                        # --- BUG FIX: Only save the encoder from the first model in Stage 1 ---
+                        if i == 0:
+                            model_path = output_dir / 'encoder_pretrained.pt'
+                            torch.save(unwrapped_model.encoder.state_dict(), model_path)
+                            logger.info(f"Saved new best encoder from model 0 to {model_path} (Val Loss: {val_loss:.6f})")
                     else: # stage 2
                         model_path = models_save_dir / f'ensemble_model_{i}.pt'
                         torch.save(unwrapped_model.state_dict(), model_path)
-                    
-                    logger.info(f"Saved new best model for ensemble {i} to {model_path} (Val Loss: {val_loss:.6f})")
+                        logger.info(f"Saved new best model for ensemble {i} to {model_path} (Val Loss: {val_loss:.6f})")
                 else:
                     patience_counters[i] += 1
             if all(p >= early_stopping_patience for p in patience_counters): logger.info("All models early stopped."); break
