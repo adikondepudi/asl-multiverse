@@ -7,8 +7,8 @@ echo "🚀 STARTING ASL MULTIVERSE V5 TUNED (8-HOUR TARGET) PIPELINE..."
 echo "==================================================================="
 
 # --- 1. Define TUNED Configurations and Base Name ---
-STAGE1_CONFIG="config/v5_stage1_tuned_8hr.yaml"
-STAGE2_CONFIG="config/v5_stage2_tuned_8hr.yaml"
+STAGE1_CONFIG="config/v5_stage1_8hr_prod.yaml"
+STAGE2_CONFIG="config/v5_stage2_8hr_prod.yaml"
 TIMESTAMP=$(date +"%Y%m%d_%H%M%S")
 BASE_RUN_NAME="prod_v5_tuned_8hr_run_${TIMESTAMP}"
 

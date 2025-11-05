@@ -373,24 +373,26 @@ class DisentangledASLNet(nn.Module):
         self.mode = mode
         self.encoder_frozen = False
         
-        # --- START OF MODIFICATION ---
-        # We add a new option for our superior encoder.
         if encoder_type.lower() == 'physics_processor':
+            # --- FIX 1 (CRITICAL): Remove redundant **kwargs from the CALL ---
             self.encoder = PhysicsInformedASLProcessor(
                 n_plds=n_plds, 
-                feature_dim=kwargs.get('transformer_d_model_focused'), # Re-use existing config value
-                nhead=kwargs.get('transformer_nhead_model'),         # Re-use existing config value
-                dropout_rate=kwargs.get('dropout_rate'),
-                **kwargs
+                feature_dim=kwargs.get('transformer_d_model_focused'),
+                nhead=kwargs.get('transformer_nhead_model'),
+                dropout_rate=kwargs.get('dropout_rate')
             )
-            # The output size of our new encoder's fusion MLP is 256. This is CRITICAL.
             fused_feature_size = 256
         
-        # This is the old code. Keep it for backward compatibility.
         elif encoder_type.lower() == 'conv1d':
-            self.encoder = DisentangledEncoderConv1D(n_plds=n_plds, **kwargs)
+            # --- FIX 2 (ROBUSTNESS): Make this call explicit and consistent ---
+            self.encoder = DisentangledEncoderConv1D(
+                n_plds=n_plds,
+                dropout_rate=kwargs.get('dropout_rate'),
+                transformer_d_model_focused=kwargs.get('transformer_d_model_focused'),
+                transformer_nhead_model=kwargs.get('transformer_nhead_model'),
+                **kwargs
+            )
             fused_feature_size = self.encoder.att_d_model + 64
-        # --- END OF MODIFICATION ---
         
         else:
             raise ValueError(f"Unknown encoder_type: '{encoder_type}'. Must be 'conv1d' or 'physics_processor'.")
