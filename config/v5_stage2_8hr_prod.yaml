@@ -16,11 +16,11 @@ training:
   n_ensembles: 5
 
   # STRATEGY: Fine-tune on a much larger dataset to prevent memorization.
-  n_epochs: 15 
+  n_epochs: 10
   steps_per_epoch: 488 # 488 steps * 8192 batch_size = ~4M samples per epoch
 
   validation_steps_per_epoch: 25
-  early_stopping_patience: 25 # Be patient; fine-tuning improvements can be small.
+  early_stopping_patience: 5
   early_stopping_min_delta: 0.0005
 
   norm_type: "batch"
