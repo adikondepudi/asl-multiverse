@@ -219,34 +219,41 @@ if __name__ == "__main__":
         parser.error("--load-weights-from is required for --stage 2.")
 
     config_obj = ResearchConfig()
-    config_loaded_successfully = False
-    if Path(args.config_file).exists():
-        with open(args.config_file, 'r') as f_yaml:
-            config_from_yaml = yaml.safe_load(f_yaml) or {}
-        
-        if config_from_yaml:
-            config_loaded_successfully = True
-            flat_config = {}
-            for section, params in config_from_yaml.items():
-                if isinstance(params, dict):
-                    flat_config.update(params)
-            
-            if 'moe' in config_from_yaml:
-                flat_config['moe'] = config_from_yaml['moe']
-
-            for key, value in flat_config.items():
-                if hasattr(config_obj, key):
-                    setattr(config_obj, key, value)
     
-    # --- FAILSAFE WARNING ---
-    if not config_loaded_successfully:
-        script_logger.warning("="*80)
-        script_logger.warning(f"  WARNING: Could not load or parse YAML config file: {args.config_file}")
-        script_logger.warning("  The program will proceed using hardcoded default parameters.")
-        script_logger.warning("  This may result in incorrect behavior (e.g., 100 epochs).")
-        script_logger.warning("  Please check the YAML file for syntax errors (e.g., tabs instead of spaces).")
-        script_logger.warning("="*80)
+    config_path = Path(args.config_file)
+    if not config_path.exists():
+        script_logger.error(f"FATAL: Configuration file not found at: {config_path}")
+        sys.exit(1)
 
+    with open(config_path, 'r') as f_yaml:
+        config_from_yaml = yaml.safe_load(f_yaml) or {}
+
+    if not config_from_yaml:
+        script_logger.error(f"FATAL: Configuration file {config_path} is empty or invalid.")
+        sys.exit(1)
+
+    # --- NEW ROBUST CONFIGURATION OVERRIDE LOGIC ---
+    for section, params in config_from_yaml.items():
+        if not isinstance(params, dict):
+            # Handles simple top-level key-value pairs if any exist
+            if hasattr(config_obj, section):
+                setattr(config_obj, section, params)
+            continue
+        
+        # Handles nested sections like 'training', 'data', etc.
+        # The 'moe' key is special as its value is a dictionary that should be assigned directly.
+        if section == 'moe':
+            if hasattr(config_obj, 'moe'):
+                setattr(config_obj, 'moe', params)
+            continue
+            
+        # For all other sections, iterate and set their parameters individually
+        for key, value in params.items():
+            if hasattr(config_obj, key):
+                setattr(config_obj, key, value)
+    
+    script_logger.info(f"Successfully loaded and applied configuration from {config_path}")
+    
     if args.output_dir:
         output_path = Path(args.output_dir)
     else:
