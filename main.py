@@ -36,7 +36,7 @@ script_logger = logging.getLogger(__name__)
 @dataclass
 class ResearchConfig:
     model_class_name: str = "DisentangledASLNet"
-    encoder_type: str = 'conv1d'
+    encoder_type: str = 'physics_processor'
     hidden_sizes: List[int] = field(default_factory=lambda: [256, 128, 64])
     learning_rate: float = 0.001
     use_offline_dataset: bool = True
@@ -96,7 +96,8 @@ def run_comprehensive_asl_research(config: ResearchConfig, stage: int, output_di
     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
     script_logger.info(f"Using device: {device}")
 
-    base_input_size_nn = num_plds * 2 + 4 + 1
+    # V4: Input size is 2 curves (num_plds*2) + 7 scalar features
+    base_input_size_nn = num_plds * 2 + 7
     
     use_offline = config.use_offline_dataset
     offline_path = config.offline_dataset_path
@@ -107,13 +108,13 @@ def run_comprehensive_asl_research(config: ResearchConfig, stage: int, output_di
         script_logger.info(f"Using OFFLINE In-Memory dataset from: {offline_path}")
         train_dataset = ASLInMemoryDataset(
             data_dir=offline_path, norm_stats=norm_stats, stage=stage, 
-            disentangled_mode=True, num_samples_to_load=config.num_samples_to_load
+            num_samples_to_load=config.num_samples_to_load
         )
         train_loader = DataLoader(train_dataset, batch_size=config.batch_size, num_workers=num_workers,
                                      pin_memory=True, persistent_workers=(num_workers > 0), shuffle=True)
     else:
         script_logger.info("Using ON-THE-FLY IterableDataset for training.")
-        train_dataset = ASLIterableDataset(simulator, plds_np, config.training_noise_levels, norm_stats, stage=stage, disentangled_mode=True)
+        train_dataset = ASLIterableDataset(simulator, plds_np, config.training_noise_levels, norm_stats, stage=stage)
         train_loader = DataLoader(train_dataset, batch_size=config.batch_size, num_workers=num_workers, pin_memory=True, persistent_workers=(num_workers > 0))
     
     script_logger.info("Generating a fixed validation dataset for stable evaluation metrics...")
@@ -123,12 +124,12 @@ def run_comprehensive_asl_research(config: ResearchConfig, stage: int, output_di
         noise_levels=[5.0, 10.0, 15.0]
     )
     val_signals_noisy_raw = validation_data_dict['signals']
-    val_signals_clean_raw = validation_data_dict['perturbed_params'] 
     val_features_eng = engineer_signal_features(val_signals_noisy_raw, num_plds)
-    val_signals_noisy_full = np.concatenate([val_signals_noisy_raw, val_features_eng], axis=1)
+    # The offline dataset format: raw curves followed by engineered features (TTP, COM)
+    val_signals_for_processing = np.concatenate([val_signals_noisy_raw, val_features_eng], axis=1)
 
-    val_dataset = ASLInMemoryDataset(data_dir=None, norm_stats=norm_stats, stage=stage, disentangled_mode=True)
-    val_dataset.signals_noisy_unprocessed = val_signals_noisy_full
+    val_dataset = ASLInMemoryDataset(data_dir=None, norm_stats=norm_stats, stage=stage)
+    val_dataset.signals_noisy_unprocessed = val_signals_for_processing
     val_dataset.params_unnormalized = validation_data_dict['parameters']
     
     val_dataset.signals_processed = val_dataset._process_signals(val_dataset.signals_noisy_unprocessed)
@@ -232,22 +233,17 @@ if __name__ == "__main__":
         script_logger.error(f"FATAL: Configuration file {config_path} is empty or invalid.")
         sys.exit(1)
 
-    # --- NEW ROBUST CONFIGURATION OVERRIDE LOGIC ---
     for section, params in config_from_yaml.items():
         if not isinstance(params, dict):
-            # Handles simple top-level key-value pairs if any exist
             if hasattr(config_obj, section):
                 setattr(config_obj, section, params)
             continue
         
-        # Handles nested sections like 'training', 'data', etc.
-        # The 'moe' key is special as its value is a dictionary that should be assigned directly.
         if section == 'moe':
             if hasattr(config_obj, 'moe'):
                 setattr(config_obj, 'moe', params)
             continue
             
-        # For all other sections, iterate and set their parameters individually
         for key, value in params.items():
             if hasattr(config_obj, key):
                 setattr(config_obj, key, value)

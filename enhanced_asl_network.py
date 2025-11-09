@@ -177,6 +177,7 @@ class SignalDecoder(nn.Module):
 class Conv1DFeatureExtractor(nn.Module):
     """
     A dedicated 1D-ConvNet to extract local, shape-based features from the ASL signal.
+    Crucially includes BatchNorm1d for per-batch stability.
     """
     def __init__(self, in_channels: int, feature_dim: int, dropout_rate: float):
         super().__init__()
@@ -189,82 +190,42 @@ class Conv1DFeatureExtractor(nn.Module):
             nn.BatchNorm1d(64),
             nn.ReLU(),
             nn.Dropout(dropout_rate),
-            nn.Conv1d(64, feature_dim, kernel_size=1)
+            nn.Conv1d(64, feature_dim, kernel_size=1),
+            nn.BatchNorm1d(feature_dim),
+            nn.ReLU()
         )
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         return self.conv_stack(x)
 
-class DisentangledEncoderConv1D(nn.Module):
-    """
-    The feature extraction backbone using a 1D-ConvNet for the shape stream.
-    """
-    def __init__(self, n_plds, dropout_rate, transformer_d_model_focused, transformer_nhead_model, **kwargs):
+class FiLMLayer(nn.Module):
+    """Feature-wise Linear Modulation layer."""
+    def __init__(self, in_channels: int, conditioning_dim: int):
         super().__init__()
-        self.n_plds = n_plds
-        self.num_shape_features = n_plds * 2
-        self.num_engineered_features = 4
-        self.num_amplitude_features = 1
-        self.att_d_model = transformer_d_model_focused
-
-        self.shape_feature_extractor = Conv1DFeatureExtractor(
-            in_channels=1, 
-            feature_dim=self.att_d_model, 
-            dropout_rate=dropout_rate
-        )
-        self.amplitude_mlp = nn.Sequential(
-            nn.Linear(self.num_amplitude_features + self.num_engineered_features, 32),
+        self.generator = nn.Sequential(
+            nn.Linear(conditioning_dim, in_channels * 2),
             nn.ReLU(),
-            nn.Linear(32, 64),
-            nn.ReLU()
+            nn.Linear(in_channels * 2, in_channels * 2)
         )
-        amplitude_feature_size = 64
-        self.query_proj = nn.Linear(amplitude_feature_size, self.att_d_model)
-        self.cross_attention = nn.MultiheadAttention(
-            embed_dim=self.att_d_model, num_heads=transformer_nhead_model, 
-            dropout=dropout_rate, batch_first=True
-        )
-        self.fusion_norm = nn.LayerNorm(self.att_d_model)
-        self.fusion_dropout = nn.Dropout(dropout_rate)
-    
-    def forward(self, x: torch.Tensor) -> torch.Tensor:
-        shape_vector = x[:, :self.num_shape_features]
-        engineered_features = x[:, self.num_shape_features : self.num_shape_features + self.num_engineered_features]
-        amplitude_scalar = x[:, -self.num_amplitude_features:]
+        self.in_channels = in_channels
 
-        pcasl_shape = shape_vector[:, :self.n_plds].unsqueeze(-1)
-        vsasl_shape = shape_vector[:, self.n_plds:].unsqueeze(-1)
-
-        pcasl_encoded = self.shape_feature_extractor(pcasl_shape.transpose(1, 2)).transpose(1, 2)
-        vsasl_encoded = self.shape_feature_extractor(vsasl_shape.transpose(1, 2)).transpose(1, 2)
-        
-        amplitude_input = torch.cat([amplitude_scalar, engineered_features], dim=1)
-        amplitude_features = self.amplitude_mlp(amplitude_input)
-
-        shape_sequence = torch.cat([pcasl_encoded, vsasl_encoded], dim=1)
-        query_proj = self.query_proj(amplitude_features)
-        query = query_proj.unsqueeze(1)
-        attn_output, _ = self.cross_attention(query=query, key=shape_sequence, value=shape_sequence)
-        contextualized_query_unnorm = query + self.fusion_dropout(attn_output)
-        contextualized_query = self.fusion_norm(contextualized_query_unnorm).squeeze(1)
-
-        fused_features = torch.cat([contextualized_query, amplitude_features], dim=1)
-        return fused_features
+    def forward(self, features: torch.Tensor, conditioning_vector: torch.Tensor) -> torch.Tensor:
+        params = self.generator(conditioning_vector)
+        gamma = params[:, :self.in_channels].unsqueeze(-1)
+        beta = params[:, self.in_channels:].unsqueeze(-1)
+        return gamma * features + beta
 
 class PhysicsInformedASLProcessor(nn.Module):
     """
-    A specialized, four-stage encoder for MULTIVERSE ASL data. It mimics an expert's
-    workflow: Decompose & Denoise -> Detect Events -> Reconcile -> Estimate.
+    V4 robust architecture. It uses separate, stabilized Conv1D towers to process
+    signal shape, then uses FiLM to inject amplitude information before reconciling
+    the two signals and preparing a final feature vector for the head.
     """
     def __init__(self, n_plds: int, feature_dim: int, nhead: int, dropout_rate: float, **kwargs):
         super().__init__()
         self.n_plds = n_plds
-        self.num_engineered_features = 4
-        self.num_amplitude_features = 1
+        self.num_scalar_features = 7 # pcasl_amp, vsasl_amp, log_ratio, 2xTTP, 2xCOM
 
-        # --- STATION 1: THE CLEANERS (Independent Denoising Towers) ---
-        # We need two separate 1D Conv towers. They DO NOT share weights.
-        # This is critical because they are learning the unique shapes of two different signals.
         self.pcasl_denoising_tower = Conv1DFeatureExtractor(
             in_channels=1, feature_dim=feature_dim, dropout_rate=dropout_rate
         )
@@ -272,88 +233,48 @@ class PhysicsInformedASLProcessor(nn.Module):
             in_channels=1, feature_dim=feature_dim, dropout_rate=dropout_rate
         )
 
-        # --- STATION 2: THE SPOTTERS (Kinetic Event Detectors) ---
-        # These modules will learn to find the most important part of each feature sequence.
-        # We will use the existing AttentionPooling class for this.
-        self.pcasl_event_detector = AttentionPooling(d_model=feature_dim)
-        self.vsasl_event_detector = AttentionPooling(d_model=feature_dim)
+        self.pcasl_film = FiLMLayer(in_channels=feature_dim, conditioning_dim=self.num_scalar_features)
+        self.vsasl_film = FiLMLayer(in_channels=feature_dim, conditioning_dim=self.num_scalar_features)
 
-        # --- STATION 3: THE SUPERVISOR (Cross-Modal Reconciliation) ---
-        # This module forces the model to compare its findings.
-        # It uses the PCASL event as a query to "ask" the VSASL sequence for confirmation.
+        self.pcasl_event_detector = AttentionPooling(d_model=feature_dim)
         self.reconciliation_attention = CrossAttentionBlock(
             d_model=feature_dim, nhead=nhead, dropout=dropout_rate
         )
-
-        # --- STATION 4: THE MANAGER (Final Fusion & Estimation) ---
-        # An MLP for processing the simple amplitude/engineered features.
-        self.amplitude_processor = nn.Sequential(
-            nn.Linear(self.num_amplitude_features + self.num_engineered_features, 64),
-            nn.ReLU(),
-            nn.Linear(64, 128)
-        )
         
-        # The final MLP that combines all our expert knowledge into one vector for the head.
-        # Input size: reconciled_vector (feature_dim) + amplitude_vector (128)
         self.final_fusion_mlp = nn.Sequential(
-            nn.Linear(feature_dim + 128, 256),
+            nn.Linear(feature_dim + self.num_scalar_features, 256),
             nn.ReLU(),
             nn.LayerNorm(256)
         )
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
-        # --- PREPARATION: Separate Inputs ---
-        shape_vector = x[:, :self.n_plds * 2]
-        engineered_features = x[:, self.n_plds * 2 : self.n_plds * 2 + self.num_engineered_features]
-        amplitude_scalar = x[:, -self.num_amplitude_features:]
+        pcasl_norm_curve = x[:, :self.n_plds].unsqueeze(1)
+        vsasl_norm_curve = x[:, self.n_plds : self.n_plds * 2].unsqueeze(1)
+        scalar_features = x[:, self.n_plds * 2:]
 
-        # Reshape for Conv1D: [Batch, Channels, Length]
-        pcasl_shape_input = shape_vector[:, :self.n_plds].unsqueeze(1)
-        vsasl_shape_input = shape_vector[:, self.n_plds:].unsqueeze(1)
+        pcasl_shape_features = self.pcasl_denoising_tower(pcasl_norm_curve)
+        vsasl_shape_features = self.vsasl_denoising_tower(vsasl_norm_curve)
 
-        # --- EXECUTE ASSEMBLY LINE ---
+        pcasl_conditioned = self.pcasl_film(pcasl_shape_features, scalar_features)
+        vsasl_conditioned = self.vsasl_film(vsasl_shape_features, scalar_features)
 
-        # STATION 1: Pass each signal through its dedicated Cleaner tower.
-        # Output shape: [Batch, feature_dim, n_plds]
-        pcasl_feature_sequence = self.pcasl_denoising_tower(pcasl_shape_input)
-        vsasl_feature_sequence = self.vsasl_denoising_tower(vsasl_shape_input)
-
-        # Reshape for Attention: [Batch, Sequence_Length, feature_dim]
-        pcasl_seq = pcasl_feature_sequence.transpose(1, 2)
-        vsasl_seq = vsasl_feature_sequence.transpose(1, 2)
-
-        # STATION 2: The Spotters find the most salient event in each sequence.
-        # Output shape: [Batch, feature_dim]
-        pcasl_event_vector = self.pcasl_event_detector(pcasl_seq)
-        # We don't use the vsasl_event_vector directly, but the tower needs to process it for the next step.
-
-        # STATION 3: The Supervisor reconciles the information.
-        # The PCASL event vector is the "question" (query).
-        # The VSASL sequence is the "textbook" to find the answer in (key/value).
-        # Query shape must be [Batch, 1, feature_dim] for the CrossAttentionBlock.
+        pcasl_seq = pcasl_conditioned.transpose(1, 2)
+        vsasl_seq = vsasl_conditioned.transpose(1, 2)
+        pcasl_event = self.pcasl_event_detector(pcasl_seq)
         reconciled_vector = self.reconciliation_attention(
-            query=pcasl_event_vector.unsqueeze(1), 
+            query=pcasl_event.unsqueeze(1), 
             key_value=vsasl_seq
-        )
-        # Squeeze to remove the sequence dimension: [Batch, feature_dim]
-        reconciled_vector = reconciled_vector.squeeze(1)
+        ).squeeze(1)
 
-        # STATION 4: The Manager makes the final decision.
-        # Process the amplitude information in parallel.
-        amplitude_input = torch.cat([amplitude_scalar, engineered_features], dim=1)
-        amplitude_vector = self.amplitude_processor(amplitude_input)
-
-        # Combine the expert timing report with the amplitude report.
-        final_output_vector = self.final_fusion_mlp(
-            torch.cat([reconciled_vector, amplitude_vector], dim=1)
-        )
+        final_input_to_head = torch.cat([reconciled_vector, scalar_features], dim=1)
+        final_output_vector = self.final_fusion_mlp(final_input_to_head)
         
         return final_output_vector
 
 class DisentangledASLNet(nn.Module):
     """
-    DisentangledASLNet v6: A two-stage model with a self-supervised denoising autoencoder
-    (Stage 1) and a supervised regression head (Stage 2).
+    Main network class. It uses a specified encoder (like the V4 PhysicsInformedASLProcessor)
+    and then applies either a denoising decoder (Stage 1) or a regression head (Stage 2).
     """
     def __init__(self, 
                  mode: str,
@@ -366,7 +287,7 @@ class DisentangledASLNet(nn.Module):
                  log_var_att_min: float = 0.0,
                  log_var_att_max: float = 14.0,
                  moe: Optional[Dict[str, Any]] = None,
-                 encoder_type: str = 'conv1d',
+                 encoder_type: str = 'physics_processor',
                  **kwargs):
         super().__init__()
         
@@ -374,28 +295,15 @@ class DisentangledASLNet(nn.Module):
         self.encoder_frozen = False
         
         if encoder_type.lower() == 'physics_processor':
-            # --- FIX 1 (CRITICAL): Remove redundant **kwargs from the CALL ---
             self.encoder = PhysicsInformedASLProcessor(
                 n_plds=n_plds, 
                 feature_dim=kwargs.get('transformer_d_model_focused'),
                 nhead=kwargs.get('transformer_nhead_model'),
                 dropout_rate=kwargs.get('dropout_rate')
             )
-            fused_feature_size = 256
-        
-        elif encoder_type.lower() == 'conv1d':
-            # --- FIX 2 (ROBUSTNESS): Make this call explicit and consistent ---
-            self.encoder = DisentangledEncoderConv1D(
-                n_plds=n_plds,
-                dropout_rate=kwargs.get('dropout_rate'),
-                transformer_d_model_focused=kwargs.get('transformer_d_model_focused'),
-                transformer_nhead_model=kwargs.get('transformer_nhead_model'),
-                **kwargs
-            )
-            fused_feature_size = self.encoder.att_d_model + 64
-        
+            fused_feature_size = 256 # Output of the final_fusion_mlp
         else:
-            raise ValueError(f"Unknown encoder_type: '{encoder_type}'. Must be 'conv1d' or 'physics_processor'.")
+            raise ValueError(f"Unknown encoder_type: '{encoder_type}'. Only 'physics_processor' is supported in this version.")
         
         dropout_rate = kwargs.get('dropout_rate', 0.1)
 

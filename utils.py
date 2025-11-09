@@ -55,23 +55,24 @@ def _worker_generate_sample(args_tuple):
     simulator, plds, seed = args_tuple
     np.random.seed(seed) # Ensure each worker has a different random stream
 
-    # Generate one subject with random physiological parameters
-    # The specific condition ('healthy', 'stroke', etc.) doesn't matter as much as
-    # covering the full range of CBF/ATT values for robust stats.
     physio_var = simulator.physio_var
     true_att = np.random.uniform(*physio_var.att_range)
     true_cbf = np.random.uniform(*physio_var.cbf_range)
     true_t1_artery = np.random.uniform(*physio_var.t1_artery_range)
     
-    # Generate the clean signal (noise will be added later if needed, but for stats we care about the signal distribution)
+    # Generate the clean signal
     vsasl_clean = simulator._generate_vsasl_signal(plds, true_att, true_cbf, true_t1_artery, simulator.params.alpha_VSASL)
     pcasl_clean = simulator._generate_pcasl_signal(plds, true_att, true_cbf, true_t1_artery, simulator.params.T_tau, simulator.params.alpha_PCASL)
     raw_signal_vector = np.concatenate([pcasl_clean, vsasl_clean])
     
-    # Calculate amplitude from the raw signal vector
-    amplitude = np.linalg.norm(raw_signal_vector)
+    # Calculate V4 scalar features from the clean signal
+    pcasl_amp = np.linalg.norm(pcasl_clean)
+    vsasl_amp = np.linalg.norm(vsasl_clean)
+    log_ratio = np.log(pcasl_amp / (vsasl_amp + 1e-6))
+    eng_features = engineer_signal_features(raw_signal_vector, len(plds))
+    scalar_features = np.array([pcasl_amp, vsasl_amp, log_ratio, *eng_features])
     
-    return pcasl_clean, vsasl_clean, true_cbf, true_att, amplitude
+    return pcasl_clean, vsasl_clean, true_cbf, true_att, scalar_features
 
 
 class ParallelStreamingStatsCalculator:
@@ -85,6 +86,7 @@ class ParallelStreamingStatsCalculator:
         self.num_samples = num_samples
         self.num_workers = num_workers
         self.num_plds = len(plds)
+        self.num_scalar_features = 7 # pcasl_amp, vsasl_amp, log_ratio, 2xTTP, 2xCOM
 
         # Initialize statistics using Welford's algorithm components
         self.count = 0
@@ -94,7 +96,8 @@ class ParallelStreamingStatsCalculator:
         self.vsasl_m2 = np.zeros(self.num_plds)
         self.cbf_mean, self.cbf_m2 = 0.0, 0.0
         self.att_mean, self.att_m2 = 0.0, 0.0
-        self.amp_mean, self.amp_m2 = 0.0, 0.0
+        self.scalar_mean = np.zeros(self.num_scalar_features)
+        self.scalar_m2 = np.zeros(self.num_scalar_features)
 
     def _update_stats(self, existing_agg, new_value):
         """Welford's algorithm for single pass variance calculation."""
@@ -109,31 +112,28 @@ class ParallelStreamingStatsCalculator:
         """Runs the parallel calculation and returns the final norm_stats dict."""
         print(f"Calculating normalization stats over {self.num_samples} samples using {self.num_workers} workers...")
         
-        # Prepare arguments for all worker processes
         base_seed = int(time.time())
         worker_args = [(self.simulator, self.plds, base_seed + i) for i in range(self.num_samples)]
         
         with mp.Pool(processes=self.num_workers) as pool:
-            # Use imap_unordered for efficiency, as order doesn't matter for stats
             results_iterator = pool.imap_unordered(_worker_generate_sample, worker_args)
             
-            for pcasl, vsasl, cbf, att, amp in results_iterator:
+            for pcasl, vsasl, cbf, att, scalars in results_iterator:
                 self.count += 1
                 self.pcasl_mean, self.pcasl_m2 = self._update_stats((self.pcasl_mean, self.pcasl_m2), pcasl)
                 self.vsasl_mean, self.vsasl_m2 = self._update_stats((self.vsasl_mean, self.vsasl_m2), vsasl)
                 self.cbf_mean, self.cbf_m2 = self._update_stats((self.cbf_mean, self.cbf_m2), cbf)
                 self.att_mean, self.att_m2 = self._update_stats((self.att_mean, self.att_m2), att)
-                self.amp_mean, self.amp_m2 = self._update_stats((self.amp_mean, self.amp_m2), amp)
+                self.scalar_mean, self.scalar_m2 = self._update_stats((self.scalar_mean, self.scalar_m2), scalars)
 
         if self.count < 2:
-            return {} # Not enough data to calculate variance
+            return {}
 
-        # Finalize calculations: compute variance from M2 and then std dev
         pcasl_std = np.sqrt(self.pcasl_m2 / self.count)
         vsasl_std = np.sqrt(self.vsasl_m2 / self.count)
         cbf_std = np.sqrt(self.cbf_m2 / self.count)
         att_std = np.sqrt(self.att_m2 / self.count)
-        amp_std = np.sqrt(self.amp_m2 / self.count)
+        scalar_std = np.sqrt(self.scalar_m2 / self.count)
 
         return {
             'pcasl_mean': self.pcasl_mean.tolist(),
@@ -141,11 +141,11 @@ class ParallelStreamingStatsCalculator:
             'vsasl_mean': self.vsasl_mean.tolist(),
             'vsasl_std': np.clip(vsasl_std, 1e-6, None).tolist(),
             'y_mean_cbf': self.cbf_mean,
-            'y_std_cbf': max(cbf_std, 1e-6),
+            'y_std_cbf': max(float(cbf_std), 1e-6),
             'y_mean_att': self.att_mean,
-            'y_std_att': max(att_std, 1e-6),
-            'amplitude_mean': self.amp_mean,
-            'amplitude_std': max(amp_std, 1e-6)
+            'y_std_att': max(float(att_std), 1e-6),
+            'scalar_features_mean': self.scalar_mean.tolist(),
+            'scalar_features_std': np.clip(scalar_std, 1e-6, None).tolist()
         }
     
 def get_grid_search_initial_guess(

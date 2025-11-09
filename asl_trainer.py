@@ -25,9 +25,9 @@ if not logger.hasHandlers():
     logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(name)s - %(levelname)s - %(message)s')
 
 class ASLInMemoryDataset(Dataset):
-    def __init__(self, data_dir: Optional[str], norm_stats: dict, stage: int, disentangled_mode: bool = False, num_samples_to_load: Optional[int] = None):
+    def __init__(self, data_dir: Optional[str], norm_stats: dict, stage: int, num_samples_to_load: Optional[int] = None):
         self.data_dir = Path(data_dir) if data_dir else None; self.norm_stats = norm_stats
-        self.stage = stage; self.disentangled_mode = disentangled_mode
+        self.stage = stage
         self.num_plds = len(norm_stats.get('pcasl_mean', []))
         if self.data_dir:
             logger.info(f"Loading dataset chunks from {self.data_dir} for stage {self.stage}..."); 
@@ -68,16 +68,32 @@ class ASLInMemoryDataset(Dataset):
             self.params_unnormalized = np.empty(0)
 
     def _process_signals(self, signals_unnorm: np.ndarray) -> np.ndarray:
-        raw, eng = signals_unnorm[:, :self.num_plds*2], signals_unnorm[:, self.num_plds*2:]
-        if self.disentangled_mode:
-            amp = np.linalg.norm(raw, axis=1, keepdims=True) + 1e-6; shape = raw / amp
-            amp_norm = (amp - self.norm_stats['amplitude_mean']) / (self.norm_stats['amplitude_std'] + 1e-6)
-            return np.concatenate([shape, eng, amp_norm], axis=1)
-        else:
-            p_raw, v_raw = raw[:, :self.num_plds], raw[:, self.num_plds:]; p_mean, p_std = np.array(self.norm_stats['pcasl_mean']), np.array(self.norm_stats['pcasl_std']) + 1e-6
-            v_mean, v_std = np.array(self.norm_stats['vsasl_mean']), np.array(self.norm_stats['vsasl_std']) + 1e-6
-            p_norm = (p_raw - p_mean) / p_std; v_norm = (v_raw - v_mean) / v_std
-            return np.concatenate([p_norm, v_norm, eng], axis=1)
+        # V4 Preprocessing: Separate standardization, calculate & standardize 7 scalar features.
+        raw_curves = signals_unnorm[:, :self.num_plds * 2]
+        eng_ttp_com = signals_unnorm[:, self.num_plds * 2:]
+
+        pcasl_curves_raw = raw_curves[:, :self.num_plds]
+        vsasl_curves_raw = raw_curves[:, self.num_plds:]
+
+        # 1. Standardize curves separately
+        p_mean, p_std = np.array(self.norm_stats['pcasl_mean']), np.array(self.norm_stats['pcasl_std']) + 1e-6
+        v_mean, v_std = np.array(self.norm_stats['vsasl_mean']), np.array(self.norm_stats['vsasl_std']) + 1e-6
+        pcasl_norm = (pcasl_curves_raw - p_mean) / p_std
+        vsasl_norm = (vsasl_curves_raw - v_mean) / v_std
+
+        # 2. Calculate amp/log_ratio features from raw curves
+        pcasl_amp = np.linalg.norm(pcasl_curves_raw, axis=1, keepdims=True)
+        vsasl_amp = np.linalg.norm(vsasl_curves_raw, axis=1, keepdims=True)
+        log_ratio = np.log(pcasl_amp / (vsasl_amp + 1e-6))
+
+        # 3. Assemble and standardize all 7 scalar features
+        scalar_features_unnorm = np.concatenate([pcasl_amp, vsasl_amp, log_ratio, eng_ttp_com], axis=1)
+        s_mean = np.array(self.norm_stats['scalar_features_mean'])
+        s_std = np.array(self.norm_stats['scalar_features_std']) + 1e-6
+        scalar_features_norm = (scalar_features_unnorm - s_mean) / s_std
+
+        # 4. Concatenate final input vector
+        return np.concatenate([pcasl_norm, vsasl_norm, scalar_features_norm], axis=1)
 
     def _normalize_params(self, params_unnorm: np.ndarray) -> np.ndarray:
         cbf, att = params_unnorm[:, 0], params_unnorm[:, 1]
@@ -90,11 +106,11 @@ class ASLInMemoryDataset(Dataset):
 
 class ASLIterableDataset(IterableDataset):
     def __init__(self, simulator: RealisticASLSimulator, plds: np.ndarray, 
-                 noise_levels: List[float], norm_stats: Dict, stage: int, disentangled_mode: bool = False):
+                 noise_levels: List[float], norm_stats: Dict, stage: int):
         super().__init__(); self.simulator, self.plds, self.num_plds = simulator, plds, len(plds)
         self.noise_levels, self.norm_stats, self.stage = noise_levels, norm_stats, stage
         self.base_params, self.physio_var = simulator.params, simulator.physio_var
-        self.disentangled_mode = disentangled_mode
+
     def __iter__(self):
         worker_info = torch.utils.data.get_worker_info()
         seed = worker_info.id + int(time.time() * 1000) if worker_info else int(time.time() * 1000)
@@ -110,18 +126,26 @@ class ASLIterableDataset(IterableDataset):
                 
                 vsasl_noisy = self.simulator.add_realistic_noise(vsasl_clean, snr=snr)
                 pcasl_noisy = self.simulator.add_realistic_noise(pcasl_clean, snr=snr)
-                noisy_signal = np.concatenate([pcasl_noisy, vsasl_noisy])
                 
-                eng_feat = engineer_signal_features(noisy_signal, self.num_plds)
+                # V4 Preprocessing for on-the-fly data
+                # 1. Standardize curves separately
+                p_norm = (pcasl_noisy - self.norm_stats['pcasl_mean']) / (np.array(self.norm_stats['pcasl_std']) + 1e-6)
+                v_norm = (vsasl_noisy - self.norm_stats['vsasl_mean']) / (np.array(self.norm_stats['vsasl_std']) + 1e-6)
+
+                # 2. Calculate amp/log_ratio and engineered features from noisy curves
+                pcasl_amp = np.linalg.norm(pcasl_noisy)
+                vsasl_amp = np.linalg.norm(vsasl_noisy)
+                log_ratio = np.log(pcasl_amp / (vsasl_amp + 1e-6))
+                eng_feat_ttp_com = engineer_signal_features(np.concatenate([pcasl_noisy, vsasl_noisy]), self.num_plds)
+
+                # 3. Assemble and standardize all 7 scalar features
+                scalar_features_unnorm = np.array([pcasl_amp, vsasl_amp, log_ratio, *eng_feat_ttp_com])
+                s_mean = np.array(self.norm_stats['scalar_features_mean'])
+                s_std = np.array(self.norm_stats['scalar_features_std']) + 1e-6
+                scalar_features_norm = (scalar_features_unnorm - s_mean) / s_std
                 
-                if self.disentangled_mode:
-                    amp = np.linalg.norm(noisy_signal) + 1e-6; shape = noisy_signal / amp
-                    amp_norm = (amp - self.norm_stats['amplitude_mean']) / (self.norm_stats['amplitude_std'] + 1e-6)
-                    final_input = np.concatenate([shape, eng_feat.flatten(), np.array([amp_norm])])
-                else:
-                    p_norm = (noisy_signal[:self.num_plds] - self.norm_stats['pcasl_mean']) / (np.array(self.norm_stats['pcasl_std']) + 1e-6)
-                    v_norm = (noisy_signal[self.num_plds:] - self.norm_stats['vsasl_mean']) / (np.array(self.norm_stats['vsasl_std']) + 1e-6)
-                    final_input = np.concatenate([p_norm, v_norm, eng_feat.flatten()])
+                # 4. Concatenate final input vector
+                final_input = np.concatenate([p_norm, v_norm, scalar_features_norm])
                 
                 if self.stage == 1:
                     target = clean_signal
@@ -196,7 +220,6 @@ class EnhancedASLTrainer:
                     unwrapped_model = getattr(self.models[i], '_orig_mod', self.models[i])
                     
                     if self.stage == 1:
-                        # --- BUG FIX: Only save the encoder from the first model in Stage 1 ---
                         if i == 0:
                             model_path = output_dir / 'encoder_pretrained.pt'
                             torch.save(unwrapped_model.encoder.state_dict(), model_path)
@@ -222,7 +245,7 @@ class EnhancedASLTrainer:
                 signals, targets = signals.to(self.device), targets.to(self.device)
                 optimizers[model_idx].zero_grad(set_to_none=True)
                 
-                with torch.amp.autocast(device_type=self.device.type, dtype=torch.bfloat16):
+                with torch.amp.autocautocast(device_type=self.device.type, dtype=torch.bfloat16):
                     outputs = model(signals)
                     loss, comps = self.custom_loss_fn(model_outputs=outputs, targets=targets, global_epoch=epoch)
                 
