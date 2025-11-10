@@ -68,6 +68,7 @@ class ResearchConfig:
     num_samples: int = 1000000
     pretrained_encoder_path: Optional[str] = None
     moe: Optional[Dict[str, Any]] = None
+    fine_tuning: Optional[Dict[str, Any]] = None # ADDED: To hold fine-tuning config
     transformer_d_model_focused: int = 32      
     transformer_nhead_model: int = 4
     transformer_nlayers_model: int = 2
@@ -155,7 +156,9 @@ def run_comprehensive_asl_research(config: ResearchConfig, stage: int, output_di
                                  weight_decay=config.weight_decay, batch_size=config.batch_size, 
                                  n_ensembles=config.n_ensembles, device=device)
     
-    fine_tuning_cfg = None
+    # MODIFIED: Use the fine_tuning config from the ResearchConfig object
+    fine_tuning_cfg = config.fine_tuning if stage == 2 else None
+    
     if stage == 2:
         script_logger.info(f"Loading pre-trained encoder weights from: {config.pretrained_encoder_path}")
         encoder_state_dict = torch.load(config.pretrained_encoder_path, map_location=device)
@@ -165,7 +168,12 @@ def run_comprehensive_asl_research(config: ResearchConfig, stage: int, output_di
                 model.encoder.load_state_dict(encoder_state_dict, strict=True)
                 num_loaded += 1
         script_logger.info(f"Successfully loaded pre-trained weights into {num_loaded} model encoders.")
-        fine_tuning_cfg = {'enabled': True}
+        # Ensure fine_tuning_cfg is a dict if stage 2 is active
+        if fine_tuning_cfg is None:
+            fine_tuning_cfg = {'enabled': True}
+        else:
+            fine_tuning_cfg['enabled'] = True
+
 
     script_logger.info(f"Training {config.n_ensembles}-model ensemble for {config.n_epochs} epochs...")
     training_start_time = time.time()
@@ -229,21 +237,22 @@ if __name__ == "__main__":
     if not config_from_yaml:
         script_logger.error(f"FATAL: Configuration file {config_path} is empty or invalid.")
         sys.exit(1)
-
+    
+    # MODIFIED: Logic to correctly parse special dictionary sections like 'moe' and 'fine_tuning'
     for section, params in config_from_yaml.items():
-        if not isinstance(params, dict):
+        if isinstance(params, dict):
+             if hasattr(config_obj, section):
+                setattr(config_obj, section, params)
+        else: # Handle top-level keys
             if hasattr(config_obj, section):
                 setattr(config_obj, section, params)
-            continue
-        
-        if section == 'moe':
-            if hasattr(config_obj, 'moe'):
-                setattr(config_obj, 'moe', params)
-            continue
-            
-        for key, value in params.items():
-            if hasattr(config_obj, key):
-                setattr(config_obj, key, value)
+
+    # Now, iterate through nested dictionaries
+    for section, params in config_from_yaml.items():
+        if section in ['training', 'data', 'simulation', 'wandb'] and isinstance(params, dict):
+            for key, value in params.items():
+                if hasattr(config_obj, key):
+                    setattr(config_obj, key, value)
     
     script_logger.info(f"Successfully loaded and applied configuration from {config_path}")
     

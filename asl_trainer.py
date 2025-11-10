@@ -131,12 +131,12 @@ class EnhancedASLTrainer:
         logger.info(f"--- Starting Stage {self.stage} {run_type} for {n_epochs} epochs ---")
         
         if is_finetuning:
-            # V5 FIX: Implement discriminative learning rates instead of freezing
-            lr_finetune_encoder = fine_tuning_config.get('encoder_lr', self.lr_base / 20.0)
+            # V5 FIX: Implement discriminative learning rates based on config
+            lr_factor = fine_tuning_config.get('encoder_lr_factor', 20.0)
+            lr_finetune_encoder = self.lr_base / lr_factor
             logger.info(f"--- Discriminative Fine-tuning: Unfreezing encoder with LR={lr_finetune_encoder} and Head LR={self.lr_base} ---")
             self.optimizers = []
             for m in self.models:
-                # Ensure all parameters are trainable
                 if hasattr(m, 'unfreeze_all'): m.unfreeze_all()
                 
                 param_groups = [
