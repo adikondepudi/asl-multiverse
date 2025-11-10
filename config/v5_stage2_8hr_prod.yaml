@@ -1,17 +1,17 @@
-# FILE: config/v5_stage2_tuned_8hr.yaml
+# FILE: config/v5_stage2_8hr_prod.yaml
 # TUNED 8-hour configuration for Stage 2.
-# Fine-tunes on a larger, 4M sample subset to improve generalization.
+# Implements discriminative fine-tuning and stronger regularization to prevent overfitting.
 
 training:
   model_class_name: "DisentangledASLNet"
   encoder_type: "physics_processor"
   
   hidden_sizes: [512, 256, 128]
-  dropout_rate: 0.0878
-  weight_decay: 0.0000138
+  dropout_rate: 0.15          # INCREASED: More regularization for the head.
+  weight_decay: 0.0001        # INCREASED: More regularization for the head.
   log_var_reg_lambda: 0.05
 
-  learning_rate: 0.00005
+  learning_rate: 0.00005      # This is now the LR for the HEAD only.
   batch_size: 8192
   n_ensembles: 5
 
@@ -31,6 +31,11 @@ training:
   transformer_d_model_focused: 32
   transformer_nhead_model: 4
   transformer_nlayers_model: 2
+
+# NEW SECTION: Controls the discriminative fine-tuning behavior
+fine_tuning:
+  enabled: true
+  encoder_lr_factor: 20.0 # Encoder LR will be learning_rate / this factor
 
 moe:
   num_experts: 4

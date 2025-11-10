@@ -131,16 +131,26 @@ class EnhancedASLTrainer:
         logger.info(f"--- Starting Stage {self.stage} {run_type} for {n_epochs} epochs ---")
         
         if is_finetuning:
-            logger.info(f"--- Fine-tuning Mode: Freezing encoder and creating optimizer for head parameters. ---")
+            # V5 FIX: Implement discriminative learning rates instead of freezing
+            lr_finetune_encoder = fine_tuning_config.get('encoder_lr', self.lr_base / 20.0)
+            logger.info(f"--- Discriminative Fine-tuning: Unfreezing encoder with LR={lr_finetune_encoder} and Head LR={self.lr_base} ---")
+            self.optimizers = []
             for m in self.models:
-                if hasattr(m, 'freeze_encoder'): m.freeze_encoder()
-            self.optimizers = [torch.optim.AdamW(filter(lambda p: p.requires_grad, m.parameters()), lr=self.lr_base, weight_decay=self.weight_decay) for m in self.models]
+                # Ensure all parameters are trainable
+                if hasattr(m, 'unfreeze_all'): m.unfreeze_all()
+                
+                param_groups = [
+                    {'params': m.encoder.parameters(), 'lr': lr_finetune_encoder},
+                    {'params': m.head.parameters(), 'lr': self.lr_base}
+                ]
+                self.optimizers.append(torch.optim.AdamW(param_groups, weight_decay=self.weight_decay))
         else:
             logger.info(f"--- Standard Training Mode: Creating optimizer for all parameters. ---")
             self.optimizers = [torch.optim.AdamW(m.parameters(), lr=self.lr_base, weight_decay=self.weight_decay) for m in self.models]
         
         total_steps = steps_per_epoch * n_epochs
-        self.schedulers = [torch.optim.lr_scheduler.OneCycleLR(opt, max_lr=self.lr_base, total_steps=total_steps) for opt in self.optimizers]
+        # Scheduler now correctly handles multiple parameter groups with different LRs
+        self.schedulers = [torch.optim.lr_scheduler.OneCycleLR(opt, max_lr=[pg['lr'] for pg in opt.param_groups], total_steps=total_steps) for opt in self.optimizers]
         
         patience_counters = [0] * self.n_ensembles; self.overall_best_val_losses = [float('inf')] * self.n_ensembles
         
@@ -199,7 +209,10 @@ class EnhancedASLTrainer:
                 if model_idx == 0: total_loss += loss.item()
                 
                 if wandb.run and model_idx == 0 and self.global_step % 20 == 0:
-                    log_dict = {"train/total_loss": loss.item(), "train/learning_rate": schedulers[model_idx].get_last_lr()[0]}
+                    lrs = schedulers[model_idx].get_last_lr()
+                    log_dict = {"train/total_loss": loss.item(), "train/lr_head": lrs[-1]}
+                    if len(lrs) > 1: log_dict["train/lr_encoder"] = lrs[0]
+
                     if self.stage == 1:
                         log_dict["train_comps/denoising_loss"] = comps.get('denoising_loss', torch.tensor(0.0)).item()
                     else: # stage 2
