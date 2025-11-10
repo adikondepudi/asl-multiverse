@@ -68,7 +68,7 @@ class ResearchConfig:
     num_samples: int = 1000000
     pretrained_encoder_path: Optional[str] = None
     moe: Optional[Dict[str, Any]] = None
-    fine_tuning: Optional[Dict[str, Any]] = None # ADDED: To hold fine-tuning config
+    fine_tuning: Optional[Dict[str, Any]] = None
     transformer_d_model_focused: int = 32      
     transformer_nhead_model: int = 4
     transformer_nlayers_model: int = 2
@@ -92,7 +92,7 @@ def run_comprehensive_asl_research(config: ResearchConfig, stage: int, output_di
     if stage == 1:
         script_logger.info("Mode: Self-supervised denoising autoencoder training.")
     elif stage == 2:
-        script_logger.info("Mode: Supervised regression head fine-tuning with frozen encoder.")
+        script_logger.info("Mode: Supervised regression head fine-tuning.")
 
     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
     script_logger.info(f"Using device: {device}")
@@ -122,8 +122,8 @@ def run_comprehensive_asl_research(config: ResearchConfig, stage: int, output_di
         noise_levels=[5.0, 10.0, 15.0]
     )
     val_signals_noisy_raw = validation_data_dict['signals']
+    # NOTE: For validation, engineered features are calculated from noisy curves to simulate real-world usage
     val_features_eng = engineer_signal_features(val_signals_noisy_raw, num_plds)
-    # The offline dataset format: raw curves followed by engineered features (TTP, COM)
     val_signals_for_processing = np.concatenate([val_signals_noisy_raw, val_features_eng], axis=1)
 
     val_dataset = ASLInMemoryDataset(data_dir=None, norm_stats=norm_stats, stage=stage)
@@ -156,7 +156,6 @@ def run_comprehensive_asl_research(config: ResearchConfig, stage: int, output_di
                                  weight_decay=config.weight_decay, batch_size=config.batch_size, 
                                  n_ensembles=config.n_ensembles, device=device)
     
-    # MODIFIED: Use the fine_tuning config from the ResearchConfig object
     fine_tuning_cfg = config.fine_tuning if stage == 2 else None
     
     if stage == 2:
@@ -168,11 +167,10 @@ def run_comprehensive_asl_research(config: ResearchConfig, stage: int, output_di
                 model.encoder.load_state_dict(encoder_state_dict, strict=True)
                 num_loaded += 1
         script_logger.info(f"Successfully loaded pre-trained weights into {num_loaded} model encoders.")
-        # Ensure fine_tuning_cfg is a dict if stage 2 is active
         if fine_tuning_cfg is None:
-            fine_tuning_cfg = {'enabled': True}
+            fine_tuning_cfg = {'enabled': True} # Default to fine-tuning if stage 2
         else:
-            fine_tuning_cfg['enabled'] = True
+            fine_tuning_cfg['enabled'] = fine_tuning_cfg.get('enabled', True)
 
 
     script_logger.info(f"Training {config.n_ensembles}-model ensemble for {config.n_epochs} epochs...")
@@ -209,6 +207,16 @@ def run_comprehensive_asl_research(config: ResearchConfig, stage: int, output_di
         
     return {}
 
+def _apply_config_recursively(config_obj: Any, config_dict: Dict):
+    """Recursively applies YAML config values to a dataclass object."""
+    for key, value in config_dict.items():
+        if hasattr(config_obj, key):
+            # If the attribute is a dictionary, recurse
+            if isinstance(getattr(config_obj, key), dict) and isinstance(value, dict):
+                _apply_config_recursively(getattr(config_obj, key), value)
+            else:
+                setattr(config_obj, key, value)
+
 if __name__ == "__main__":
     logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(name)s - %(levelname)s - %(message)s', handlers=[logging.StreamHandler(sys.stdout)], force=True) 
     
@@ -238,21 +246,8 @@ if __name__ == "__main__":
         script_logger.error(f"FATAL: Configuration file {config_path} is empty or invalid.")
         sys.exit(1)
     
-    # MODIFIED: Logic to correctly parse special dictionary sections like 'moe' and 'fine_tuning'
-    for section, params in config_from_yaml.items():
-        if isinstance(params, dict):
-             if hasattr(config_obj, section):
-                setattr(config_obj, section, params)
-        else: # Handle top-level keys
-            if hasattr(config_obj, section):
-                setattr(config_obj, section, params)
-
-    # Now, iterate through nested dictionaries
-    for section, params in config_from_yaml.items():
-        if section in ['training', 'data', 'simulation', 'wandb'] and isinstance(params, dict):
-            for key, value in params.items():
-                if hasattr(config_obj, key):
-                    setattr(config_obj, key, value)
+    # NEW ROBUST PARSING LOGIC
+    _apply_config_recursively(config_obj, config_from_yaml)
     
     script_logger.info(f"Successfully loaded and applied configuration from {config_path}")
     
