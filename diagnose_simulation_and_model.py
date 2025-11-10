@@ -1,7 +1,7 @@
 # FILE: diagnose_simulation_and_model.py
-# FINAL CORRECTED VERSION
-# This version removes the "inverse crime" by simulating realistic physiological
-# uncertainty for every data point, creating a fair comparison for both models.
+# FINAL CORRECTED VERSION (V4 Architecture)
+# This version is updated to use the robust V4 preprocessing pipeline, ensuring
+# compatibility with the new model architecture and providing a fair comparison.
 
 import torch
 import numpy as np
@@ -21,12 +21,10 @@ warnings.filterwarnings("ignore", category=RuntimeWarning, message="Mean of empt
 # --- Import from project codebase ---
 try:
     from asl_simulation import ASLSimulator, ASLParameters
-    # CORRECT: Import PhysiologicalVariation to introduce realistic uncertainty
     from enhanced_simulation import PhysiologicalVariation
     from enhanced_asl_network import DisentangledASLNet
     from multiverse_functions import fit_PCVSASL_misMatchPLD_vectInit_pep
     from utils import get_grid_search_initial_guess, engineer_signal_features
-    from predict_on_invivo import apply_normalization_disentangled, denormalize_predictions
 except ImportError as e:
     print(f"FATAL: Could not import necessary project files. Error: {e}")
     print("Please run this script from the root directory of the 'adikondepudi-asl-multiverse' project.")
@@ -36,9 +34,47 @@ except ImportError as e:
 NUM_SIMS_PER_DATAPOINT = 500 # Number of unique realizations per ground truth point
 
 # ==============================================================================
-# HELPER FUNCTIONS (LOADING & PREDICTION)
+# V4-SPECIFIC HELPER FUNCTIONS
 # ==============================================================================
-# These functions remain unchanged as they correctly perform their specific tasks.
+
+def preprocess_for_v4_model(raw_signal_curves: np.ndarray, eng_features: np.ndarray, norm_stats: dict, num_plds: int) -> np.ndarray:
+    """
+    Applies the V4 preprocessing pipeline to a single sample.
+    This exactly mirrors the logic in ASLInMemoryDataset._process_signals.
+    """
+    pcasl_curves_raw = raw_signal_curves[:num_plds]
+    vsasl_curves_raw = raw_signal_curves[num_plds:]
+
+    # 1. Standardize curves separately
+    p_mean, p_std = np.array(norm_stats['pcasl_mean']), np.array(norm_stats['pcasl_std']) + 1e-6
+    v_mean, v_std = np.array(norm_stats['vsasl_mean']), np.array(norm_stats['vsasl_std']) + 1e-6
+    pcasl_norm = (pcasl_curves_raw - p_mean) / p_std
+    vsasl_norm = (vsasl_curves_raw - v_mean) / v_std
+
+    # 2. Calculate amp/log_ratio features from raw curves
+    pcasl_amp = np.linalg.norm(pcasl_curves_raw)
+    vsasl_amp = np.linalg.norm(vsasl_curves_raw)
+    log_ratio = np.log(pcasl_amp / (vsasl_amp + 1e-6))
+
+    # 3. Assemble and standardize all 7 scalar features
+    scalar_features_unnorm = np.array([pcasl_amp, vsasl_amp, log_ratio, *eng_features])
+    s_mean = np.array(norm_stats['scalar_features_mean'])
+    s_std = np.array(norm_stats['scalar_features_std']) + 1e-6
+    scalar_features_norm = (scalar_features_unnorm - s_mean) / s_std
+
+    # 4. Concatenate final input vector and reshape for batch processing
+    final_input = np.concatenate([pcasl_norm, vsasl_norm, scalar_features_norm])
+    return final_input.reshape(1, -1).astype(np.float32)
+
+def denormalize_predictions(cbf_norm: float, att_norm: float, norm_stats: dict) -> tuple:
+    """Denormalizes CBF and ATT predictions."""
+    cbf = cbf_norm * norm_stats['y_std_cbf'] + norm_stats['y_mean_cbf']
+    att = att_norm * norm_stats['y_std_att'] + norm_stats['y_mean_att']
+    return cbf, att
+
+# ==============================================================================
+# LOADING & PREDICTION FUNCTIONS
+# ==============================================================================
 
 def load_artifacts(model_results_root: Path) -> tuple:
     """Robustly loads the model ensemble, config, and norm stats."""
@@ -54,7 +90,8 @@ def load_artifacts(model_results_root: Path) -> tuple:
         num_plds = len(config['pld_values'])
         
         model_class = DisentangledASLNet
-        base_input_size = num_plds * 2 + 4 + 1 
+        # V4 FIX: Input size is num_plds*2 (curves) + 7 (scalar features)
+        base_input_size = num_plds * 2 + 7
 
         for model_path in models_dir.glob('ensemble_model_*.pt'):
             model = model_class(mode='regression', input_size=base_input_size, **config)
@@ -76,12 +113,12 @@ def load_artifacts(model_results_root: Path) -> tuple:
         sys.exit(1)
 
 def predict_nn_single_voxel(noisy_signal: np.ndarray, models: list, config: dict, norm_stats: dict, device: torch.device) -> tuple:
-    """Runs a single voxel through the NN pipeline."""
+    """Runs a single voxel through the NN pipeline using V4 preprocessing."""
     num_plds = len(config['pld_values'])
     eng_feats = engineer_signal_features(noisy_signal, num_plds)
-    nn_input_unnorm = np.concatenate([noisy_signal, eng_feats]).reshape(1, -1)
     
-    norm_input = apply_normalization_disentangled(nn_input_unnorm, norm_stats, num_plds)
+    # V4 FIX: Use the new preprocessing logic
+    norm_input = preprocess_for_v4_model(noisy_signal, eng_feats, norm_stats, num_plds)
     input_tensor = torch.from_numpy(norm_input).to(device, dtype=torch.bfloat16)
 
     with torch.no_grad():
@@ -91,7 +128,7 @@ def predict_nn_single_voxel(noisy_signal: np.ndarray, models: list, config: dict
     nn_cbf_pred_norm = np.mean([item.item() for item in cbf_means])
     nn_att_pred_norm = np.mean([item.item() for item in att_means])
 
-    nn_cbf_pred, nn_att_pred, _, _ = denormalize_predictions(nn_cbf_pred_norm, nn_att_pred_norm, None, None, norm_stats)
+    nn_cbf_pred, nn_att_pred = denormalize_predictions(nn_cbf_pred_norm, nn_att_pred_norm, norm_stats)
     return nn_cbf_pred, nn_att_pred
 
 def predict_ls_single_voxel(noisy_signal: np.ndarray, plds: np.ndarray, ls_params: dict) -> tuple:
@@ -158,29 +195,23 @@ def run_full_scenario(scenario_params: dict, simulator: ASLSimulator, plds: np.n
 
     results = []
     
-    # Instantiate the ranges for realistic physiological variation
     physio_var = PhysiologicalVariation()
     base_params = simulator.params
 
     param_iterator = scenario_params['iterator']
     for gt_cbf, gt_att in tqdm(param_iterator, desc=f"Simulating {scenario_name}"):
         
-        # For each ground truth (CBF, ATT) point, run 'num_sims' trials.
-        # CRUCIALLY, each trial has a different, unique set of underlying physical parameters.
         for _ in range(num_sims):
             
-            # 1. PERTURB PARAMETERS: Create a realistic "subject" where the true physical
-            #    parameters are slightly different from the textbook values.
             true_t1_artery = np.random.uniform(*physio_var.t1_artery_range)
             perturbed_t_tau = base_params.T_tau * (1 + np.random.uniform(*physio_var.t_tau_perturb_range))
             perturbed_alpha_pcasl = np.clip(base_params.alpha_PCASL * (1 + np.random.uniform(*physio_var.alpha_perturb_range)), 0.1, 1.1)
             perturbed_alpha_vsasl = np.clip(base_params.alpha_VSASL * (1 + np.random.uniform(*physio_var.alpha_perturb_range)), 0.1, 1.0)
 
-            # 2. GENERATE SIGNAL: Create the noisy signal using these true, perturbed parameters.
             data_dict = simulator.generate_synthetic_data(
                 plds,
                 att_values=np.array([gt_att]),
-                n_noise=1, # Generate one noise realization for this specific physical reality
+                n_noise=1,
                 tsnr=scenario_params['tsnr'],
                 cbf_val=gt_cbf,
                 t1_artery_val=true_t1_artery,
@@ -189,13 +220,9 @@ def run_full_scenario(scenario_params: dict, simulator: ASLSimulator, plds: np.n
                 alpha_vsasl_val=perturbed_alpha_vsasl
             )
             
-            signals = data_dict['MULTIVERSE'][0, 0, :, :] # Shape (n_plds, 2)
+            signals = data_dict['MULTIVERSE'][0, 0, :, :]
             noisy_signal = np.concatenate([signals[:, 0], signals[:, 1]])
             
-            # 3. EVALUATE MODELS: Both models see the same realistically imperfect signal.
-            # The NN relies on its robust training.
-            # The LS model is fairly given the standard, *unperturbed* parameters, simulating
-            # how it's used in practice (with textbook values).
             nn_cbf, nn_att = predict_nn_single_voxel(noisy_signal, **nn_args)
             ls_cbf, ls_att = predict_ls_single_voxel(noisy_signal, plds, **ls_args)
 
@@ -310,7 +337,6 @@ def main():
     asl_params = ASLParameters(**{k: v for k, v in config.items() if k in ASLParameters.__annotations__})
     simulator = ASLSimulator(params=asl_params)
     
-    # IMPORTANT: The LS model is given the standard, "textbook" parameters from the config.
     ls_params_dict = {k:v for k,v in config.items() if k in ['T1_artery','T_tau','T2_factor','alpha_BS1','alpha_PCASL','alpha_VSASL']}
     
     nn_args = {'models': models, 'config': config, 'norm_stats': norm_stats, 'device': device}

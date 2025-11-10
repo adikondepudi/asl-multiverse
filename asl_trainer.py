@@ -245,7 +245,7 @@ class EnhancedASLTrainer:
                 signals, targets = signals.to(self.device), targets.to(self.device)
                 optimizers[model_idx].zero_grad(set_to_none=True)
                 
-                with torch.amp.autocautocast(device_type=self.device.type, dtype=torch.bfloat16):
+                with torch.amp.autocast(device_type=self.device.type, dtype=torch.bfloat16):
                     outputs = model(signals)
                     loss, comps = self.custom_loss_fn(model_outputs=outputs, targets=targets, global_epoch=epoch)
                 
