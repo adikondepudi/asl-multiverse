@@ -49,7 +49,7 @@ def engineer_signal_features(raw_signal: np.ndarray, num_plds: int) -> np.ndarra
 # Top-level worker function for multiprocessing to be able to pickle it.
 def _worker_generate_sample(args_tuple):
     """
-    Generates a single raw data sample for statistics calculation.
+    Generates a single raw data sample for statistics calculation. (V5 version)
     This is run in a separate process.
     """
     simulator, plds, seed = args_tuple
@@ -65,20 +65,24 @@ def _worker_generate_sample(args_tuple):
     pcasl_clean = simulator._generate_pcasl_signal(plds, true_att, true_cbf, true_t1_artery, simulator.params.T_tau, simulator.params.alpha_PCASL)
     raw_signal_vector = np.concatenate([pcasl_clean, vsasl_clean])
     
-    # Calculate V4 scalar features from the clean signal
-    pcasl_amp = np.linalg.norm(pcasl_clean)
-    vsasl_amp = np.linalg.norm(vsasl_clean)
-    log_ratio = np.log(pcasl_amp / (vsasl_amp + 1e-6))
-    eng_features = engineer_signal_features(raw_signal_vector, len(plds))
-    scalar_features = np.array([pcasl_amp, vsasl_amp, log_ratio, *eng_features])
+    # V5: Perform per-instance normalization to get a pure shape vector
+    mu = np.mean(raw_signal_vector)
+    sigma = np.std(raw_signal_vector)
+    shape_vector = (raw_signal_vector - mu) / (sigma + 1e-6)
+
+    # V5: Calculate engineered features from the scale-invariant shape vector
+    eng_features = engineer_signal_features(shape_vector, len(plds))
     
-    return pcasl_clean, vsasl_clean, true_cbf, true_att, scalar_features
+    # V5: Assemble the 6 scalar features (scale, offset, and shape descriptors)
+    scalar_features = np.array([mu, sigma, *eng_features])
+    
+    return shape_vector, true_cbf, true_att, scalar_features
 
 
 class ParallelStreamingStatsCalculator:
     """
     Calculates normalization statistics in parallel using a streaming algorithm
-    (Welford's algorithm) to minimize memory usage.
+    (Welford's algorithm) to minimize memory usage. (V5 version)
     """
     def __init__(self, simulator, plds, num_samples, num_workers):
         self.simulator = simulator
@@ -86,14 +90,12 @@ class ParallelStreamingStatsCalculator:
         self.num_samples = num_samples
         self.num_workers = num_workers
         self.num_plds = len(plds)
-        self.num_scalar_features = 7 # pcasl_amp, vsasl_amp, log_ratio, 2xTTP, 2xCOM
+        self.num_scalar_features = 6 # V5: mu, sigma, 2xTTP, 2xCOM
 
         # Initialize statistics using Welford's algorithm components
         self.count = 0
-        self.pcasl_mean = np.zeros(self.num_plds)
-        self.pcasl_m2 = np.zeros(self.num_plds)
-        self.vsasl_mean = np.zeros(self.num_plds)
-        self.vsasl_m2 = np.zeros(self.num_plds)
+        self.shape_vector_mean = np.zeros(self.num_plds * 2)
+        self.shape_vector_m2 = np.zeros(self.num_plds * 2)
         self.cbf_mean, self.cbf_m2 = 0.0, 0.0
         self.att_mean, self.att_m2 = 0.0, 0.0
         self.scalar_mean = np.zeros(self.num_scalar_features)
@@ -118,10 +120,9 @@ class ParallelStreamingStatsCalculator:
         with mp.Pool(processes=self.num_workers) as pool:
             results_iterator = pool.imap_unordered(_worker_generate_sample, worker_args)
             
-            for pcasl, vsasl, cbf, att, scalars in results_iterator:
+            for shape_vec, cbf, att, scalars in results_iterator:
                 self.count += 1
-                self.pcasl_mean, self.pcasl_m2 = self._update_stats((self.pcasl_mean, self.pcasl_m2), pcasl)
-                self.vsasl_mean, self.vsasl_m2 = self._update_stats((self.vsasl_mean, self.vsasl_m2), vsasl)
+                self.shape_vector_mean, self.shape_vector_m2 = self._update_stats((self.shape_vector_mean, self.shape_vector_m2), shape_vec)
                 self.cbf_mean, self.cbf_m2 = self._update_stats((self.cbf_mean, self.cbf_m2), cbf)
                 self.att_mean, self.att_m2 = self._update_stats((self.att_mean, self.att_m2), att)
                 self.scalar_mean, self.scalar_m2 = self._update_stats((self.scalar_mean, self.scalar_m2), scalars)
@@ -129,17 +130,14 @@ class ParallelStreamingStatsCalculator:
         if self.count < 2:
             return {}
 
-        pcasl_std = np.sqrt(self.pcasl_m2 / self.count)
-        vsasl_std = np.sqrt(self.vsasl_m2 / self.count)
+        shape_vector_std = np.sqrt(self.shape_vector_m2 / self.count)
         cbf_std = np.sqrt(self.cbf_m2 / self.count)
         att_std = np.sqrt(self.att_m2 / self.count)
         scalar_std = np.sqrt(self.scalar_m2 / self.count)
 
         return {
-            'pcasl_mean': self.pcasl_mean.tolist(),
-            'pcasl_std': np.clip(pcasl_std, 1e-6, None).tolist(),
-            'vsasl_mean': self.vsasl_mean.tolist(),
-            'vsasl_std': np.clip(vsasl_std, 1e-6, None).tolist(),
+            'shape_vector_mean': self.shape_vector_mean.tolist(),
+            'shape_vector_std': np.clip(shape_vector_std, 1e-6, None).tolist(),
             'y_mean_cbf': self.cbf_mean,
             'y_std_cbf': max(float(cbf_std), 1e-6),
             'y_mean_att': self.att_mean,

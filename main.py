@@ -96,8 +96,8 @@ def run_comprehensive_asl_research(config: ResearchConfig, stage: int, output_di
     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
     script_logger.info(f"Using device: {device}")
 
-    # V4: Input size is 2 curves (num_plds*2) + 7 scalar features
-    base_input_size_nn = num_plds * 2 + 7
+    # V5: Input size is 1 shape curve (num_plds*2) + 6 scalar features
+    base_input_size_nn = num_plds * 2 + 6
     
     use_offline = config.use_offline_dataset
     offline_path = config.offline_dataset_path

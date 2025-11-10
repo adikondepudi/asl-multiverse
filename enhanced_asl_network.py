@@ -217,29 +217,23 @@ class FiLMLayer(nn.Module):
 
 class PhysicsInformedASLProcessor(nn.Module):
     """
-    V4 robust architecture. It uses separate, stabilized Conv1D towers to process
-    signal shape, then uses FiLM to inject amplitude information before reconciling
-    the two signals and preparing a final feature vector for the head.
+    V5 robust encoder architecture. It uses a single Conv1D tower to process
+    a per-instance normalized shape vector, then uses FiLM to inject scale and offset
+    information (mu, sigma) before preparing a final feature vector for the head.
     """
     def __init__(self, n_plds: int, feature_dim: int, nhead: int, dropout_rate: float, **kwargs):
         super().__init__()
         self.n_plds = n_plds
-        self.num_scalar_features = 7 # pcasl_amp, vsasl_amp, log_ratio, 2xTTP, 2xCOM
+        self.num_scalar_features = 6 # V5: mu, sigma, 2xTTP, 2xCOM
 
-        self.pcasl_denoising_tower = Conv1DFeatureExtractor(
+        # A single tower for the 12-dim shape vector
+        self.shape_vector_tower = Conv1DFeatureExtractor(
             in_channels=1, feature_dim=feature_dim, dropout_rate=dropout_rate
         )
-        self.vsasl_denoising_tower = Conv1DFeatureExtractor(
-            in_channels=1, feature_dim=feature_dim, dropout_rate=dropout_rate
-        )
 
-        self.pcasl_film = FiLMLayer(in_channels=feature_dim, conditioning_dim=self.num_scalar_features)
-        self.vsasl_film = FiLMLayer(in_channels=feature_dim, conditioning_dim=self.num_scalar_features)
+        self.film_layer = FiLMLayer(in_channels=feature_dim, conditioning_dim=self.num_scalar_features)
 
-        self.pcasl_event_detector = AttentionPooling(d_model=feature_dim)
-        self.reconciliation_attention = CrossAttentionBlock(
-            d_model=feature_dim, nhead=nhead, dropout=dropout_rate
-        )
+        self.attention_pooling = AttentionPooling(d_model=feature_dim)
         
         self.final_fusion_mlp = nn.Sequential(
             nn.Linear(feature_dim + self.num_scalar_features, 256),
@@ -248,32 +242,29 @@ class PhysicsInformedASLProcessor(nn.Module):
         )
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
-        pcasl_norm_curve = x[:, :self.n_plds].unsqueeze(1)
-        vsasl_norm_curve = x[:, self.n_plds : self.n_plds * 2].unsqueeze(1)
+        # Input x is 18-dim: [shape_vector (12), standardized_scalar_features (6)]
+        shape_input = x[:, :self.n_plds * 2].unsqueeze(1) # -> (batch, 1, 12)
         scalar_features = x[:, self.n_plds * 2:]
 
-        pcasl_shape_features = self.pcasl_denoising_tower(pcasl_norm_curve)
-        vsasl_shape_features = self.vsasl_denoising_tower(vsasl_norm_curve)
+        # 1. Process shape
+        shape_features = self.shape_vector_tower(shape_input) # -> (batch, feature_dim, 12)
 
-        pcasl_conditioned = self.pcasl_film(pcasl_shape_features, scalar_features)
-        vsasl_conditioned = self.vsasl_film(vsasl_shape_features, scalar_features)
+        # 2. Condition shape features with scalar information (mu, sigma, etc.)
+        conditioned_features = self.film_layer(shape_features, scalar_features) # -> (batch, feature_dim, 12)
 
-        pcasl_seq = pcasl_conditioned.transpose(1, 2)
-        vsasl_seq = vsasl_conditioned.transpose(1, 2)
-        pcasl_event = self.pcasl_event_detector(pcasl_seq)
-        reconciled_vector = self.reconciliation_attention(
-            query=pcasl_event.unsqueeze(1), 
-            key_value=vsasl_seq
-        ).squeeze(1)
+        # 3. Pool the conditioned sequence into a single context vector
+        conditioned_seq = conditioned_features.transpose(1, 2) # -> (batch, 12, feature_dim)
+        context_vector = self.attention_pooling(conditioned_seq) # -> (batch, feature_dim)
 
-        final_input_to_head = torch.cat([reconciled_vector, scalar_features], dim=1)
+        # 4. Fuse pooled shape context with scalar features for the head
+        final_input_to_head = torch.cat([context_vector, scalar_features], dim=1)
         final_output_vector = self.final_fusion_mlp(final_input_to_head)
         
         return final_output_vector
 
 class DisentangledASLNet(nn.Module):
     """
-    Main network class. It uses a specified encoder (like the V4 PhysicsInformedASLProcessor)
+    Main network class. It uses a specified encoder (like the V5 PhysicsInformedASLProcessor)
     and then applies either a denoising decoder (Stage 1) or a regression head (Stage 2).
     """
     def __init__(self, 

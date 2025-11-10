@@ -28,7 +28,8 @@ class ASLInMemoryDataset(Dataset):
     def __init__(self, data_dir: Optional[str], norm_stats: dict, stage: int, num_samples_to_load: Optional[int] = None):
         self.data_dir = Path(data_dir) if data_dir else None; self.norm_stats = norm_stats
         self.stage = stage
-        self.num_plds = len(norm_stats.get('pcasl_mean', []))
+        # V5: num_plds is based on shape_vector length / 2
+        self.num_plds = len(norm_stats.get('shape_vector_mean', [])) // 2
         if self.data_dir:
             logger.info(f"Loading dataset chunks from {self.data_dir} for stage {self.stage}..."); 
             files = sorted(list(self.data_dir.glob('dataset_chunk_*.npz')))
@@ -68,32 +69,26 @@ class ASLInMemoryDataset(Dataset):
             self.params_unnormalized = np.empty(0)
 
     def _process_signals(self, signals_unnorm: np.ndarray) -> np.ndarray:
-        # V4 Preprocessing: Separate standardization, calculate & standardize 7 scalar features.
+        # V5 Preprocessing: Per-instance normalization and assembly of 6 scalar features.
+        # The offline dataset has format: [raw_curves (12), eng_features_from_raw (4)]
         raw_curves = signals_unnorm[:, :self.num_plds * 2]
         eng_ttp_com = signals_unnorm[:, self.num_plds * 2:]
 
-        pcasl_curves_raw = raw_curves[:, :self.num_plds]
-        vsasl_curves_raw = raw_curves[:, self.num_plds:]
+        # 1. Perform per-instance normalization on raw (noisy) curves to get shape vector
+        mu = np.mean(raw_curves, axis=1, keepdims=True)
+        sigma = np.std(raw_curves, axis=1, keepdims=True)
+        shape_vector = (raw_curves - mu) / (sigma + 1e-6)
 
-        # 1. Standardize curves separately
-        p_mean, p_std = np.array(self.norm_stats['pcasl_mean']), np.array(self.norm_stats['pcasl_std']) + 1e-6
-        v_mean, v_std = np.array(self.norm_stats['vsasl_mean']), np.array(self.norm_stats['vsasl_std']) + 1e-6
-        pcasl_norm = (pcasl_curves_raw - p_mean) / p_std
-        vsasl_norm = (vsasl_curves_raw - v_mean) / v_std
-
-        # 2. Calculate amp/log_ratio features from raw curves
-        pcasl_amp = np.linalg.norm(pcasl_curves_raw, axis=1, keepdims=True)
-        vsasl_amp = np.linalg.norm(vsasl_curves_raw, axis=1, keepdims=True)
-        log_ratio = np.log(pcasl_amp / (vsasl_amp + 1e-6))
-
-        # 3. Assemble and standardize all 7 scalar features
-        scalar_features_unnorm = np.concatenate([pcasl_amp, vsasl_amp, log_ratio, eng_ttp_com], axis=1)
+        # 2. Assemble all 6 scalar features (mu, sigma, plus pre-calculated TTP/COM)
+        scalar_features_unnorm = np.concatenate([mu, sigma, eng_ttp_com], axis=1)
+        
+        # 3. Standardize the scalar features using pre-computed stats
         s_mean = np.array(self.norm_stats['scalar_features_mean'])
         s_std = np.array(self.norm_stats['scalar_features_std']) + 1e-6
         scalar_features_norm = (scalar_features_unnorm - s_mean) / s_std
 
-        # 4. Concatenate final input vector
-        return np.concatenate([pcasl_norm, vsasl_norm, scalar_features_norm], axis=1)
+        # 4. Concatenate final input vector (shape vector is already instance-normalized)
+        return np.concatenate([shape_vector, scalar_features_norm], axis=1)
 
     def _normalize_params(self, params_unnorm: np.ndarray) -> np.ndarray:
         cbf, att = params_unnorm[:, 0], params_unnorm[:, 1]
@@ -126,26 +121,25 @@ class ASLIterableDataset(IterableDataset):
                 
                 vsasl_noisy = self.simulator.add_realistic_noise(vsasl_clean, snr=snr)
                 pcasl_noisy = self.simulator.add_realistic_noise(pcasl_clean, snr=snr)
+                raw_noisy_curves = np.concatenate([pcasl_noisy, vsasl_noisy])
                 
-                # V4 Preprocessing for on-the-fly data
-                # 1. Standardize curves separately
-                p_norm = (pcasl_noisy - self.norm_stats['pcasl_mean']) / (np.array(self.norm_stats['pcasl_std']) + 1e-6)
-                v_norm = (vsasl_noisy - self.norm_stats['vsasl_mean']) / (np.array(self.norm_stats['vsasl_std']) + 1e-6)
+                # V5 Preprocessing for on-the-fly data
+                # 1. Perform per-instance normalization to get a pure shape vector
+                mu = np.mean(raw_noisy_curves)
+                sigma = np.std(raw_noisy_curves)
+                shape_vector = (raw_noisy_curves - mu) / (sigma + 1e-6)
 
-                # 2. Calculate amp/log_ratio and engineered features from noisy curves
-                pcasl_amp = np.linalg.norm(pcasl_noisy)
-                vsasl_amp = np.linalg.norm(vsasl_noisy)
-                log_ratio = np.log(pcasl_amp / (vsasl_amp + 1e-6))
-                eng_feat_ttp_com = engineer_signal_features(np.concatenate([pcasl_noisy, vsasl_noisy]), self.num_plds)
+                # 2. Calculate engineered features from the scale-invariant shape vector
+                eng_feat_ttp_com = engineer_signal_features(shape_vector, self.num_plds)
 
-                # 3. Assemble and standardize all 7 scalar features
-                scalar_features_unnorm = np.array([pcasl_amp, vsasl_amp, log_ratio, *eng_feat_ttp_com])
+                # 3. Assemble and standardize all 6 scalar features
+                scalar_features_unnorm = np.array([mu, sigma, *eng_feat_ttp_com])
                 s_mean = np.array(self.norm_stats['scalar_features_mean'])
                 s_std = np.array(self.norm_stats['scalar_features_std']) + 1e-6
                 scalar_features_norm = (scalar_features_unnorm - s_mean) / s_std
                 
                 # 4. Concatenate final input vector
-                final_input = np.concatenate([p_norm, v_norm, scalar_features_norm])
+                final_input = np.concatenate([shape_vector, scalar_features_norm])
                 
                 if self.stage == 1:
                     target = clean_signal
