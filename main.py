@@ -207,16 +207,6 @@ def run_comprehensive_asl_research(config: ResearchConfig, stage: int, output_di
         
     return {}
 
-def _apply_config_recursively(config_obj: Any, config_dict: Dict):
-    """Recursively applies YAML config values to a dataclass object."""
-    for key, value in config_dict.items():
-        if hasattr(config_obj, key):
-            # If the attribute is a dictionary, recurse
-            if isinstance(getattr(config_obj, key), dict) and isinstance(value, dict):
-                _apply_config_recursively(getattr(config_obj, key), value)
-            else:
-                setattr(config_obj, key, value)
-
 if __name__ == "__main__":
     logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(name)s - %(levelname)s - %(message)s', handlers=[logging.StreamHandler(sys.stdout)], force=True) 
     
@@ -246,8 +236,27 @@ if __name__ == "__main__":
         script_logger.error(f"FATAL: Configuration file {config_path} is empty or invalid.")
         sys.exit(1)
     
-    # NEW ROBUST PARSING LOGIC
-    _apply_config_recursively(config_obj, config_from_yaml)
+    # FINAL ROBUST PARSING LOGIC
+    for section, params in config_from_yaml.items():
+        # Handle nested dictionaries like 'training', 'data', etc.
+        if isinstance(params, dict):
+            # Handle special top-level dicts like 'moe', 'fine_tuning'
+            if hasattr(config_obj, section):
+                 # Ensure we don't overwrite the whole dict if it's already a dict
+                current_attr = getattr(config_obj, section)
+                if isinstance(current_attr, dict):
+                    current_attr.update(params)
+                else:
+                    setattr(config_obj, section, params)
+            
+            # Handle flattened params inside nested dicts
+            for key, value in params.items():
+                if hasattr(config_obj, key):
+                    setattr(config_obj, key, value)
+        else:
+            # Handle top-level key-value pairs
+            if hasattr(config_obj, section):
+                setattr(config_obj, section, params)
     
     script_logger.info(f"Successfully loaded and applied configuration from {config_path}")
     
