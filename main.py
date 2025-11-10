@@ -27,7 +27,7 @@ warnings.filterwarnings('ignore', category=UserWarning)
 from enhanced_asl_network import DisentangledASLNet, CustomLoss, PhysicsInformedASLProcessor
 from asl_simulation import ASLParameters
 from enhanced_simulation import RealisticASLSimulator
-from asl_trainer import EnhancedASLTrainer, ASLIterableDataset, ASLInMemoryDataset
+from asl_trainer import EnhancedASLTrainer, ASLInMemoryDataset
 from torch.utils.data import DataLoader
 from utils import ParallelStreamingStatsCalculator, engineer_signal_features
 
@@ -99,23 +99,20 @@ def run_comprehensive_asl_research(config: ResearchConfig, stage: int, output_di
     # V5: Input size is 1 shape curve (num_plds*2) + 6 scalar features
     base_input_size_nn = num_plds * 2 + 6
     
-    use_offline = config.use_offline_dataset
-    offline_path = config.offline_dataset_path
+    if not (config.use_offline_dataset and config.offline_dataset_path):
+        script_logger.error("FATAL: Offline dataset is required. Please set `use_offline_dataset` to true and provide `offline_dataset_path`.")
+        sys.exit(1)
+
     num_workers = min(os.cpu_count() or 1, 32)
     script_logger.info(f"Using a capped number of {num_workers} CPU cores for data loading.")
 
-    if use_offline and offline_path:
-        script_logger.info(f"Using OFFLINE In-Memory dataset from: {offline_path}")
-        train_dataset = ASLInMemoryDataset(
-            data_dir=offline_path, norm_stats=norm_stats, stage=stage, 
-            num_samples_to_load=config.num_samples_to_load
-        )
-        train_loader = DataLoader(train_dataset, batch_size=config.batch_size, num_workers=num_workers,
-                                     pin_memory=True, persistent_workers=(num_workers > 0), shuffle=True)
-    else:
-        script_logger.info("Using ON-THE-FLY IterableDataset for training.")
-        train_dataset = ASLIterableDataset(simulator, plds_np, config.training_noise_levels, norm_stats, stage=stage)
-        train_loader = DataLoader(train_dataset, batch_size=config.batch_size, num_workers=num_workers, pin_memory=True, persistent_workers=(num_workers > 0))
+    script_logger.info(f"Using OFFLINE In-Memory dataset from: {config.offline_dataset_path}")
+    train_dataset = ASLInMemoryDataset(
+        data_dir=config.offline_dataset_path, norm_stats=norm_stats, stage=stage, 
+        num_samples_to_load=config.num_samples_to_load
+    )
+    train_loader = DataLoader(train_dataset, batch_size=config.batch_size, num_workers=num_workers,
+                                 pin_memory=True, persistent_workers=(num_workers > 0), shuffle=True)
     
     script_logger.info("Generating a fixed validation dataset for stable evaluation metrics...")
     validation_data_dict = simulator.generate_diverse_dataset(

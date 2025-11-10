@@ -2,7 +2,7 @@
 import torch
 import torch.nn as nn
 import torch.optim as optim
-from torch.utils.data import Dataset, DataLoader, WeightedRandomSampler, IterableDataset
+from torch.utils.data import Dataset, DataLoader
 import numpy as np
 from typing import Dict, List, Tuple, Optional, Any
 from collections import defaultdict
@@ -15,7 +15,7 @@ from itertools import islice
 import traceback
 import optuna
 
-from enhanced_asl_network import CustomLoss, DisentangledASLNet, PhysicsInformedASLProcessor
+from enhanced_asl_network import CustomLoss, DisentangledASLNet
 from enhanced_simulation import RealisticASLSimulator
 from utils import engineer_signal_features
 
@@ -28,7 +28,7 @@ class ASLInMemoryDataset(Dataset):
     def __init__(self, data_dir: Optional[str], norm_stats: dict, stage: int, num_samples_to_load: Optional[int] = None):
         self.data_dir = Path(data_dir) if data_dir else None; self.norm_stats = norm_stats
         self.stage = stage
-        # V5: num_plds is based on shape_vector length / 2
+        # V5: num_plds is based on shape_vector length / 2, which corresponds to the original curves
         self.num_plds = len(norm_stats.get('shape_vector_mean', [])) // 2
         if self.data_dir:
             logger.info(f"Loading dataset chunks from {self.data_dir} for stage {self.stage}..."); 
@@ -99,56 +99,6 @@ class ASLInMemoryDataset(Dataset):
     def __len__(self): return self.signals_tensor.shape[0]
     def __getitem__(self, idx): return self.signals_tensor[idx], self.targets_tensor[idx]
 
-class ASLIterableDataset(IterableDataset):
-    def __init__(self, simulator: RealisticASLSimulator, plds: np.ndarray, 
-                 noise_levels: List[float], norm_stats: Dict, stage: int):
-        super().__init__(); self.simulator, self.plds, self.num_plds = simulator, plds, len(plds)
-        self.noise_levels, self.norm_stats, self.stage = noise_levels, norm_stats, stage
-        self.base_params, self.physio_var = simulator.params, simulator.physio_var
-
-    def __iter__(self):
-        worker_info = torch.utils.data.get_worker_info()
-        seed = worker_info.id + int(time.time() * 1000) if worker_info else int(time.time() * 1000)
-        np.random.seed(seed % (2**32))
-        while True:
-            try:
-                true_att = np.random.uniform(*self.physio_var.att_range); true_cbf = np.random.uniform(*self.physio_var.cbf_range)
-                snr = np.random.choice(self.noise_levels)
-                
-                vsasl_clean = self.simulator._generate_vsasl_signal(self.plds, true_att, true_cbf, self.base_params.T1_artery, self.base_params.alpha_VSASL)
-                pcasl_clean = self.simulator._generate_pcasl_signal(self.plds, true_att, true_cbf, self.base_params.T1_artery, self.base_params.T_tau, self.base_params.alpha_PCASL)
-                clean_signal = np.concatenate([pcasl_clean, vsasl_clean])
-                
-                vsasl_noisy = self.simulator.add_realistic_noise(vsasl_clean, snr=snr)
-                pcasl_noisy = self.simulator.add_realistic_noise(pcasl_clean, snr=snr)
-                raw_noisy_curves = np.concatenate([pcasl_noisy, vsasl_noisy])
-                
-                # V5 Preprocessing for on-the-fly data
-                # 1. Perform per-instance normalization to get a pure shape vector
-                mu = np.mean(raw_noisy_curves)
-                sigma = np.std(raw_noisy_curves)
-                shape_vector = (raw_noisy_curves - mu) / (sigma + 1e-6)
-
-                # 2. Calculate engineered features from the scale-invariant shape vector
-                eng_feat_ttp_com = engineer_signal_features(shape_vector, self.num_plds)
-
-                # 3. Assemble and standardize all 6 scalar features
-                scalar_features_unnorm = np.array([mu, sigma, *eng_feat_ttp_com])
-                s_mean = np.array(self.norm_stats['scalar_features_mean'])
-                s_std = np.array(self.norm_stats['scalar_features_std']) + 1e-6
-                scalar_features_norm = (scalar_features_unnorm - s_mean) / s_std
-                
-                # 4. Concatenate final input vector
-                final_input = np.concatenate([shape_vector, scalar_features_norm])
-                
-                if self.stage == 1:
-                    target = clean_signal
-                else: # stage 2
-                    target = np.array([(true_cbf - self.norm_stats['y_mean_cbf']) / self.norm_stats['y_std_cbf'], (true_att - self.norm_stats['y_mean_att']) / self.norm_stats['y_std_att']])
-
-                yield torch.from_numpy(final_input.astype(np.float32)), torch.from_numpy(target.astype(np.float32))
-            except Exception as e: logger.error(f"DataLoader worker failed: {e}"); continue
-
 class EnhancedASLTrainer:
     def __init__(self,
                  stage: int, model_config: Dict, model_class: callable,
@@ -174,8 +124,6 @@ class EnhancedASLTrainer:
                        early_stopping_min_delta: float = 0.0,
                        optuna_trial: Optional[Any] = None, fine_tuning_config: Optional[Dict] = None):
         if steps_per_epoch is None:
-            if isinstance(train_loader.dataset, IterableDataset):
-                raise ValueError("steps_per_epoch must be specified for an IterableDataset.")
             steps_per_epoch = len(train_loader)
         
         is_finetuning = fine_tuning_config is not None and fine_tuning_config.get('enabled', False)
@@ -272,13 +220,10 @@ class EnhancedASLTrainer:
         if not loader: return [{'val_loss': float('inf')} for _ in models]
         for m in models: m.eval()
         val_losses = [0.0] * len(models)
-        
-        is_iterable = isinstance(loader.dataset, IterableDataset)
-        val_iterator = islice(loader, self.validation_steps_per_epoch) if is_iterable else loader
         num_steps = 0
 
         with torch.no_grad():
-            for signals, targets in val_iterator:
+            for signals, targets in loader:
                 signals, targets = signals.to(self.device), targets.to(self.device)
                 for i, model in enumerate(models):
                     with torch.amp.autocast(device_type=self.device.type, dtype=torch.bfloat16):
@@ -286,8 +231,6 @@ class EnhancedASLTrainer:
                         loss, _ = self.custom_loss_fn(model_outputs=outputs, targets=targets, global_epoch=epoch)
                     val_losses[i] += loss.item()
                 num_steps += 1
-                if is_iterable and num_steps >= self.validation_steps_per_epoch:
-                    break
         
         return [{'val_loss': v / num_steps if num_steps > 0 else float('inf')} for v in val_losses]
     
