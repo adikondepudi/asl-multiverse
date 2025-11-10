@@ -1,6 +1,6 @@
 # FILE: diagnose_simulation_and_model.py
-# FINAL CORRECTED VERSION (V4 Architecture)
-# This version is updated to use the robust V4 preprocessing pipeline, ensuring
+# FINAL CORRECTED VERSION (V5 Architecture)
+# This version is updated to use the robust V5 preprocessing pipeline, ensuring
 # compatibility with the new model architecture and providing a fair comparison.
 
 import torch
@@ -34,36 +34,32 @@ except ImportError as e:
 NUM_SIMS_PER_DATAPOINT = 500 # Number of unique realizations per ground truth point
 
 # ==============================================================================
-# V4-SPECIFIC HELPER FUNCTIONS
+# V5-SPECIFIC HELPER FUNCTIONS
 # ==============================================================================
 
-def preprocess_for_v4_model(raw_signal_curves: np.ndarray, eng_features: np.ndarray, norm_stats: dict, num_plds: int) -> np.ndarray:
+def preprocess_for_v5_model(raw_signal_curves: np.ndarray, norm_stats: dict, num_plds: int) -> np.ndarray:
     """
-    Applies the V4 preprocessing pipeline to a single sample.
-    This exactly mirrors the logic in ASLInMemoryDataset._process_signals.
+    Applies the V5 preprocessing pipeline to a single sample.
+    This exactly mirrors the logic in the updated ASLInMemoryDataset.
     """
-    pcasl_curves_raw = raw_signal_curves[:num_plds]
-    vsasl_curves_raw = raw_signal_curves[num_plds:]
+    # 1. Perform per-instance normalization on raw (noisy) curves to get shape vector
+    mu = np.mean(raw_signal_curves)
+    sigma = np.std(raw_signal_curves)
+    shape_vector = (raw_signal_curves - mu) / (sigma + 1e-6)
 
-    # 1. Standardize curves separately
-    p_mean, p_std = np.array(norm_stats['pcasl_mean']), np.array(norm_stats['pcasl_std']) + 1e-6
-    v_mean, v_std = np.array(norm_stats['vsasl_mean']), np.array(norm_stats['vsasl_std']) + 1e-6
-    pcasl_norm = (pcasl_curves_raw - p_mean) / p_std
-    vsasl_norm = (vsasl_curves_raw - v_mean) / v_std
+    # 2. Calculate engineered features from the scale-invariant shape vector
+    eng_features = engineer_signal_features(shape_vector, num_plds)
 
-    # 2. Calculate amp/log_ratio features from raw curves
-    pcasl_amp = np.linalg.norm(pcasl_curves_raw)
-    vsasl_amp = np.linalg.norm(vsasl_curves_raw)
-    log_ratio = np.log(pcasl_amp / (vsasl_amp + 1e-6))
+    # 3. Assemble all 6 scalar features (mu, sigma, plus TTP/COM)
+    scalar_features_unnorm = np.array([mu, sigma, *eng_features])
 
-    # 3. Assemble and standardize all 7 scalar features
-    scalar_features_unnorm = np.array([pcasl_amp, vsasl_amp, log_ratio, *eng_features])
+    # 4. Standardize the scalar features using pre-computed stats
     s_mean = np.array(norm_stats['scalar_features_mean'])
     s_std = np.array(norm_stats['scalar_features_std']) + 1e-6
     scalar_features_norm = (scalar_features_unnorm - s_mean) / s_std
 
-    # 4. Concatenate final input vector and reshape for batch processing
-    final_input = np.concatenate([pcasl_norm, vsasl_norm, scalar_features_norm])
+    # 5. Concatenate final input vector and reshape for batch processing
+    final_input = np.concatenate([shape_vector, scalar_features_norm])
     return final_input.reshape(1, -1).astype(np.float32)
 
 def denormalize_predictions(cbf_norm: float, att_norm: float, norm_stats: dict) -> tuple:
@@ -90,8 +86,8 @@ def load_artifacts(model_results_root: Path) -> tuple:
         num_plds = len(config['pld_values'])
         
         model_class = DisentangledASLNet
-        # V4 FIX: Input size is num_plds*2 (curves) + 7 (scalar features)
-        base_input_size = num_plds * 2 + 7
+        # V5 FIX: Input size is num_plds*2 (shape vector) + 6 (scalar features)
+        base_input_size = num_plds * 2 + 6
 
         for model_path in models_dir.glob('ensemble_model_*.pt'):
             model = model_class(mode='regression', input_size=base_input_size, **config)
@@ -113,12 +109,11 @@ def load_artifacts(model_results_root: Path) -> tuple:
         sys.exit(1)
 
 def predict_nn_single_voxel(noisy_signal: np.ndarray, models: list, config: dict, norm_stats: dict, device: torch.device) -> tuple:
-    """Runs a single voxel through the NN pipeline using V4 preprocessing."""
+    """Runs a single voxel through the NN pipeline using V5 preprocessing."""
     num_plds = len(config['pld_values'])
-    eng_feats = engineer_signal_features(noisy_signal, num_plds)
     
-    # V4 FIX: Use the new preprocessing logic
-    norm_input = preprocess_for_v4_model(noisy_signal, eng_feats, norm_stats, num_plds)
+    # V5 FIX: Use the new self-contained preprocessing logic
+    norm_input = preprocess_for_v5_model(noisy_signal, norm_stats, num_plds)
     input_tensor = torch.from_numpy(norm_input).to(device, dtype=torch.bfloat16)
 
     with torch.no_grad():
