@@ -7,32 +7,38 @@ import multiprocessing as mp
 from itertools import product
 import numba
 
-# The JIT-compiled worker functions have been moved out of the ASLSimulator
-# class to the top level of the module. This makes them directly importable
-# by other files, such as utils.py, fixing the ImportError.
-# The @staticmethod decorator is no longer needed.
-
 @numba.jit(nopython=True, cache=True)
-def _generate_vsasl_signal_jit(plds, att, cbf_ml_g_s, t1_artery, alpha2, T2_factor):
-    """JIT-compiled worker for VSASL signal generation."""
+def _generate_vsasl_signal_jit(plds, att, cbf_ml_g_s, t1_artery, alpha2, T2_factor, t_sat_vs):
+    """JIT-compiled worker for VSASL signal generation, corrected with SIB model."""
     M0_b = 1.0
     lambda_blood = 0.90
     signal = np.zeros_like(plds, dtype=np.float64)
 
-    # Condition 1: TI <= ATT
+    # Determine the initial magnetization of blood (SIB) based on the T_sat effect,
+    SIB = 1.0
+    if att > t_sat_vs:
+        # If ATT > T_sat, fresh blood has not arrived. The blood at the labeling
+        # location is still recovering from the initial saturation pulse.
+        # Its magnetization has recovered for a duration of t_sat_vs.
+        SIB = 1.0 - np.exp(-t_sat_vs / t1_artery)
+
+    # Calculate the base signal assuming full initial magnetization (SIB=1.0)
+    # Condition 1: PLD <= ATT
     for i in range(plds.shape[0]):
         if plds[i] <= att:
             signal[i] = (2 * M0_b * cbf_ml_g_s * alpha2 / lambda_blood *
                          (plds[i] / 1000.0) *
                          np.exp(-plds[i] / t1_artery) *
                          T2_factor)
-        # Condition 2: TI > ATT
+        # Condition 2: PLD > ATT
         else:
             signal[i] = (2 * M0_b * cbf_ml_g_s * alpha2 / lambda_blood *
                          (att / 1000.0) *
                          np.exp(-plds[i] / t1_artery) *
                          T2_factor)
-    return signal
+            
+    # Apply the SIB scaling factor to the entire calculated signal.
+    return signal * SIB
 
 @numba.jit(nopython=True, cache=True)
 def _generate_pcasl_signal_jit(plds, att, cbf_ml_g_s, t1_artery, t_tau, alpha1, T2_factor):
@@ -186,7 +192,8 @@ class ASLSimulator:
         """Wrapper for the JIT-compiled VSASL function."""
         alpha2 = alpha_vsasl * (self.params.alpha_BS1**3)
         cbf_ml_g_s = cbf_ml_100g_min / 6000.0
-        return _generate_vsasl_signal_jit(plds, att, cbf_ml_g_s, t1_artery, alpha2, self.params.T2_factor)
+        # Pass the T_sat_vs parameter from self.params to the JIT function.
+        return _generate_vsasl_signal_jit(plds, att, cbf_ml_g_s, t1_artery, alpha2, self.params.T2_factor, self.params.T_sat_vs)
 
     def _generate_pcasl_signal(self, plds: np.ndarray, att: float,
                                cbf_ml_100g_min: float, t1_artery: float, t_tau: float, alpha_pcasl: float) -> np.ndarray:
