@@ -27,44 +27,6 @@ class PhysiologicalVariation:
     t_tau_perturb_range: Tuple[float, float] = (-0.05, 0.05)
     alpha_perturb_range: Tuple[float, float] = (-0.10, 0.10)
 
-def _generate_single_balanced_subject(args: Tuple) -> Tuple[np.ndarray, List[float], Dict]:
-    """Worker function for parallel generation of a single subject."""
-    att_min_bin, att_max_bin, cbf_full_range, t1_artery_full_range, base_params, plds, noise_levels, physio_var, seed = args
-
-    np.random.seed(seed)
-
-    true_att = np.random.uniform(att_min_bin, att_max_bin)
-    true_cbf = np.random.uniform(*cbf_full_range)
-    true_t1_artery = np.random.uniform(*t1_artery_full_range)
-    current_snr = np.random.choice(noise_levels)
-
-    perturbed_t_tau = base_params.T_tau * (1 + np.random.uniform(*physio_var.t_tau_perturb_range))
-    perturbed_alpha_pcasl = np.clip(base_params.alpha_PCASL * (1 + np.random.uniform(*physio_var.alpha_perturb_range)), 0.1, 1.1)
-    perturbed_alpha_vsasl = np.clip(base_params.alpha_VSASL * (1 + np.random.uniform(*physio_var.alpha_perturb_range)), 0.1, 1.0)
-
-    simulator = RealisticASLSimulator(base_params)
-
-    data_dict = simulator.generate_synthetic_data(
-        plds,
-        att_values=np.array([true_att]),
-        n_noise=1,
-        tsnr=current_snr,
-        cbf_val=true_cbf,
-        t1_artery_val=true_t1_artery,
-        t_tau_val=perturbed_t_tau,
-        alpha_pcasl_val=perturbed_alpha_pcasl,
-        alpha_vsasl_val=perturbed_alpha_vsasl
-    )
-
-    pcasl_noisy = data_dict['MULTIVERSE'][0, 0, :, 0]
-    vsasl_noisy = data_dict['MULTIVERSE'][0, 0, :, 1]
-    multiverse_signal_flat = np.concatenate([pcasl_noisy, vsasl_noisy])
-
-    params = [true_cbf, true_att]
-    perturbed_params_dict = {'t1_artery': true_t1_artery, 't_tau': perturbed_t_tau, 'alpha_pcasl': perturbed_alpha_pcasl, 'alpha_vsasl': perturbed_alpha_vsasl}
-
-    return multiverse_signal_flat, params, perturbed_params_dict
-
 class RealisticASLSimulator(ASLSimulator):
     def __init__(self, params: ASLParameters = ASLParameters()):
         super().__init__(params)
@@ -167,59 +129,10 @@ class RealisticASLSimulator(ASLSimulator):
         dataset['parameters'] = np.array(dataset['parameters'])
         return dataset
 
-    def generate_spatial_data(self, matrix_size: Tuple[int, int] = (64, 64), n_slices: int = 20,
-                            plds: Optional[np.ndarray] = None) -> np.ndarray:
-        if plds is None: plds = np.arange(500, 3001, 500)
-        x, y = np.meshgrid(np.linspace(-1,1,matrix_size[0]), np.linspace(-1,1,matrix_size[1]))
-        cbf_map = 60 + 20*np.sin(2*np.pi*x)*np.cos(2*np.pi*y)
-        cbf_map[(x**2+y**2)<0.7] += 20; cbf_map[(x**2+y**2)>0.7] *= 0.5
-        cbf_map = np.clip(cbf_map, 5, 150)
-        att_map = 1000 + 500*np.sqrt(x**2+y**2); att_map = np.clip(att_map, 300, 4000)
-        cbf_map_smooth, att_map_smooth = gaussian_filter(cbf_map, sigma=2), gaussian_filter(att_map, sigma=2)
-        data_4d_pcasl = np.zeros((matrix_size[0], matrix_size[1], n_slices, len(plds)))
-        for z in range(n_slices):
-            slice_cbf_factor, slice_att_factor = 0.9+0.2*np.random.rand(), 0.95+0.1*np.random.rand()
-            slice_cbf_map, slice_att_map = np.clip(cbf_map_smooth*slice_cbf_factor,5,150), np.clip(att_map_smooth*slice_att_factor,300,4000)
-            for i in range(matrix_size[0]):
-                for j in range(matrix_size[1]):
-                    signal = self._generate_pcasl_signal(plds, slice_att_map[i,j], slice_cbf_map[i,j],
-                                                        self.params.T1_artery, self.params.T_tau, self.params.alpha_PCASL)
-                    data_4d_pcasl[i,j,z,:] = self.add_realistic_noise(signal, snr=np.random.uniform(5,15))
-        return data_4d_pcasl, cbf_map_smooth, att_map_smooth
-
-def generate_training_data_parallel(n_cores: int = None):
-    if n_cores is None: n_cores = max(1, mp.cpu_count() - 1)
-    base_asl_params = ASLParameters(); plds = np.arange(500, 3001, 500)
-    total_subjects_to_generate = 1000
-    n_subjects_per_core = total_subjects_to_generate // n_cores
-    extra_subjects_list = [1]*(total_subjects_to_generate%n_cores) + [0]*(n_cores-(total_subjects_to_generate%n_cores)) if total_subjects_to_generate % n_cores != 0 else [0]*n_cores
-    worker_args_list = [(i, n_subjects_per_core+extra_subjects_list[i], base_asl_params, plds) for i in range(n_cores) if (n_subjects_per_core+extra_subjects_list[i]) > 0]
-    if not worker_args_list:
-        logger.warning("No subjects to generate. Exiting parallel generation.")
-        return {'signals': np.array([]), 'parameters': np.array([]), 'conditions': [], 'noise_levels': [], 'perturbed_params': []}
-    def worker_process(args_tuple):
-        core_id, n_subj_worker, b_params, p_lds = args_tuple
-        np.random.seed(42 + core_id)
-        sim = RealisticASLSimulator(params=b_params)
-        return sim.generate_diverse_dataset(p_lds, n_subj_worker, ['healthy','stroke','tumor','elderly'], [3.0,5.0,10.0,15.0])
-    logger.info(f"Generating data using {len(worker_args_list)} cores for {total_subjects_to_generate} total effective subjects...")
-    with mp.Pool(len(worker_args_list)) as pool:
-        results = list(tqdm(pool.imap(worker_process, worker_args_list), total=len(worker_args_list), desc="Parallel Generation"))
-    if not results:
-        logger.warning("No results from workers.")
-        return {'signals': np.array([]), 'parameters': np.array([]), 'conditions': [], 'noise_levels': [], 'perturbed_params': []}
-    combined_data = {'signals': np.vstack([r['signals'] for r in results if r['signals'].size > 0]),
-                     'parameters': np.vstack([r['parameters'] for r in results if r['parameters'].size > 0]),
-                     'conditions': sum([r['conditions'] for r in results], []),
-                     'noise_levels': sum([r['noise_levels'] for r in results], []),
-                     'perturbed_params': sum([r['perturbed_params'] for r in results], [])}
-    logger.info(f"Generated {len(combined_data['signals'])} total samples.")
-    return combined_data
-
 if __name__ == "__main__":
     simulator = RealisticASLSimulator()
     logger.info("Enhanced ASL Simulator initialized. `generate_balanced_dataset` has been removed.")
-    logger.info("For training, please use the `ASLIterableDataset` class.")
+    logger.info("For training, please use the `generate_offline_dataset.py` script.")
     logger.info("\nTesting `generate_diverse_dataset` for fixed validation/test sets...")
     test_data = simulator.generate_diverse_dataset(plds=np.arange(500, 3001, 500), n_subjects=10)
     if test_data['signals'].size > 0:

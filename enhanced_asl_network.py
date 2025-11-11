@@ -5,22 +5,6 @@ import torch.nn.functional as F
 from typing import List, Tuple, Optional, Dict, Any, Union
 import math
 
-class ResidualBlock(nn.Module):
-    """Residual block with batch normalization"""
-    def __init__(self, channels: int, dropout_rate: float = 0.1):
-        super().__init__()
-        self.layers = nn.Sequential(
-            nn.Linear(channels, channels),
-            nn.BatchNorm1d(channels),
-            nn.ReLU(),
-            nn.Dropout(dropout_rate),
-            nn.Linear(channels, channels),
-            nn.BatchNorm1d(channels)
-        )
-        
-    def forward(self, x: torch.Tensor) -> torch.Tensor:
-        return F.relu(x + self.layers(x))
-    
 class AttentionPooling(nn.Module):
     """
     Attention-based pooling to create a learned weighted average of sequence features.
@@ -38,23 +22,6 @@ class AttentionPooling(nn.Module):
         attn_weights = torch.softmax(attn_weights, dim=1)
         pooled = torch.bmm(attn_weights.transpose(1, 2), x)
         return pooled.squeeze(1)
-
-class CrossAttentionBlock(nn.Module):
-    """
-    A cross-attention block that allows a query sequence to attend to a key-value sequence.
-    Includes a residual connection and layer normalization.
-    """
-    def __init__(self, d_model: int, nhead: int, dropout: float = 0.1):
-        super().__init__()
-        self.cross_attn = nn.MultiheadAttention(d_model, nhead, dropout=dropout, batch_first=True)
-        self.norm = nn.LayerNorm(d_model)
-        self.dropout = nn.Dropout(dropout)
-
-    def forward(self, query: torch.Tensor, key_value: torch.Tensor) -> torch.Tensor:
-        attn_output, _ = self.cross_attn(query=query, key=key_value, value=key_value)
-        out = query + self.dropout(attn_output)
-        out = self.norm(out)
-        return out
 
 class UncertaintyHead(nn.Module):
     """Uncertainty estimation head with bounded log_var output."""
