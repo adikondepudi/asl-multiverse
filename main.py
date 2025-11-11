@@ -97,8 +97,8 @@ def run_comprehensive_asl_research(config: ResearchConfig, stage: int, output_di
     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
     script_logger.info(f"Using device: {device}")
 
-    # V5: Input size is 1 shape curve (num_plds*2) + 6 scalar features
-    base_input_size_nn = num_plds * 2 + 6
+    # V6: Input size is 1 shape curve (num_plds*2) + 8 scalar features
+    base_input_size_nn = num_plds * 2 + 8
     
     if not (config.use_offline_dataset and config.offline_dataset_path):
         script_logger.error("FATAL: Offline dataset is required. Please set `use_offline_dataset` to true and provide `offline_dataset_path`.")

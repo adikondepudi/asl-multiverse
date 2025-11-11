@@ -217,47 +217,56 @@ class FiLMLayer(nn.Module):
 
 class PhysicsInformedASLProcessor(nn.Module):
     """
-    V5 robust encoder architecture. It uses a single Conv1D tower to process
-    a per-instance normalized shape vector, then uses FiLM to inject scale and offset
-    information (mu, sigma) before preparing a final feature vector for the head.
+    V6 Physics-Conditioned encoder. It uses a dual-stream Conv1D architecture to process
+    per-curve normalized shape vectors for PCASL and VSASL independently. It then uses
+    separate FiLM layers to inject rich physical context (amplitudes, timing features)
+    into each stream before fusing them for the prediction head.
     """
     def __init__(self, n_plds: int, feature_dim: int, nhead: int, dropout_rate: float, **kwargs):
         super().__init__()
         self.n_plds = n_plds
-        self.num_scalar_features = 6 # V5: mu, sigma, 2xTTP, 2xCOM
+        self.num_scalar_features = 8 # V6: pcasl_mu, pcasl_sigma, vsasl_mu, vsasl_sigma, 2xTTP, 2xCOM
 
-        # A single tower for the 12-dim shape vector
-        self.shape_vector_tower = Conv1DFeatureExtractor(
-            in_channels=1, feature_dim=feature_dim, dropout_rate=dropout_rate
-        )
+        # Two separate towers for the disentangled shape vectors
+        self.pcasl_tower = Conv1DFeatureExtractor(in_channels=1, feature_dim=feature_dim, dropout_rate=dropout_rate)
+        self.vsasl_tower = Conv1DFeatureExtractor(in_channels=1, feature_dim=feature_dim, dropout_rate=dropout_rate)
 
-        self.film_layer = FiLMLayer(in_channels=feature_dim, conditioning_dim=self.num_scalar_features)
-
+        # Two separate FiLM layers to modulate each stream independently
+        self.pcasl_film = FiLMLayer(in_channels=feature_dim, conditioning_dim=self.num_scalar_features)
+        self.vsasl_film = FiLMLayer(in_channels=feature_dim, conditioning_dim=self.num_scalar_features)
+        
         self.attention_pooling = AttentionPooling(d_model=feature_dim)
         
+        # Fusion MLP combines information from both processed streams and the original scalar features
+        fusion_input_dim = (feature_dim * 2) + self.num_scalar_features
         self.final_fusion_mlp = nn.Sequential(
-            nn.Linear(feature_dim + self.num_scalar_features, 256),
+            nn.Linear(fusion_input_dim, 256),
             nn.ReLU(),
             nn.LayerNorm(256)
         )
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
-        # Input x is 18-dim: [shape_vector (12), standardized_scalar_features (6)]
-        shape_input = x[:, :self.n_plds * 2].unsqueeze(1) # -> (batch, 1, 12)
+        # Input x is 20-dim: [pcasl_shape (6), vsasl_shape(6), standardized_scalars (8)]
+        pcasl_shape_input = x[:, :self.n_plds].unsqueeze(1)
+        vsasl_shape_input = x[:, self.n_plds:self.n_plds * 2].unsqueeze(1)
         scalar_features = x[:, self.n_plds * 2:]
 
-        # 1. Process shape
-        shape_features = self.shape_vector_tower(shape_input) # -> (batch, feature_dim, 12)
+        # 1. Process shapes independently
+        pcasl_features = self.pcasl_tower(pcasl_shape_input) # -> (batch, feature_dim, n_plds)
+        vsasl_features = self.vsasl_tower(vsasl_shape_input) # -> (batch, feature_dim, n_plds)
 
-        # 2. Condition shape features with scalar information (mu, sigma, etc.)
-        conditioned_features = self.film_layer(shape_features, scalar_features) # -> (batch, feature_dim, 12)
+        # 2. Condition each stream's features with the full scalar context vector
+        conditioned_pcasl = self.pcasl_film(pcasl_features, scalar_features)
+        conditioned_vsasl = self.vsasl_film(vsasl_features, scalar_features)
 
-        # 3. Pool the conditioned sequence into a single context vector
-        conditioned_seq = conditioned_features.transpose(1, 2) # -> (batch, 12, feature_dim)
-        context_vector = self.attention_pooling(conditioned_seq) # -> (batch, feature_dim)
+        # 3. Pool each conditioned sequence into a single context vector
+        pcasl_seq = conditioned_pcasl.transpose(1, 2) # -> (batch, n_plds, feature_dim)
+        vsasl_seq = conditioned_vsasl.transpose(1, 2) # -> (batch, n_plds, feature_dim)
+        pcasl_context = self.attention_pooling(pcasl_seq) # -> (batch, feature_dim)
+        vsasl_context = self.attention_pooling(vsasl_seq) # -> (batch, feature_dim)
 
-        # 4. Fuse pooled shape context with scalar features for the head
-        final_input_to_head = torch.cat([context_vector, scalar_features], dim=1)
+        # 4. Fuse pooled contexts with original scalar features for the head
+        final_input_to_head = torch.cat([pcasl_context, vsasl_context, scalar_features], dim=1)
         final_output_vector = self.final_fusion_mlp(final_input_to_head)
         
         return final_output_vector

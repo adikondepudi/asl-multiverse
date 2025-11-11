@@ -49,7 +49,7 @@ def engineer_signal_features(raw_signal: np.ndarray, num_plds: int) -> np.ndarra
 # Top-level worker function for multiprocessing to be able to pickle it.
 def _worker_generate_sample(args_tuple):
     """
-    Generates a single raw data sample for statistics calculation. (V5 version)
+    Generates a single raw data sample for statistics calculation. (V6 Physics-Conditioned version)
     This is run in a separate process.
     """
     simulator, plds, seed = args_tuple
@@ -60,21 +60,23 @@ def _worker_generate_sample(args_tuple):
     true_cbf = np.random.uniform(*physio_var.cbf_range)
     true_t1_artery = np.random.uniform(*physio_var.t1_artery_range)
     
-    # Generate the clean signal
+    # Generate clean signals
     vsasl_clean = simulator._generate_vsasl_signal(plds, true_att, true_cbf, true_t1_artery, simulator.params.alpha_VSASL)
     pcasl_clean = simulator._generate_pcasl_signal(plds, true_att, true_cbf, true_t1_artery, simulator.params.T_tau, simulator.params.alpha_PCASL)
-    raw_signal_vector = np.concatenate([pcasl_clean, vsasl_clean])
     
-    # V5: Perform per-instance normalization to get a pure shape vector
-    mu = np.mean(raw_signal_vector)
-    sigma = np.std(raw_signal_vector)
-    shape_vector = (raw_signal_vector - mu) / (sigma + 1e-6)
+    # V6: Perform per-curve normalization to get pure shape vectors
+    pcasl_mu, pcasl_sigma = np.mean(pcasl_clean), np.std(pcasl_clean)
+    vsasl_mu, vsasl_sigma = np.mean(vsasl_clean), np.std(vsasl_clean)
+    pcasl_shape = (pcasl_clean - pcasl_mu) / (pcasl_sigma + 1e-6)
+    vsasl_shape = (vsasl_clean - vsasl_mu) / (vsasl_sigma + 1e-6)
+    shape_vector = np.concatenate([pcasl_shape, vsasl_shape])
 
-    # V5: Calculate engineered features from the scale-invariant shape vector
-    eng_features = engineer_signal_features(shape_vector, len(plds))
+    # V6: Calculate engineered features from the original clean curves for consistency
+    raw_signal_vector = np.concatenate([pcasl_clean, vsasl_clean])
+    eng_features = engineer_signal_features(raw_signal_vector, len(plds))
     
-    # V5: Assemble the 6 scalar features (scale, offset, and shape descriptors)
-    scalar_features = np.array([mu, sigma, *eng_features])
+    # V6: Assemble the 8 scalar features (separate PCASL/VSASL scale/offset + shape descriptors)
+    scalar_features = np.array([pcasl_mu, pcasl_sigma, vsasl_mu, vsasl_sigma, *eng_features])
     
     return shape_vector, true_cbf, true_att, scalar_features
 
@@ -82,7 +84,7 @@ def _worker_generate_sample(args_tuple):
 class ParallelStreamingStatsCalculator:
     """
     Calculates normalization statistics in parallel using a streaming algorithm
-    (Welford's algorithm) to minimize memory usage. (V5 version)
+    (Welford's algorithm) to minimize memory usage. (V6 Physics-Conditioned version)
     """
     def __init__(self, simulator, plds, num_samples, num_workers):
         self.simulator = simulator
@@ -90,7 +92,7 @@ class ParallelStreamingStatsCalculator:
         self.num_samples = num_samples
         self.num_workers = num_workers
         self.num_plds = len(plds)
-        self.num_scalar_features = 6 # V5: mu, sigma, 2xTTP, 2xCOM
+        self.num_scalar_features = 8 # V6: pcasl_mu, pcasl_sigma, vsasl_mu, vsasl_sigma, 2xTTP, 2xCOM
 
         # Initialize statistics using Welford's algorithm components
         self.count = 0

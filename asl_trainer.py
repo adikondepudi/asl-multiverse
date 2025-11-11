@@ -69,25 +69,34 @@ class ASLInMemoryDataset(Dataset):
             self.params_unnormalized = np.empty(0)
 
     def _process_signals(self, signals_unnorm: np.ndarray) -> np.ndarray:
-        # V5 Preprocessing: Per-instance normalization and assembly of 6 scalar features.
+        # V6 Preprocessing: Per-curve normalization and assembly of 8 scalar features.
         # The offline dataset has format: [raw_curves (12), eng_features_from_raw (4)]
         raw_curves = signals_unnorm[:, :self.num_plds * 2]
         eng_ttp_com = signals_unnorm[:, self.num_plds * 2:]
 
-        # 1. Perform per-instance normalization on raw (noisy) curves to get shape vector
-        mu = np.mean(raw_curves, axis=1, keepdims=True)
-        sigma = np.std(raw_curves, axis=1, keepdims=True)
-        shape_vector = (raw_curves - mu) / (sigma + 1e-6)
+        pcasl_raw = raw_curves[:, :self.num_plds]
+        vsasl_raw = raw_curves[:, self.num_plds:]
 
-        # 2. Assemble all 6 scalar features (mu, sigma, plus pre-calculated TTP/COM)
-        scalar_features_unnorm = np.concatenate([mu, sigma, eng_ttp_com], axis=1)
+        # 1. Perform per-curve normalization on raw (noisy) curves to get shape vectors
+        pcasl_mu = np.mean(pcasl_raw, axis=1, keepdims=True)
+        pcasl_sigma = np.std(pcasl_raw, axis=1, keepdims=True)
+        pcasl_shape = (pcasl_raw - pcasl_mu) / (pcasl_sigma + 1e-6)
+
+        vsasl_mu = np.mean(vsasl_raw, axis=1, keepdims=True)
+        vsasl_sigma = np.std(vsasl_raw, axis=1, keepdims=True)
+        vsasl_shape = (vsasl_raw - vsasl_mu) / (vsasl_sigma + 1e-6)
+
+        shape_vector = np.concatenate([pcasl_shape, vsasl_shape], axis=1)
+
+        # 2. Assemble all 8 scalar features (separate mu/sigma + pre-calculated TTP/COM)
+        scalar_features_unnorm = np.concatenate([pcasl_mu, pcasl_sigma, vsasl_mu, vsasl_sigma, eng_ttp_com], axis=1)
         
         # 3. Standardize the scalar features using pre-computed stats
         s_mean = np.array(self.norm_stats['scalar_features_mean'])
         s_std = np.array(self.norm_stats['scalar_features_std']) + 1e-6
         scalar_features_norm = (scalar_features_unnorm - s_mean) / s_std
 
-        # 4. Concatenate final input vector (shape vector is already instance-normalized)
+        # 4. Concatenate final input vector
         return np.concatenate([shape_vector, scalar_features_norm], axis=1)
 
     def _normalize_params(self, params_unnorm: np.ndarray) -> np.ndarray:
