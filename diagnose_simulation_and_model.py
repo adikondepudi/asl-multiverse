@@ -1,7 +1,7 @@
 # FILE: diagnose_simulation_and_model.py
-# FINAL CORRECTED VERSION (V6 Physics-Conditioned Architecture)
-# This version is updated to use the robust physics-conditioned preprocessing pipeline,
-# ensuring compatibility with the new model architecture and providing a fair comparison.
+# FINAL CORRECTED VERSION (V5 Architecture)
+# This version is updated to use the robust V5 preprocessing pipeline, ensuring
+# compatibility with the new model architecture and providing a fair comparison.
 
 import torch
 import numpy as np
@@ -34,40 +34,31 @@ except ImportError as e:
 NUM_SIMS_PER_DATAPOINT = 500 # Number of unique realizations per ground truth point
 
 # ==============================================================================
-# V6-SPECIFIC HELPER FUNCTIONS
+# V5-SPECIFIC HELPER FUNCTIONS
 # ==============================================================================
 
-def preprocess_for_physics_conditioned_model(raw_signal_curves: np.ndarray, norm_stats: dict, num_plds: int) -> np.ndarray:
+def preprocess_for_v5_model(raw_signal_curves: np.ndarray, norm_stats: dict, num_plds: int) -> np.ndarray:
     """
-    Applies the V6 Physics-Conditioned preprocessing pipeline to a single sample.
-    This exactly mirrors the logic in the ASLInMemoryDataset._process_signals method.
+    Applies the V5 preprocessing pipeline to a single sample.
+    This exactly mirrors the logic in the updated ASLInMemoryDataset.
     """
-    # 1. Split raw curves
-    pcasl_raw = raw_signal_curves[:num_plds]
-    vsasl_raw = raw_signal_curves[num_plds:]
+    # 1. Perform per-instance normalization on raw (noisy) curves to get shape vector
+    mu = np.mean(raw_signal_curves)
+    sigma = np.std(raw_signal_curves)
+    shape_vector = (raw_signal_curves - mu) / (sigma + 1e-6)
 
-    # 2. Perform per-curve normalization on raw (noisy) curves to get shape vectors
-    pcasl_mu, pcasl_sigma = np.mean(pcasl_raw), np.std(pcasl_raw)
-    pcasl_shape = (pcasl_raw - pcasl_mu) / (pcasl_sigma + 1e-6)
+    # 2. Calculate engineered features from the scale-invariant shape vector
+    eng_features = engineer_signal_features(shape_vector, num_plds)
 
-    vsasl_mu, vsasl_sigma = np.mean(vsasl_raw), np.std(vsasl_raw)
-    vsasl_shape = (vsasl_raw - vsasl_mu) / (vsasl_sigma + 1e-6)
-    
-    shape_vector = np.concatenate([pcasl_shape, vsasl_shape])
+    # 3. Assemble all 6 scalar features (mu, sigma, plus TTP/COM)
+    scalar_features_unnorm = np.array([mu, sigma, *eng_features])
 
-    # 3. Calculate engineered features from the original raw (noisy) curves.
-    # This is critical for consistency with how the training data was generated.
-    eng_features = engineer_signal_features(raw_signal_curves, num_plds)
-
-    # 4. Assemble all 8 scalar features
-    scalar_features_unnorm = np.array([pcasl_mu, pcasl_sigma, vsasl_mu, vsasl_sigma, *eng_features])
-
-    # 5. Standardize the scalar features using pre-computed stats
+    # 4. Standardize the scalar features using pre-computed stats
     s_mean = np.array(norm_stats['scalar_features_mean'])
     s_std = np.array(norm_stats['scalar_features_std']) + 1e-6
     scalar_features_norm = (scalar_features_unnorm - s_mean) / s_std
 
-    # 6. Concatenate final input vector and reshape for batch processing
+    # 5. Concatenate final input vector and reshape for batch processing
     final_input = np.concatenate([shape_vector, scalar_features_norm])
     return final_input.reshape(1, -1).astype(np.float32)
 
@@ -95,8 +86,8 @@ def load_artifacts(model_results_root: Path) -> tuple:
         num_plds = len(config['pld_values'])
         
         model_class = DisentangledASLNet
-        # V6 FIX: Input size is num_plds*2 (shape vector) + 8 (scalar features)
-        base_input_size = num_plds * 2 + 8
+        # V5 FIX: Input size is num_plds*2 (shape vector) + 6 (scalar features)
+        base_input_size = num_plds * 2 + 6
 
         for model_path in models_dir.glob('ensemble_model_*.pt'):
             model = model_class(mode='regression', input_size=base_input_size, **config)
@@ -118,11 +109,11 @@ def load_artifacts(model_results_root: Path) -> tuple:
         sys.exit(1)
 
 def predict_nn_single_voxel(noisy_signal: np.ndarray, models: list, config: dict, norm_stats: dict, device: torch.device) -> tuple:
-    """Runs a single voxel through the NN pipeline using V6 physics-conditioned preprocessing."""
+    """Runs a single voxel through the NN pipeline using V5 preprocessing."""
     num_plds = len(config['pld_values'])
     
-    # V6 FIX: Use the new self-contained preprocessing logic
-    norm_input = preprocess_for_physics_conditioned_model(noisy_signal, norm_stats, num_plds)
+    # V5 FIX: Use the new self-contained preprocessing logic
+    norm_input = preprocess_for_v5_model(noisy_signal, norm_stats, num_plds)
     input_tensor = torch.from_numpy(norm_input).to(device, dtype=torch.bfloat16)
 
     with torch.no_grad():
