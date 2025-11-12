@@ -348,14 +348,17 @@ class DisentangledASLNet(nn.Module):
 class CustomLoss(nn.Module):
     """
     Custom loss for the two-stage training strategy.
-    - Stage 1: Self-supervised denoising (MSE loss).
-    - Stage 2: Supervised regression (NLL loss).
+    Now with a principled Online Hard Example Mining (OHEM) implementation for Stage 2.
     """
     def __init__(self, 
                  training_stage: int,
                  w_cbf: float = 1.0, 
                  w_att: float = 1.0,
-                 log_var_reg_lambda: float = 0.0):
+                 log_var_reg_lambda: float = 0.0,
+                 # --- OHEM Configuration Parameters ---
+                 ohem_fraction: float = 1.0,
+                 ohem_start_epoch: int = 0,
+                 loss_clip_percentile: float = 1.0):
         super().__init__()
         if training_stage not in [1, 2]:
             raise ValueError("training_stage must be 1 or 2.")
@@ -364,6 +367,40 @@ class CustomLoss(nn.Module):
         self.w_att = w_att
         self.log_var_reg_lambda = log_var_reg_lambda
         self.mse_loss = nn.MSELoss()
+
+        # Store OHEM parameters
+        self.ohem_fraction = ohem_fraction
+        self.ohem_start_epoch = ohem_start_epoch
+        self.loss_clip_percentile = loss_clip_percentile
+
+    def _apply_ohem(self, unreduced_loss: torch.Tensor) -> torch.Tensor:
+        """
+        Applies OHEM to a batch of per-sample losses, returning only the hard examples.
+        This method is designed to be robust against outliers and numerically stable.
+        """
+        batch_size = unreduced_loss.numel()
+        num_hard = int(self.ohem_fraction * batch_size)
+        
+        # In the edge case of batch size 1 or no mining, return the original loss
+        if num_hard >= batch_size:
+            return unreduced_loss
+
+        # 1. Handle Outliers: Clip the loss before selecting top-K to prevent a single
+        #    extreme outlier from dominating the selection process.
+        loss_for_selection = unreduced_loss
+        if self.loss_clip_percentile < 1.0:
+            with torch.no_grad():
+                clip_value = torch.quantile(unreduced_loss.float(), self.loss_clip_percentile)
+            loss_for_selection = torch.clamp(unreduced_loss, max=clip_value)
+
+        # 2. Select the indices of the top-K hardest examples.
+        _, top_k_indices = torch.topk(loss_for_selection, num_hard)
+
+        # 3. Use these indices to select the *original*, unclipped losses for backpropagation.
+        #    This ensures the gradient magnitude for hard examples is not artificially reduced.
+        hard_losses = unreduced_loss[top_k_indices]
+        
+        return hard_losses
 
     def forward(self,
                 model_outputs: Tuple,
@@ -380,18 +417,28 @@ class CustomLoss(nn.Module):
             cbf_pred_norm, att_pred_norm, cbf_log_var, att_log_var, _, _ = model_outputs
             cbf_true_norm, att_true_norm = targets[:, 0:1], targets[:, 1:2]
             
+            # --- Calculate per-sample NLL loss for the entire batch ---
             cbf_precision = torch.exp(-cbf_log_var)
             att_precision = torch.exp(-att_log_var)
-
             cbf_nll_loss = 0.5 * (cbf_precision * (cbf_pred_norm - cbf_true_norm)**2 + cbf_log_var)
             att_nll_loss = 0.5 * (att_precision * (att_pred_norm - att_true_norm)**2 + att_log_var)
+            combined_nll_loss = self.w_cbf * cbf_nll_loss + self.w_att * att_nll_loss
+            
+            # Ensure the loss is a 1D tensor for OHEM processing
+            unreduced_loss = combined_nll_loss.squeeze()
 
-            weighted_cbf_loss = self.w_cbf * cbf_nll_loss
-            weighted_att_loss = self.w_att * att_nll_loss
+            # --- Principled OHEM Logic ---
+            # Check if OHEM is active for this training stage and epoch
+            if self.ohem_fraction < 1.0 and global_epoch >= self.ohem_start_epoch:
+                final_losses_to_average = self._apply_ohem(unreduced_loss)
+            else:
+                # Standard training (or in warm-up phase)
+                final_losses_to_average = unreduced_loss
             
-            combined_nll_loss = weighted_cbf_loss + weighted_att_loss
-            total_param_loss = torch.mean(combined_nll_loss)
+            # The final parameter loss is the mean of either all losses or only the hard ones
+            total_param_loss = torch.mean(final_losses_to_average)
             
+            # --- Regularization (applied as before) ---
             log_var_regularization = torch.tensor(0.0, device=total_param_loss.device)
             if self.log_var_reg_lambda > 0:
                 log_var_regularization = self.log_var_reg_lambda * (torch.mean(cbf_log_var**2) + torch.mean(att_log_var**2))
@@ -401,6 +448,6 @@ class CustomLoss(nn.Module):
             loss_components = {
                 'param_nll_loss': total_param_loss,
                 'log_var_reg_loss': log_var_regularization,
-                'unreduced_loss': combined_nll_loss
+                'unreduced_loss': unreduced_loss # Return original for diagnostics/logging
             }
             return total_loss, loss_components

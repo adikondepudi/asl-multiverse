@@ -236,30 +236,39 @@ if __name__ == "__main__":
         script_logger.error(f"FATAL: Configuration file {config_path} is empty or invalid.")
         sys.exit(1)
     
-    # FINAL ROBUST PARSING LOGIC
-    for section, params in config_from_yaml.items():
-        # Handle nested dictionaries like 'training', 'data', etc.
-        if isinstance(params, dict):
-            # Handle special top-level dicts like 'moe', 'fine_tuning'
-            if hasattr(config_obj, section):
-                 # Ensure we don't overwrite the whole dict if it's already a dict
-                current_attr = getattr(config_obj, section)
-                if isinstance(current_attr, dict):
-                    current_attr.update(params)
-                else:
-                    setattr(config_obj, section, params)
-            
-            # Handle flattened params inside nested dicts
-            for key, value in params.items():
-                if hasattr(config_obj, key):
-                    setattr(config_obj, key, value)
-        else:
-            # Handle top-level key-value pairs
-            if hasattr(config_obj, section):
-                setattr(config_obj, section, params)
+    # --- SUPERIOR CONFIGURATION PARSING LOGIC ---
+    # This robust function recursively traverses the entire YAML structure, including
+    # nested dictionaries and lists, to find and apply all relevant key-value pairs
+    # to the ResearchConfig dataclass object.
+    
+    def apply_yaml_to_dataclass(data: Any, config_object: ResearchConfig):
+        """
+        Recursively traverses nested dictionaries and lists from the YAML file
+        and applies any key-value pairs that match attributes in the config_object.
+        """
+        if isinstance(data, dict):
+            for key, value in data.items():
+                # If the key corresponds to a special dict attribute (e.g., 'moe'), update it directly.
+                if hasattr(config_object, key) and isinstance(getattr(config_object, key), dict) and isinstance(value, dict):
+                    getattr(config_object, key).update(value)
+                # If the key is a parameter in our config, set its value.
+                elif hasattr(config_object, key):
+                    setattr(config_object, key, value)
+                
+                # Always recurse into nested structures to find more parameters.
+                if isinstance(value, (dict, list)):
+                    apply_yaml_to_dataclass(value, config_object)
+        
+        elif isinstance(data, list):
+            # If the data is a list, iterate through its items and recurse.
+            for item in data:
+                apply_yaml_to_dataclass(item, config_object)
+
+    apply_yaml_to_dataclass(config_from_yaml, config_obj)
     
     script_logger.info(f"Successfully loaded and applied configuration from {config_path}")
     
+    # --- OUTPUT DIRECTORY SETUP ---
     if args.output_dir:
         output_path = Path(args.output_dir)
     else:
@@ -268,6 +277,7 @@ if __name__ == "__main__":
         output_path = Path(f'comprehensive_results/{run_name_prefix}_{timestamp}')
     output_path.mkdir(parents=True, exist_ok=True)
     
+    # --- STAGE 2 WEIGHTS PATH SETUP ---
     if args.stage == 2:
         encoder_path = Path(args.load_weights_from) / 'encoder_pretrained.pt'
         if not encoder_path.exists():
@@ -275,9 +285,11 @@ if __name__ == "__main__":
             sys.exit(1)
         config_obj.pretrained_encoder_path = str(encoder_path)
 
+    # --- WANDB SETUP ---
     if args.run_name:
         os.environ['WANDB_RUN_NAME'] = args.run_name
 
+    # --- NORMALIZATION STATS CALCULATION/LOADING ---
     norm_stats_path = output_path / 'norm_stats.json'
     if norm_stats_path.exists():
         script_logger.info(f"Loading cached normalization stats from {norm_stats_path}")
@@ -288,7 +300,8 @@ if __name__ == "__main__":
         plds_np = np.array(config_obj.pld_values)
         asl_params_sim = ASLParameters(**{k:v for k,v in asdict(config_obj).items() if k in ASLParameters.__annotations__})
         simulator = RealisticASLSimulator(params=asl_params_sim)
-        num_stat_workers = os.cpu_count() or 1
+        # Use a reasonable number of workers for stats calculation
+        num_stat_workers = min(os.cpu_count() or 1, 16)
         stats_calculator = ParallelStreamingStatsCalculator(
             simulator=simulator, plds=plds_np, num_samples=config_obj.num_samples, num_workers=num_stat_workers
         )
@@ -297,4 +310,5 @@ if __name__ == "__main__":
         with open(norm_stats_path, 'w') as f:
             json.dump(norm_stats, f, indent=2)
 
+    # --- START THE RESEARCH PIPELINE ---
     run_comprehensive_asl_research(config=config_obj, stage=args.stage, output_dir=output_path, norm_stats=norm_stats)

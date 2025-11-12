@@ -122,8 +122,17 @@ class EnhancedASLTrainer:
         if wandb.run:
             for i, model in enumerate(self.models): wandb.watch(model, log='gradients', log_freq=200, idx=i)
         
-        loss_params = {'training_stage': stage, 'w_cbf': model_config.get('loss_weight_cbf', 1.0), 'w_att': model_config.get('loss_weight_att', 1.0),
-                       'log_var_reg_lambda': model_config.get('loss_log_var_reg_lambda', 0.0)}; self.custom_loss_fn = CustomLoss(**loss_params)
+        # MODIFIED: Pass new OHEM parameters from the config to the CustomLoss constructor.
+        loss_params = {
+            'training_stage': stage,
+            'w_cbf': model_config.get('loss_weight_cbf', 1.0),
+            'w_att': model_config.get('loss_weight_att', 1.0),
+            'log_var_reg_lambda': model_config.get('loss_log_var_reg_lambda', 0.0),
+            'ohem_fraction': model_config.get('ohem_fraction', 1.0),
+            'ohem_start_epoch': model_config.get('ohem_start_epoch', 0),
+            'loss_clip_percentile': model_config.get('loss_clip_percentile', 1.0)
+        }
+        self.custom_loss_fn = CustomLoss(**loss_params)
         self.global_step = 0; self.norm_stats = None
 
     def train_ensemble(self,
