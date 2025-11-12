@@ -1,4 +1,5 @@
 # FILE: run_diagnostics.py
+# CORRECTED VERSION
 import torch
 import numpy as np
 import pandas as pd
@@ -22,6 +23,7 @@ try:
     from enhanced_simulation import RealisticASLSimulator, PhysiologicalVariation
     from enhanced_asl_network import DisentangledASLNet, CustomLoss
     from asl_trainer import ASLInMemoryDataset
+    from utils import engineer_signal_features # <--- FIX 1: ADDED THIS IMPORT
 except ImportError as e:
     print(f"FATAL: Could not import necessary project files. Error: {e}")
     print("Please run this script from the root directory of the 'adikondepudi-asl-multiverse' project.")
@@ -236,6 +238,8 @@ def diagnostic_2_and_3_model_and_loss(models, config, norm_stats, device, simula
     handle = gating_network.register_forward_hook(hook_fn)
 
     # --- Iterate over the parameter grid ---
+    # Create a single dataset object to reuse its methods
+    val_dataset = ASLInMemoryDataset(data_dir=None, norm_stats=norm_stats, stage=2)
     pbar = tqdm(total=GRID_RESOLUTION * GRID_RESOLUTION, desc="Analyzing model over parameter grid")
     for i, cbf in enumerate(cbf_grid):
         for j, att in enumerate(att_grid):
@@ -244,9 +248,11 @@ def diagnostic_2_and_3_model_and_loss(models, config, norm_stats, device, simula
             
             # --- Prepare input for model ---
             # This follows the exact preprocessing logic from ASLInMemoryDataset
-            val_dataset = ASLInMemoryDataset(data_dir=None, norm_stats=norm_stats, stage=2)
             raw_curves = np.concatenate([data_dict['MULTIVERSE'][0, 0, :, 0], data_dict['MULTIVERSE'][0, 0, :, 1]])
-            eng_features = val_dataset.engineer_signal_features(raw_curves.reshape(1,-1), len(plds_np))
+            
+            # <--- FIX 2: CALL engineer_signal_features AS A STANDALONE FUNCTION ---
+            eng_features = engineer_signal_features(raw_curves.reshape(1,-1), len(plds_np))
+
             input_for_processing = np.concatenate([raw_curves, eng_features.flatten()]).reshape(1,-1)
             processed_input = val_dataset._process_signals(input_for_processing)
             input_tensor = torch.from_numpy(processed_input.astype(np.float32)).to(device, dtype=torch.bfloat16)
