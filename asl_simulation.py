@@ -7,38 +7,36 @@ import multiprocessing as mp
 from itertools import product
 import numba
 
+# --- CHANGED FOR BASELINE EXPERIMENT ---
+# The SIB (Signal Intensity of Blood) factor has been removed.
+# This function now implements the simple two-condition VSASL model from the main paper,
+# which assumes fresh blood is always available for labeling (SIB=1.0).
+# This creates a "perfect world" scenario for debugging the network.
 @numba.jit(nopython=True, cache=True)
 def _generate_vsasl_signal_jit(plds, att, cbf_ml_g_s, t1_artery, alpha2, T2_factor, t_sat_vs):
-    """JIT-compiled worker for VSASL signal generation, corrected with SIB model."""
+    """JIT-compiled worker for VSASL signal generation (SIMPLE MODEL)."""
     M0_b = 1.0
     lambda_blood = 0.90
     signal = np.zeros_like(plds, dtype=np.float64)
 
-    # Determine the initial magnetization of blood (SIB) based on the T_sat effect,
-    SIB = 1.0
-    if att > t_sat_vs:
-        # If ATT > T_sat, fresh blood has not arrived. The blood at the labeling
-        # location is still recovering from the initial saturation pulse.
-        # Its magnetization has recovered for a duration of t_sat_vs.
-        SIB = 1.0 - np.exp(-t_sat_vs / t1_artery)
-
     # Calculate the base signal assuming full initial magnetization (SIB=1.0)
-    # Condition 1: PLD <= ATT
+    # This loop directly implements Equations 4 & 5 from the main paper.
     for i in range(plds.shape[0]):
+        # Condition 1: PLD <= ATT (Equation 4, simplified)
         if plds[i] <= att:
             signal[i] = (2 * M0_b * cbf_ml_g_s * alpha2 / lambda_blood *
                          (plds[i] / 1000.0) *
                          np.exp(-plds[i] / t1_artery) *
                          T2_factor)
-        # Condition 2: PLD > ATT
+        # Condition 2: PLD > ATT (Equation 5, simplified)
         else:
             signal[i] = (2 * M0_b * cbf_ml_g_s * alpha2 / lambda_blood *
                          (att / 1000.0) *
                          np.exp(-plds[i] / t1_artery) *
                          T2_factor)
             
-    # Apply the SIB scaling factor to the entire calculated signal.
-    return signal * SIB
+    return signal
+# --- END OF CHANGE ---
 
 @numba.jit(nopython=True, cache=True)
 def _generate_pcasl_signal_jit(plds, att, cbf_ml_g_s, t1_artery, t_tau, alpha1, T2_factor):
@@ -131,7 +129,7 @@ class ASLSimulator:
                               t_tau_val: Optional[float] = None,
                               alpha_pcasl_val: Optional[float] = None,
                               alpha_vsasl_val: Optional[float] = None) -> Dict[str, np.ndarray]:
-        """Generate synthetic ASL data with realistic noise"""
+        """Generate synthetic ASL data with simple Gaussian noise."""
 
         # Use provided parameters or fall back to instance parameters
         current_cbf = cbf_val if cbf_val is not None else self.params.CBF

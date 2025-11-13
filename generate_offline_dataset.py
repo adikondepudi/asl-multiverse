@@ -40,9 +40,27 @@ def generate_and_save_chunk(args):
         pcasl_clean = simulator._generate_pcasl_signal(plds, true_att, true_cbf, true_t1_artery, perturbed_t_tau, perturbed_alpha_pcasl)
         clean_signal_vector = np.concatenate([pcasl_clean, vsasl_clean])
 
-        pcasl_noisy = simulator.add_realistic_noise(pcasl_clean, snr=current_snr)
-        vsasl_noisy = simulator.add_realistic_noise(vsasl_clean, snr=current_snr)
+        # --- CHANGED FOR BASELINE EXPERIMENT ---
+        # The call to the complex `add_realistic_noise` has been replaced with a simple,
+        # pure Gaussian noise model. This implementation correctly scales the noise based on
+        # a reference signal, the target SNR, and the multi-PLD acquisition timing.
+        
+        # 1. Calculate the noise standard deviation based on a reference signal and SNR
+        ref_signal_level = simulator._compute_reference_signal()
+        noise_sd = ref_signal_level / current_snr
+
+        # 2. Get the correct scaling factor for the multi-PLD scan duration
+        noise_scaling = simulator.compute_tr_noise_scaling(plds)
+        
+        # 3. Generate and add pure Gaussian noise to the clean signals
+        pcasl_noise = noise_sd * noise_scaling['PCASL'] * np.random.randn(num_plds)
+        vsasl_noise = noise_sd * noise_scaling['VSASL'] * np.random.randn(num_plds)
+        
+        pcasl_noisy = pcasl_clean + pcasl_noise
+        vsasl_noisy = vsasl_clean + vsasl_noise
+        
         noisy_signal_vector = np.concatenate([pcasl_noisy, vsasl_noisy])
+        # --- END OF CHANGE ---
         
         eng_features = engineer_signal_features(noisy_signal_vector.reshape(1, -1), num_plds)
         final_noisy_input = np.concatenate([noisy_signal_vector, eng_features.flatten()])

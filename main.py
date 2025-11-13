@@ -26,7 +26,7 @@ warnings.filterwarnings('ignore', category=UserWarning)
 
 from enhanced_asl_network import DisentangledASLNet, CustomLoss, PhysicsInformedASLProcessor
 from asl_simulation import ASLParameters
-from enhanced_simulation import RealisticASLSimulator
+from enhanced_simulation import RealisticASLSimulator, PhysiologicalVariation
 from asl_trainer import EnhancedASLTrainer, ASLInMemoryDataset
 from torch.utils.data import DataLoader
 from utils import ParallelStreamingStatsCalculator, engineer_signal_features
@@ -35,6 +35,7 @@ script_logger = logging.getLogger(__name__)
 
 @dataclass
 class ResearchConfig:
+    # ... (rest of the dataclass is unchanged) ...
     model_class_name: str = "DisentangledASLNet"
     encoder_type: str = 'physics_processor'
     hidden_sizes: List[int] = field(default_factory=lambda: [256, 128, 64])
@@ -73,7 +74,65 @@ class ResearchConfig:
     transformer_nhead_model: int = 4
     transformer_nlayers_model: int = 2
 
+# --- NEW HELPER FUNCTION FOR BASELINE EXPERIMENT ---
+def _generate_simple_validation_set(simulator: RealisticASLSimulator, plds: np.ndarray, n_subjects: int, conditions: List, noise_levels: List) -> Dict:
+    """
+    Generates a validation set using SIMPLE GAUSSIAN NOISE to match the baseline training data.
+    This is a simplified, local version of the `generate_diverse_dataset` function.
+    """
+    dataset = {'signals': [], 'parameters': [], 'conditions': [], 'noise_levels': [], 'perturbed_params': []}
+    physio_var = simulator.physio_var
+    base_params = simulator.params
+    num_plds = len(plds)
+
+    condition_map = {
+        'healthy': (physio_var.cbf_range, physio_var.att_range, physio_var.t1_artery_range),
+        'stroke': (physio_var.stroke_cbf_range, physio_var.stroke_att_range, (physio_var.t1_artery_range[0]-100, physio_var.t1_artery_range[1]+100)),
+        'tumor': (physio_var.tumor_cbf_range, physio_var.tumor_att_range, (physio_var.t1_artery_range[0]-150, physio_var.t1_artery_range[1]+150)),
+        'elderly': (physio_var.elderly_cbf_range, physio_var.elderly_att_range, (physio_var.t1_artery_range[0]+50, physio_var.t1_artery_range[1]+150))
+    }
+
+    for _ in range(n_subjects):
+        condition = np.random.choice(conditions)
+        cbf_range, att_range, t1_range = condition_map.get(condition, (physio_var.cbf_range, physio_var.att_range, physio_var.t1_artery_range))
+
+        cbf = np.random.uniform(*cbf_range)
+        att = np.random.uniform(*att_range)
+        t1_a = np.random.uniform(*t1_range)
+        
+        perturbed_t_tau = base_params.T_tau * (1 + np.random.uniform(*physio_var.t_tau_perturb_range))
+        perturbed_alpha_pcasl = np.clip(base_params.alpha_PCASL * (1 + np.random.uniform(*physio_var.alpha_perturb_range)), 0.1, 1.1)
+        perturbed_alpha_vsasl = np.clip(base_params.alpha_VSASL * (1 + np.random.uniform(*physio_var.alpha_perturb_range)), 0.1, 1.0)
+        
+        vsasl_clean = simulator._generate_vsasl_signal(plds, att, cbf, t1_a, perturbed_alpha_vsasl)
+        pcasl_clean = simulator._generate_pcasl_signal(plds, att, cbf, t1_a, perturbed_t_tau, perturbed_alpha_pcasl)
+        
+        for snr in noise_levels:
+            ref_signal_level = simulator._compute_reference_signal()
+            noise_sd = ref_signal_level / snr
+            noise_scaling = simulator.compute_tr_noise_scaling(plds)
+            
+            pcasl_noisy = pcasl_clean + noise_sd * noise_scaling['PCASL'] * np.random.randn(num_plds)
+            vsasl_noisy = vsasl_clean + noise_sd * noise_scaling['VSASL'] * np.random.randn(num_plds)
+            
+            multiverse_signal_flat = np.concatenate([pcasl_noisy, vsasl_noisy])
+            
+            dataset['signals'].append(multiverse_signal_flat)
+            dataset['parameters'].append([cbf, att])
+            dataset['conditions'].append(condition)
+            dataset['noise_levels'].append(snr)
+            dataset['perturbed_params'].append({
+                't1_artery': t1_a, 't_tau': perturbed_t_tau, 
+                'alpha_pcasl': perturbed_alpha_pcasl, 'alpha_vsasl': perturbed_alpha_vsasl
+            })
+
+    dataset['signals'] = np.array(dataset['signals'])
+    dataset['parameters'] = np.array(dataset['parameters'])
+    return dataset
+# --- END OF NEW HELPER FUNCTION ---
+
 def run_comprehensive_asl_research(config: ResearchConfig, stage: int, output_dir: Path, norm_stats: Dict) -> Dict:
+    # ... (function start is unchanged) ...
     output_dir.mkdir(parents=True, exist_ok=True)
     torch.backends.cudnn.benchmark = True
 
@@ -115,12 +174,17 @@ def run_comprehensive_asl_research(config: ResearchConfig, stage: int, output_di
     train_loader = DataLoader(train_dataset, batch_size=config.batch_size, num_workers=num_workers,
                                  pin_memory=True, persistent_workers=(num_workers > 0), shuffle=True)
     
-    script_logger.info("Generating a fixed validation dataset for stable evaluation metrics...")
-    validation_data_dict = simulator.generate_diverse_dataset(
-        plds=plds_np, n_subjects=200, 
+    # --- CHANGED FOR BASELINE EXPERIMENT ---
+    # The validation set is now generated using the new helper function that applies
+    # only simple Gaussian noise, ensuring consistency with the training data.
+    script_logger.info("Generating a fixed validation dataset with SIMPLE GAUSSIAN NOISE...")
+    validation_data_dict = _generate_simple_validation_set(
+        simulator=simulator, plds=plds_np, n_subjects=200, 
         conditions=['healthy', 'stroke', 'tumor', 'elderly'], 
         noise_levels=[5.0, 10.0, 15.0]
     )
+    # --- END OF CHANGE ---
+
     val_signals_noisy_raw = validation_data_dict['signals']
     # NOTE: For validation, engineered features are calculated from noisy curves to simulate real-world usage
     val_features_eng = engineer_signal_features(val_signals_noisy_raw, num_plds)
@@ -148,6 +212,7 @@ def run_comprehensive_asl_research(config: ResearchConfig, stage: int, output_di
 
     val_loader = DataLoader(val_dataset, batch_size=config.batch_size, num_workers=num_workers, pin_memory=True, shuffle=False)
     
+    # ... (rest of the run_comprehensive_asl_research function is unchanged) ...
     model_creation_config = asdict(config)
     model_mode = 'denoising' if stage == 1 else 'regression'
     def create_model_closure(**kwargs): return DisentangledASLNet(mode=model_mode, input_size=base_input_size_nn, **kwargs)
@@ -206,7 +271,8 @@ def run_comprehensive_asl_research(config: ResearchConfig, stage: int, output_di
         wandb.finish()
         
     return {}
-
+    
+# ... (rest of the main.py file, including the __main__ block, is unchanged) ...
 if __name__ == "__main__":
     logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(name)s - %(levelname)s - %(message)s', handlers=[logging.StreamHandler(sys.stdout)], force=True) 
     
@@ -236,27 +302,22 @@ if __name__ == "__main__":
         script_logger.error(f"FATAL: Configuration file {config_path} is empty or invalid.")
         sys.exit(1)
     
-    # FINAL ROBUST PARSING LOGIC
-    for section, params in config_from_yaml.items():
-        # Handle nested dictionaries like 'training', 'data', etc.
-        if isinstance(params, dict):
-            # Handle special top-level dicts like 'moe', 'fine_tuning'
-            if hasattr(config_obj, section):
-                 # Ensure we don't overwrite the whole dict if it's already a dict
-                current_attr = getattr(config_obj, section)
-                if isinstance(current_attr, dict):
-                    current_attr.update(params)
-                else:
-                    setattr(config_obj, section, params)
-            
-            # Handle flattened params inside nested dicts
-            for key, value in params.items():
-                if hasattr(config_obj, key):
-                    setattr(config_obj, key, value)
-        else:
-            # Handle top-level key-value pairs
-            if hasattr(config_obj, section):
-                setattr(config_obj, section, params)
+    def apply_yaml_to_dataclass(data: Any, config_object: ResearchConfig):
+        if isinstance(data, dict):
+            for key, value in data.items():
+                if hasattr(config_object, key) and isinstance(getattr(config_object, key), dict) and isinstance(value, dict):
+                    getattr(config_object, key).update(value)
+                elif hasattr(config_object, key):
+                    setattr(config_object, key, value)
+                
+                if isinstance(value, (dict, list)):
+                    apply_yaml_to_dataclass(value, config_object)
+        
+        elif isinstance(data, list):
+            for item in data:
+                apply_yaml_to_dataclass(item, config_object)
+
+    apply_yaml_to_dataclass(config_from_yaml, config_obj)
     
     script_logger.info(f"Successfully loaded and applied configuration from {config_path}")
     
@@ -288,7 +349,7 @@ if __name__ == "__main__":
         plds_np = np.array(config_obj.pld_values)
         asl_params_sim = ASLParameters(**{k:v for k,v in asdict(config_obj).items() if k in ASLParameters.__annotations__})
         simulator = RealisticASLSimulator(params=asl_params_sim)
-        num_stat_workers = os.cpu_count() or 1
+        num_stat_workers = min(os.cpu_count() or 1, 16)
         stats_calculator = ParallelStreamingStatsCalculator(
             simulator=simulator, plds=plds_np, num_samples=config_obj.num_samples, num_workers=num_stat_workers
         )
