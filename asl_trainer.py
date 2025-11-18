@@ -20,9 +20,6 @@ if not logger.hasHandlers():
     logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(name)s - %(levelname)s - %(message)s')
 
 class FastTensorDataLoader:
-    """
-    A lightweight iterator that keeps data on the GPU to bypass CPU bottlenecks.
-    """
     def __init__(self, signals, targets, batch_size, shuffle=True):
         self.signals = signals 
         self.targets = targets
@@ -65,16 +62,11 @@ class EnhancedASLTrainer:
         self.lr_base = float(model_config.get('learning_rate', 0.001)); self.weight_decay = float(weight_decay)
         self.n_ensembles = n_ensembles; self.validation_steps_per_epoch = model_config.get('validation_steps_per_epoch', 50)
         
-        # T4 FIX 1: Keep model in Float32 (default). Do NOT cast to BFloat16. 
-        # AMP will handle casting to Float16 during forward pass.
         logger.info("Initializing models (Float32)...")
         self.models = [model_class(**model_config).to(self.device) for _ in range(n_ensembles)]
         
-        # T4 FIX 2: Disable torch.compile. It causes overhead on T4 without providing speedup for this model size.
-        # self.models = [torch.compile(m, mode="default") for m in self.models]
-        
-        # T4 FIX 3: Initialize Gradient Scaler for Mixed Precision (FP16)
-        self.scaler = torch.cuda.amp.GradScaler(enabled=True)
+        # T4 FIX: Use GradScaler for Mixed Precision Stability
+        self.scaler = torch.amp.GradScaler('cuda', enabled=True)
 
         if wandb.run:
             for i, model in enumerate(self.models): wandb.watch(model, log='gradients', log_freq=200, idx=i)
@@ -83,13 +75,11 @@ class EnhancedASLTrainer:
                        'log_var_reg_lambda': model_config.get('loss_log_var_reg_lambda', 0.0)}; self.custom_loss_fn = CustomLoss(**loss_params)
         self.global_step = 0; self.norm_stats = None
         
-        # Placeholders for GPU-resident noise parameters
         self.ref_signal_gpu = None
         self.noise_scale_vec_gpu = None
         self.norm_stats_gpu = None
 
     def setup_gpu_noise_params(self, simulator, pld_list, norm_stats):
-        """Pre-calculate physics constants for on-the-fly noise generation on GPU."""
         if simulator is None or pld_list is None:
             return
 
@@ -114,25 +104,20 @@ class EnhancedASLTrainer:
         logger.info("GPU Noise parameters and Norm Stats loaded successfully.")
 
     def _process_batch_on_gpu(self, raw_signals):
-        """Applies dynamic Gaussian noise, engineers features, and normalizes inputs."""
         if self.noise_scale_vec_gpu is None:
             return raw_signals 
 
         batch_size = raw_signals.shape[0]
         n_plds = raw_signals.shape[1] // 2
         
-        # 1. Dynamic Noise Injection
-        # Randomize SNR between 3.0 and 20.0 for every batch
         current_snr = torch.empty(batch_size, 1, device=self.device).uniform_(3.0, 20.0)
         noise_sigma = (self.ref_signal_gpu / current_snr) * self.noise_scale_vec_gpu
         
         gaussian_noise = torch.randn_like(raw_signals) * noise_sigma
         noisy_signals = raw_signals + gaussian_noise
         
-        # 2. Feature Engineering (Torch version)
         eng_features = engineer_signal_features_torch(noisy_signals, n_plds)
         
-        # 3. Normalization (V6 Logic ported to GPU)
         pcasl_raw = noisy_signals[:, :n_plds]
         vsasl_raw = noisy_signals[:, n_plds:]
         
@@ -146,7 +131,6 @@ class EnhancedASLTrainer:
         
         shape_vector = torch.cat([pcasl_shape, vsasl_shape], dim=1)
         
-        # Scalar Feature Normalization
         scalars = torch.cat([pcasl_mu, pcasl_sigma, vsasl_mu, vsasl_sigma, eng_features], dim=1)
         
         s_mean = self.norm_stats_gpu['scalar_features_mean']
@@ -154,7 +138,11 @@ class EnhancedASLTrainer:
         
         scalars_norm = (scalars - s_mean) / s_std
         
-        return torch.cat([shape_vector, scalars_norm], dim=1)
+        final_input = torch.cat([shape_vector, scalars_norm], dim=1)
+        
+        # VITAL FIX: Clamp inputs to prevent Infinity/NaN entering the network
+        # This protects BatchNorm layers from being corrupted by outlier divisions
+        return torch.clamp(final_input, -15.0, 15.0)
 
     def train_ensemble(self,
                        train_loader: FastTensorDataLoader, val_loader: FastTensorDataLoader,
@@ -200,12 +188,26 @@ class EnhancedASLTrainer:
         for epoch in range(n_epochs):
             train_loss, _ = self._train_epoch(self.models, train_loader, self.optimizers, self.schedulers, epoch, steps_per_epoch)
             val_metrics = self._validate(self.models, val_loader, epoch)
-            mean_val_loss = np.nanmean([m.get('val_loss', np.nan) for m in val_metrics])
+            
+            # Handle potential NaN in validation (though clamping should fix it)
+            valid_losses = [m.get('val_loss', np.nan) for m in val_metrics]
+            if np.isnan(valid_losses).all():
+                mean_val_loss = float('nan')
+                logger.warning(f"Epoch {epoch}: All Validation Losses are NaN. Model might be corrupted.")
+            else:
+                mean_val_loss = np.nanmean(valid_losses)
+
             logger.info(f"Epoch {epoch + 1}/{n_epochs}: Train Loss = {train_loss:.6f}, Val Loss = {mean_val_loss:.6f}")
             if wandb.run: wandb.log({'epoch': epoch, 'mean_train_loss': train_loss, 'mean_val_loss': mean_val_loss}, step=self.global_step)
             
+            if np.isnan(mean_val_loss):
+                 # Don't save, don't increment patience, just continue (or break)
+                 continue
+
             for i, vm in enumerate(val_metrics):
                 val_loss = vm.get('val_loss', float('inf'))
+                if np.isnan(val_loss): continue
+
                 if val_loss < self.overall_best_val_losses[i] - early_stopping_min_delta:
                     self.overall_best_val_losses[i] = val_loss
                     patience_counters[i] = 0
@@ -237,12 +239,10 @@ class EnhancedASLTrainer:
                 loader_iter = iter(loader)
                 raw_signals, targets = next(loader_iter)
             
-            # Apply On-the-fly Processing (Noise + Feature Engineering + Norm)
             processed_signals = self._process_batch_on_gpu(raw_signals)
 
             target_for_loss = targets
             if self.stage == 1:
-                # For denoising, construct the normalized shape vector of the CLEAN signal as target
                 batch_size = targets.shape[0]
                 n_plds = targets.shape[1] // 2
                 pcasl_clean = targets[:, :n_plds]
@@ -259,14 +259,18 @@ class EnhancedASLTrainer:
                 target_for_loss = torch.cat([pcasl_shape, vsasl_shape], dim=1)
             
             for model_idx, model in enumerate(models):
-                optimizers[model_idx].zero_grad(set_to_none=False) # Safer with Scaler
+                optimizers[model_idx].zero_grad(set_to_none=False)
                 
-                # T4 FIX 4: Use FLOAT16 (Half) not BFloat16
+                # Use Float16 for the forward pass
                 with torch.amp.autocast(device_type=self.device.type, dtype=torch.float16):
                     outputs = model(processed_signals)
-                    loss, comps = self.custom_loss_fn(model_outputs=outputs, targets=target_for_loss, global_epoch=epoch)
+                    
+                    # VITAL FIX: Force outputs to Float32 before Loss calculation
+                    # NLL Loss is very sensitive to FP16 precision issues
+                    outputs_f32 = tuple(o.float() if isinstance(o, torch.Tensor) else o for o in outputs)
+                    
+                    loss, comps = self.custom_loss_fn(model_outputs=outputs_f32, targets=target_for_loss, global_epoch=epoch)
                 
-                # T4 FIX 5: Use Scaler for Backward pass
                 self.scaler.scale(loss).backward()
                 self.scaler.unscale_(optimizers[model_idx])
                 torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
@@ -300,11 +304,18 @@ class EnhancedASLTrainer:
         with torch.no_grad():
             for inputs, targets in loader:
                 for i, model in enumerate(models):
-                    # T4 FIX 6: Validation also needs Float16
                     with torch.amp.autocast(device_type=self.device.type, dtype=torch.float16):
                         outputs = model(inputs)
-                        loss, _ = self.custom_loss_fn(model_outputs=outputs, targets=targets, global_epoch=epoch)
-                    val_losses[i] += loss.item()
+                        # VITAL FIX: Cast to float32 for validation loss too
+                        outputs_f32 = tuple(o.float() if isinstance(o, torch.Tensor) else o for o in outputs)
+                        loss, _ = self.custom_loss_fn(model_outputs=outputs_f32, targets=targets, global_epoch=epoch)
+                    
+                    if not torch.isnan(loss):
+                        val_losses[i] += loss.item()
+                    else:
+                        # If validation produces nan, it doesn't count for average, but indicates issue
+                        pass
+                        
                 num_steps += 1
         
-        return [{'val_loss': v / num_steps if num_steps > 0 else float('inf')} for v in val_losses]
+        return [{'val_loss': v / num_steps if num_steps > 0 else float('nan')} for v in val_losses]

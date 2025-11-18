@@ -1,4 +1,4 @@
-# utils.py
+# FILE: utils.py
 import numpy as np
 import multiprocessing as mp
 import time
@@ -8,38 +8,40 @@ from asl_simulation import _generate_pcasl_signal_jit, _generate_vsasl_signal_ji
 def engineer_signal_features_torch(raw_signal: torch.Tensor, num_plds: int) -> torch.Tensor:
     """
     GPU-accelerated version of feature engineering using PyTorch.
-    Args:
-        raw_signal: Tensor of shape (Batch, num_plds * 2)
-        num_plds: Number of PLDs per modality
-    Returns:
-        Tensor of shape (Batch, 4) with [pcasl_ttp, vsasl_ttp, pcasl_com, vsasl_com]
+    Includes safeguards against division by zero.
     """
     pcasl_curves = raw_signal[:, :num_plds]
     vsasl_curves = raw_signal[:, num_plds:]
     
-    # Create PLD indices tensor on the same device
     device = raw_signal.device
     plds_indices = torch.arange(num_plds, device=device, dtype=raw_signal.dtype)
 
-    # Feature 1: Time to peak (argmax is not differentiable, but fine for input features)
-    # We cast to float to match network input types
+    # Feature 1: Time to peak
     pcasl_ttp = torch.argmax(pcasl_curves, dim=1).float()
     vsasl_ttp = torch.argmax(vsasl_curves, dim=1).float()
 
     # Feature 2: Center of mass
-    # Add epsilon to avoid division by zero
-    pcasl_sum = torch.sum(pcasl_curves, dim=1) + 1e-6
-    vsasl_sum = torch.sum(vsasl_curves, dim=1) + 1e-6
+    # SAFEGUARD: Use a larger epsilon and absolute value for the denominator check
+    pcasl_sum = torch.sum(pcasl_curves, dim=1)
+    vsasl_sum = torch.sum(vsasl_curves, dim=1)
     
-    pcasl_com = torch.sum(pcasl_curves * plds_indices, dim=1) / pcasl_sum
-    vsasl_com = torch.sum(vsasl_curves * plds_indices, dim=1) / vsasl_sum
+    # Avoid division by zero if sum is tiny (e.g., pure noise around 0)
+    # We replace near-zero sums with 1.0 (arbitrary, but prevents Inf)
+    pcasl_sum_safe = torch.where(torch.abs(pcasl_sum) < 1e-4, torch.ones_like(pcasl_sum), pcasl_sum)
+    vsasl_sum_safe = torch.where(torch.abs(vsasl_sum) < 1e-4, torch.ones_like(vsasl_sum), vsasl_sum)
     
+    pcasl_com = torch.sum(pcasl_curves * plds_indices, dim=1) / pcasl_sum_safe
+    vsasl_com = torch.sum(vsasl_curves * plds_indices, dim=1) / vsasl_sum_safe
+    
+    # Check for NaNs just in case and replace them
+    pcasl_com = torch.nan_to_num(pcasl_com, nan=0.0)
+    vsasl_com = torch.nan_to_num(vsasl_com, nan=0.0)
+
     return torch.stack([pcasl_ttp, vsasl_ttp, pcasl_com, vsasl_com], dim=1)
 
+# ... (Keep the rest of the file: engineer_signal_features (numpy), _worker_generate_sample, ParallelStreamingStatsCalculator as they were) ...
 def engineer_signal_features(raw_signal: np.ndarray, num_plds: int) -> np.ndarray:
-    """
-    Legacy Numpy version for offline generation/cpu validation.
-    """
+    """Legacy Numpy version."""
     is_1d = raw_signal.ndim == 1
     if is_1d:
         raw_signal = raw_signal.reshape(1, -1)
