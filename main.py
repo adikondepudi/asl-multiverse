@@ -46,9 +46,9 @@ class ResearchConfig:
     n_ensembles: int = 5
     dropout_rate: float = 0.1
     norm_type: str = 'batch'
-    log_var_cbf_min: float = -3.0 # Relaxed from -5.0
+    log_var_cbf_min: float = -3.0
     log_var_cbf_max: float = 7.0
-    log_var_att_min: float = -3.0 # Relaxed from -5.0
+    log_var_att_min: float = -3.0
     log_var_att_max: float = 14.0
     loss_weight_cbf: float = 1.0
     loss_weight_att: float = 1.0
@@ -161,8 +161,6 @@ def run_comprehensive_asl_research(config: ResearchConfig, stage: int, output_di
     simulator = RealisticASLSimulator(params=asl_params_sim)
     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
 
-    # --- OPTIMIZED DATA LOADING FOR HPC ---
-    # 1. Load CLEAN signals into RAM
     script_logger.info(f"Loading raw CLEAN data to RAM from {config.offline_dataset_path}...")
     files = sorted(list(Path(config.offline_dataset_path).glob('dataset_chunk_*.npz')))
     all_signals_clean = []
@@ -171,7 +169,7 @@ def run_comprehensive_asl_research(config: ResearchConfig, stage: int, output_di
     
     for f in files:
         d = np.load(f)
-        all_signals_clean.append(d['signals_clean']) # Load CLEAN signals
+        all_signals_clean.append(d['signals_clean'])
         all_params.append(d['params'])
         samples_loaded += len(d['signals_clean'])
         if config.num_samples_to_load and samples_loaded >= config.num_samples_to_load:
@@ -180,11 +178,9 @@ def run_comprehensive_asl_research(config: ResearchConfig, stage: int, output_di
     raw_signals_clean = np.concatenate(all_signals_clean, axis=0)[:config.num_samples_to_load]
     raw_params = np.concatenate(all_params, axis=0)[:config.num_samples_to_load]
     
-    # 2. Move to GPU immediately
     script_logger.info(f"Moving {len(raw_signals_clean)} samples to GPU VRAM...")
     gpu_signals_clean = torch.from_numpy(raw_signals_clean).float().to(device)
     
-    # 3. Prepare targets on GPU
     if stage == 1:
         gpu_targets = gpu_signals_clean.clone()
     else:
@@ -194,10 +190,8 @@ def run_comprehensive_asl_research(config: ResearchConfig, stage: int, output_di
         params_norm = np.stack([cbf_norm, att_norm], axis=1)
         gpu_targets = torch.from_numpy(params_norm).float().to(device)
 
-    # 4. Initialize Fast GPU Loader
     train_loader = FastTensorDataLoader(gpu_signals_clean, gpu_targets, batch_size=config.batch_size, shuffle=True)
     
-    # --- VALIDATION SET PREPARATION (Move to GPU) ---
     script_logger.info("Generating fixed validation dataset on CPU...")
     validation_data_dict = _generate_simple_validation_set(
         simulator=simulator, plds=plds_np, n_subjects=200, 
@@ -205,7 +199,6 @@ def run_comprehensive_asl_research(config: ResearchConfig, stage: int, output_di
         noise_levels=[5.0, 10.0, 15.0]
     )
     
-    # Process validation data on CPU first, then move to GPU
     val_signals_noisy_raw = validation_data_dict['signals']
     val_features_eng = engineer_signal_features(val_signals_noisy_raw, num_plds)
     val_signals_concat = np.concatenate([val_signals_noisy_raw, val_features_eng], axis=1)
@@ -222,7 +215,6 @@ def run_comprehensive_asl_research(config: ResearchConfig, stage: int, output_di
             pcasl_c = simulator._generate_pcasl_signal(plds_np, true_att, true_cbf, params['t1_artery'], params['t_tau'], params['alpha_pcasl'])
             clean_signals_for_val.append(np.concatenate([pcasl_c, vsasl_c]))
         
-        # Normalize clean targets for Stage 1 validation to match training reconstruction target
         clean_val_np = np.array(clean_signals_for_val).astype(np.float32)
         pcasl_c_raw = clean_val_np[:, :num_plds]
         vsasl_c_raw = clean_val_np[:, num_plds:]
@@ -247,7 +239,6 @@ def run_comprehensive_asl_research(config: ResearchConfig, stage: int, output_di
 
     val_loader = FastTensorDataLoader(val_signals_gpu, val_targets_gpu, batch_size=config.batch_size, shuffle=False)
 
-    # --- MODEL SETUP ---
     base_input_size_nn = num_plds * 2 + 8
     model_creation_config = asdict(config)
     model_mode = 'denoising' if stage == 1 else 'regression'

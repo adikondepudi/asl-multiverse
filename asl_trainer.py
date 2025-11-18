@@ -9,6 +9,7 @@ from collections import defaultdict
 import wandb 
 import time
 import traceback
+from pathlib import Path
 
 from enhanced_asl_network import CustomLoss, DisentangledASLNet
 from utils import engineer_signal_features_torch
@@ -64,14 +65,17 @@ class EnhancedASLTrainer:
         self.lr_base = float(model_config.get('learning_rate', 0.001)); self.weight_decay = float(weight_decay)
         self.n_ensembles = n_ensembles; self.validation_steps_per_epoch = model_config.get('validation_steps_per_epoch', 50)
         
-        logger.info("Initializing models and casting to bfloat16...")
-        self.models = [model_class(**model_config).to(self.device, dtype=torch.bfloat16) for _ in range(n_ensembles)]
+        # T4 FIX 1: Keep model in Float32 (default). Do NOT cast to BFloat16. 
+        # AMP will handle casting to Float16 during forward pass.
+        logger.info("Initializing models (Float32)...")
+        self.models = [model_class(**model_config).to(self.device) for _ in range(n_ensembles)]
         
-        # T4 GPU Optimization: Use "default" or "reduce-overhead". "max-autotune" can hang on T4.
-        logger.info("Compiling models with torch.compile(mode='default')...")
-        self.models = [torch.compile(m, mode="default") for m in self.models]
-        logger.info("Model compilation complete.")
+        # T4 FIX 2: Disable torch.compile. It causes overhead on T4 without providing speedup for this model size.
+        # self.models = [torch.compile(m, mode="default") for m in self.models]
         
+        # T4 FIX 3: Initialize Gradient Scaler for Mixed Precision (FP16)
+        self.scaler = torch.cuda.amp.GradScaler(enabled=True)
+
         if wandb.run:
             for i, model in enumerate(self.models): wandb.watch(model, log='gradients', log_freq=200, idx=i)
         
@@ -87,7 +91,6 @@ class EnhancedASLTrainer:
     def setup_gpu_noise_params(self, simulator, pld_list, norm_stats):
         """Pre-calculate physics constants for on-the-fly noise generation on GPU."""
         if simulator is None or pld_list is None:
-            logger.warning("Simulator or PLDs not provided. Dynamic noise disabled (expecting pre-noised data).")
             return
 
         ref_signal = simulator._compute_reference_signal()
@@ -96,32 +99,23 @@ class EnhancedASLTrainer:
         scalings = simulator.compute_tr_noise_scaling(np.array(pld_list))
         n_plds = len(pld_list)
         
-        # Create scaling tensor: [PCASL_scales..., VSASL_scales...]
         scale_vec = np.concatenate([
             np.full(n_plds, scalings['PCASL']),
             np.full(n_plds, scalings['VSASL'])
         ])
         self.noise_scale_vec_gpu = torch.tensor(scale_vec, device=self.device, dtype=torch.float32)
         
-        # Move norm stats to GPU for fast normalization
         self.norm_stats_gpu = {}
         for k, v in norm_stats.items():
-            if isinstance(v, list) or isinstance(v, np.ndarray):
+            if isinstance(v, (list, np.ndarray)):
                 self.norm_stats_gpu[k] = torch.tensor(v, device=self.device, dtype=torch.float32)
             else:
                 self.norm_stats_gpu[k] = torch.tensor(v, device=self.device, dtype=torch.float32)
         logger.info("GPU Noise parameters and Norm Stats loaded successfully.")
 
     def _process_batch_on_gpu(self, raw_signals):
-        """
-        Applies dynamic Gaussian noise, engineers features, and normalizes inputs.
-        Input: raw_signals (Batch, num_plds*2) -> can be clean or noisy.
-        """
+        """Applies dynamic Gaussian noise, engineers features, and normalizes inputs."""
         if self.noise_scale_vec_gpu is None:
-            # Fallback if noise params aren't set (e.g., validation on pre-noised data)
-            # We assume inputs are already noisy but UNPROCESSED (raw curves only)
-            # But wait, validation data in main.py usually includes engineered features?
-            # If input dim is > num_plds*2, it's already processed.
             return raw_signals 
 
         batch_size = raw_signals.shape[0]
@@ -139,7 +133,6 @@ class EnhancedASLTrainer:
         eng_features = engineer_signal_features_torch(noisy_signals, n_plds)
         
         # 3. Normalization (V6 Logic ported to GPU)
-        # Curve Normalization
         pcasl_raw = noisy_signals[:, :n_plds]
         vsasl_raw = noisy_signals[:, n_plds:]
         
@@ -154,7 +147,6 @@ class EnhancedASLTrainer:
         shape_vector = torch.cat([pcasl_shape, vsasl_shape], dim=1)
         
         # Scalar Feature Normalization
-        # [pcasl_mu, pcasl_sigma, vsasl_mu, vsasl_sigma, ttp1, ttp2, com1, com2]
         scalars = torch.cat([pcasl_mu, pcasl_sigma, vsasl_mu, vsasl_sigma, eng_features], dim=1)
         
         s_mean = self.norm_stats_gpu['scalar_features_mean']
@@ -162,7 +154,6 @@ class EnhancedASLTrainer:
         
         scalars_norm = (scalars - s_mean) / s_std
         
-        # Concatenate final input vector
         return torch.cat([shape_vector, scalars_norm], dim=1)
 
     def train_ensemble(self,
@@ -247,22 +238,11 @@ class EnhancedASLTrainer:
                 raw_signals, targets = next(loader_iter)
             
             # Apply On-the-fly Processing (Noise + Feature Engineering + Norm)
-            # raw_signals are on GPU already
             processed_signals = self._process_batch_on_gpu(raw_signals)
 
-            # If Stage 1, targets need to be clean signals? No, clean targets are passed in directly.
-            # BUT, we must normalize clean targets if the network output is expected to be normalized?
-            # Usually denoising autoencoders reconstruct the *input*.
-            # If our input is normalized, our target should be normalized clean signal.
-            
             target_for_loss = targets
             if self.stage == 1:
-                # For denoising, we want to reconstruct the clean signal.
-                # We should apply the same normalization to the clean target.
-                # Re-use the processing function but set noise scaling to 0 temporarily?
-                # Hack: just process clean signal normally, the noise will be 0 if we passed it?
-                # No, _process adds noise.
-                # Let's manually normalize the clean target using GPU stats.
+                # For denoising, construct the normalized shape vector of the CLEAN signal as target
                 batch_size = targets.shape[0]
                 n_plds = targets.shape[1] // 2
                 pcasl_clean = targets[:, :n_plds]
@@ -276,23 +256,24 @@ class EnhancedASLTrainer:
                 vsasl_sigma = torch.std(vsasl_clean, dim=1, keepdim=True) + 1e-6
                 vsasl_shape = (vsasl_clean - vsasl_mu) / vsasl_sigma
                 
-                # We only reconstruct the shape curves? 
-                # In original code: decoder output_dim = n_plds * 2.
-                # So we reconstruct the shape vector.
                 target_for_loss = torch.cat([pcasl_shape, vsasl_shape], dim=1)
             
-            # For Stage 2, targets are params, which are already normalized in main.py
-
             for model_idx, model in enumerate(models):
-                optimizers[model_idx].zero_grad(set_to_none=True)
+                optimizers[model_idx].zero_grad(set_to_none=False) # Safer with Scaler
                 
-                with torch.amp.autocast(device_type=self.device.type, dtype=torch.bfloat16):
+                # T4 FIX 4: Use FLOAT16 (Half) not BFloat16
+                with torch.amp.autocast(device_type=self.device.type, dtype=torch.float16):
                     outputs = model(processed_signals)
                     loss, comps = self.custom_loss_fn(model_outputs=outputs, targets=target_for_loss, global_epoch=epoch)
                 
-                loss.backward()
+                # T4 FIX 5: Use Scaler for Backward pass
+                self.scaler.scale(loss).backward()
+                self.scaler.unscale_(optimizers[model_idx])
                 torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
-                optimizers[model_idx].step()
+                
+                self.scaler.step(optimizers[model_idx])
+                self.scaler.update()
+                
                 schedulers[model_idx].step()
                 
                 if model_idx == 0: total_loss += loss.item()
@@ -318,17 +299,9 @@ class EnhancedASLTrainer:
 
         with torch.no_grad():
             for inputs, targets in loader:
-                # Validation loader provides PRE-NOISED and PRE-PROCESSED inputs if they came from main.py's validation set
-                # But we need to cast to bfloat16
-                
-                # Check if inputs need processing.
-                # If using GPU resident loader for validation, inputs are likely (N, 20) (processed)
-                # Training inputs were (N, 12) (clean raw).
-                
-                # In main.py we will handle validation set preparation.
-                
                 for i, model in enumerate(models):
-                    with torch.amp.autocast(device_type=self.device.type, dtype=torch.bfloat16):
+                    # T4 FIX 6: Validation also needs Float16
+                    with torch.amp.autocast(device_type=self.device.type, dtype=torch.float16):
                         outputs = model(inputs)
                         loss, _ = self.custom_loss_fn(model_outputs=outputs, targets=targets, global_epoch=epoch)
                     val_losses[i] += loss.item()
