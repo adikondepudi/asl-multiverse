@@ -6,107 +6,54 @@ from torch.utils.data import Dataset, DataLoader
 import numpy as np
 from typing import Dict, List, Tuple, Optional, Any
 from collections import defaultdict
-import multiprocessing as mp
-from pathlib import Path
 import wandb 
-from sklearn.metrics import mean_absolute_error, mean_squared_error 
 import time
-from itertools import islice
 import traceback
-import optuna
 
 from enhanced_asl_network import CustomLoss, DisentangledASLNet
-from enhanced_simulation import RealisticASLSimulator
-from utils import engineer_signal_features
+from utils import engineer_signal_features_torch
 
 import logging
 logger = logging.getLogger(__name__)
 if not logger.hasHandlers():
     logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(name)s - %(levelname)s - %(message)s')
 
-class ASLInMemoryDataset(Dataset):
-    def __init__(self, data_dir: Optional[str], norm_stats: dict, stage: int, num_samples_to_load: Optional[int] = None):
-        self.data_dir = Path(data_dir) if data_dir else None; self.norm_stats = norm_stats
-        self.stage = stage
-        # V5: num_plds is based on shape_vector length / 2, which corresponds to the original curves
-        self.num_plds = len(norm_stats.get('shape_vector_mean', [])) // 2
-        if self.data_dir:
-            logger.info(f"Loading dataset chunks from {self.data_dir} for stage {self.stage}..."); 
-            files = sorted(list(self.data_dir.glob('dataset_chunk_*.npz')))
-            if not files: raise FileNotFoundError(f"No dataset chunks in {data_dir}.")
-            
-            all_signals_noisy = [np.load(f)['signals_noisy'] for f in files]
-            self.signals_noisy_unprocessed = np.concatenate(all_signals_noisy, axis=0)
-            
-            if self.stage == 1:
-                all_signals_clean = [np.load(f)['signals_clean'] for f in files]
-                self.signals_clean_unprocessed = np.concatenate(all_signals_clean, axis=0)
-            
-            all_params = [np.load(f)['params'] for f in files]
-            self.params_unnormalized = np.concatenate(all_params, axis=0)
-
-            if num_samples_to_load is not None and num_samples_to_load < len(self.signals_noisy_unprocessed):
-                logger.info(f"Subsetting data to {num_samples_to_load} samples for accelerated training.")
-                indices = np.random.permutation(len(self.signals_noisy_unprocessed))[:num_samples_to_load]
-                self.signals_noisy_unprocessed = self.signals_noisy_unprocessed[indices]
-                if self.stage == 1:
-                    self.signals_clean_unprocessed = self.signals_clean_unprocessed[indices]
-                self.params_unnormalized = self.params_unnormalized[indices]
-            
-            logger.info(f"Loaded {len(self.signals_noisy_unprocessed)} samples. Processing..."); 
-            self.signals_processed = self._process_signals(self.signals_noisy_unprocessed)
-            self.signals_tensor = torch.from_numpy(self.signals_processed.astype(np.float32))
-
-            if self.stage == 1:
-                self.targets_tensor = torch.from_numpy(self.signals_clean_unprocessed.astype(np.float32))
-            else: # stage 2
-                self.params_normalized = self._normalize_params(self.params_unnormalized)
-                self.targets_tensor = torch.from_numpy(self.params_normalized.astype(np.float32))
-        else:
-            logger.info("ASLInMemoryDataset initialized in manual mode.")
-            self.signals_tensor = torch.empty(0); self.targets_tensor = torch.empty(0)
-            self.signals_noisy_unprocessed = np.empty(0)
-            self.params_unnormalized = np.empty(0)
-
-    def _process_signals(self, signals_unnorm: np.ndarray) -> np.ndarray:
-        # V6 Preprocessing: Per-curve normalization and assembly of 8 scalar features.
-        # The offline dataset has format: [raw_curves (12), eng_features_from_raw (4)]
-        raw_curves = signals_unnorm[:, :self.num_plds * 2]
-        eng_ttp_com = signals_unnorm[:, self.num_plds * 2:]
-
-        pcasl_raw = raw_curves[:, :self.num_plds]
-        vsasl_raw = raw_curves[:, self.num_plds:]
-
-        # 1. Perform per-curve normalization on raw (noisy) curves to get shape vectors
-        pcasl_mu = np.mean(pcasl_raw, axis=1, keepdims=True)
-        pcasl_sigma = np.std(pcasl_raw, axis=1, keepdims=True)
-        pcasl_shape = (pcasl_raw - pcasl_mu) / (pcasl_sigma + 1e-6)
-
-        vsasl_mu = np.mean(vsasl_raw, axis=1, keepdims=True)
-        vsasl_sigma = np.std(vsasl_raw, axis=1, keepdims=True)
-        vsasl_shape = (vsasl_raw - vsasl_mu) / (vsasl_sigma + 1e-6)
-
-        shape_vector = np.concatenate([pcasl_shape, vsasl_shape], axis=1)
-
-        # 2. Assemble all 8 scalar features (separate mu/sigma + pre-calculated TTP/COM)
-        scalar_features_unnorm = np.concatenate([pcasl_mu, pcasl_sigma, vsasl_mu, vsasl_sigma, eng_ttp_com], axis=1)
+class FastTensorDataLoader:
+    """
+    A lightweight iterator that keeps data on the GPU to bypass CPU bottlenecks.
+    """
+    def __init__(self, signals, targets, batch_size, shuffle=True):
+        self.signals = signals 
+        self.targets = targets
+        self.batch_size = batch_size
+        self.shuffle = shuffle
+        self.dataset_len = self.signals.shape[0]
+        self.n_batches = (self.dataset_len + batch_size - 1) // batch_size
+        self.device = signals.device
         
-        # 3. Standardize the scalar features using pre-computed stats
-        s_mean = np.array(self.norm_stats['scalar_features_mean'])
-        s_std = np.array(self.norm_stats['scalar_features_std']) + 1e-6
-        scalar_features_norm = (scalar_features_unnorm - s_mean) / s_std
+    def __iter__(self):
+        if self.shuffle:
+            self.indices = torch.randperm(self.dataset_len, device=self.device)
+        else:
+            self.indices = torch.arange(self.dataset_len, device=self.device)
+        self.curr_idx = 0
+        return self
 
-        # 4. Concatenate final input vector
-        return np.concatenate([shape_vector, scalar_features_norm], axis=1)
-
-    def _normalize_params(self, params_unnorm: np.ndarray) -> np.ndarray:
-        cbf, att = params_unnorm[:, 0], params_unnorm[:, 1]
-        cbf_norm = (cbf - self.norm_stats['y_mean_cbf']) / self.norm_stats['y_std_cbf']
-        att_norm = (att - self.norm_stats['y_mean_att']) / self.norm_stats['y_std_att']
-        return np.stack([cbf_norm, att_norm], axis=1)
-
-    def __len__(self): return self.signals_tensor.shape[0]
-    def __getitem__(self, idx): return self.signals_tensor[idx], self.targets_tensor[idx]
+    def __next__(self):
+        if self.curr_idx >= self.dataset_len:
+            raise StopIteration
+        
+        end_idx = min(self.curr_idx + self.batch_size, self.dataset_len)
+        batch_indices = self.indices[self.curr_idx:end_idx]
+        
+        batch_x = self.signals[batch_indices]
+        batch_y = self.targets[batch_indices]
+        
+        self.curr_idx = end_idx
+        return batch_x, batch_y
+        
+    def __len__(self):
+        return self.n_batches
 
 class EnhancedASLTrainer:
     def __init__(self,
@@ -116,22 +63,119 @@ class EnhancedASLTrainer:
         self.device = torch.device(device); self.model_config = model_config; self.stage = stage
         self.lr_base = float(model_config.get('learning_rate', 0.001)); self.weight_decay = float(weight_decay)
         self.n_ensembles = n_ensembles; self.validation_steps_per_epoch = model_config.get('validation_steps_per_epoch', 50)
-        logger.info("Initializing models and casting to bfloat16..."); self.models = [model_class(**model_config).to(self.device, dtype=torch.bfloat16) for _ in range(n_ensembles)]
-        logger.info("Compiling models with torch.compile()..."); self.models = [torch.compile(m, mode="max-autotune") for m in self.models]
+        
+        logger.info("Initializing models and casting to bfloat16...")
+        self.models = [model_class(**model_config).to(self.device, dtype=torch.bfloat16) for _ in range(n_ensembles)]
+        
+        # T4 GPU Optimization: Use "default" or "reduce-overhead". "max-autotune" can hang on T4.
+        logger.info("Compiling models with torch.compile(mode='default')...")
+        self.models = [torch.compile(m, mode="default") for m in self.models]
         logger.info("Model compilation complete.")
+        
         if wandb.run:
             for i, model in enumerate(self.models): wandb.watch(model, log='gradients', log_freq=200, idx=i)
         
         loss_params = {'training_stage': stage, 'w_cbf': model_config.get('loss_weight_cbf', 1.0), 'w_att': model_config.get('loss_weight_att', 1.0),
                        'log_var_reg_lambda': model_config.get('loss_log_var_reg_lambda', 0.0)}; self.custom_loss_fn = CustomLoss(**loss_params)
         self.global_step = 0; self.norm_stats = None
+        
+        # Placeholders for GPU-resident noise parameters
+        self.ref_signal_gpu = None
+        self.noise_scale_vec_gpu = None
+        self.norm_stats_gpu = None
+
+    def setup_gpu_noise_params(self, simulator, pld_list, norm_stats):
+        """Pre-calculate physics constants for on-the-fly noise generation on GPU."""
+        if simulator is None or pld_list is None:
+            logger.warning("Simulator or PLDs not provided. Dynamic noise disabled (expecting pre-noised data).")
+            return
+
+        ref_signal = simulator._compute_reference_signal()
+        self.ref_signal_gpu = torch.tensor(ref_signal, device=self.device, dtype=torch.float32)
+        
+        scalings = simulator.compute_tr_noise_scaling(np.array(pld_list))
+        n_plds = len(pld_list)
+        
+        # Create scaling tensor: [PCASL_scales..., VSASL_scales...]
+        scale_vec = np.concatenate([
+            np.full(n_plds, scalings['PCASL']),
+            np.full(n_plds, scalings['VSASL'])
+        ])
+        self.noise_scale_vec_gpu = torch.tensor(scale_vec, device=self.device, dtype=torch.float32)
+        
+        # Move norm stats to GPU for fast normalization
+        self.norm_stats_gpu = {}
+        for k, v in norm_stats.items():
+            if isinstance(v, list) or isinstance(v, np.ndarray):
+                self.norm_stats_gpu[k] = torch.tensor(v, device=self.device, dtype=torch.float32)
+            else:
+                self.norm_stats_gpu[k] = torch.tensor(v, device=self.device, dtype=torch.float32)
+        logger.info("GPU Noise parameters and Norm Stats loaded successfully.")
+
+    def _process_batch_on_gpu(self, raw_signals):
+        """
+        Applies dynamic Gaussian noise, engineers features, and normalizes inputs.
+        Input: raw_signals (Batch, num_plds*2) -> can be clean or noisy.
+        """
+        if self.noise_scale_vec_gpu is None:
+            # Fallback if noise params aren't set (e.g., validation on pre-noised data)
+            # We assume inputs are already noisy but UNPROCESSED (raw curves only)
+            # But wait, validation data in main.py usually includes engineered features?
+            # If input dim is > num_plds*2, it's already processed.
+            return raw_signals 
+
+        batch_size = raw_signals.shape[0]
+        n_plds = raw_signals.shape[1] // 2
+        
+        # 1. Dynamic Noise Injection
+        # Randomize SNR between 3.0 and 20.0 for every batch
+        current_snr = torch.empty(batch_size, 1, device=self.device).uniform_(3.0, 20.0)
+        noise_sigma = (self.ref_signal_gpu / current_snr) * self.noise_scale_vec_gpu
+        
+        gaussian_noise = torch.randn_like(raw_signals) * noise_sigma
+        noisy_signals = raw_signals + gaussian_noise
+        
+        # 2. Feature Engineering (Torch version)
+        eng_features = engineer_signal_features_torch(noisy_signals, n_plds)
+        
+        # 3. Normalization (V6 Logic ported to GPU)
+        # Curve Normalization
+        pcasl_raw = noisy_signals[:, :n_plds]
+        vsasl_raw = noisy_signals[:, n_plds:]
+        
+        pcasl_mu = torch.mean(pcasl_raw, dim=1, keepdim=True)
+        pcasl_sigma = torch.std(pcasl_raw, dim=1, keepdim=True) + 1e-6
+        pcasl_shape = (pcasl_raw - pcasl_mu) / pcasl_sigma
+        
+        vsasl_mu = torch.mean(vsasl_raw, dim=1, keepdim=True)
+        vsasl_sigma = torch.std(vsasl_raw, dim=1, keepdim=True) + 1e-6
+        vsasl_shape = (vsasl_raw - vsasl_mu) / vsasl_sigma
+        
+        shape_vector = torch.cat([pcasl_shape, vsasl_shape], dim=1)
+        
+        # Scalar Feature Normalization
+        # [pcasl_mu, pcasl_sigma, vsasl_mu, vsasl_sigma, ttp1, ttp2, com1, com2]
+        scalars = torch.cat([pcasl_mu, pcasl_sigma, vsasl_mu, vsasl_sigma, eng_features], dim=1)
+        
+        s_mean = self.norm_stats_gpu['scalar_features_mean']
+        s_std = self.norm_stats_gpu['scalar_features_std'] + 1e-6
+        
+        scalars_norm = (scalars - s_mean) / s_std
+        
+        # Concatenate final input vector
+        return torch.cat([shape_vector, scalars_norm], dim=1)
 
     def train_ensemble(self,
-                       train_loader: DataLoader, val_loader: Optional[DataLoader],
+                       train_loader: FastTensorDataLoader, val_loader: FastTensorDataLoader,
                        n_epochs: int, steps_per_epoch: Optional[int], output_dir: Path,
                        early_stopping_patience: int = 10,
                        early_stopping_min_delta: float = 0.0,
-                       optuna_trial: Optional[Any] = None, fine_tuning_config: Optional[Dict] = None):
+                       fine_tuning_config: Optional[Dict] = None,
+                       simulator=None, pld_list=None, norm_stats=None):
+        
+        if simulator and pld_list and norm_stats:
+            self.setup_gpu_noise_params(simulator, pld_list, norm_stats)
+
         if steps_per_epoch is None:
             steps_per_epoch = len(train_loader)
         
@@ -140,14 +184,12 @@ class EnhancedASLTrainer:
         logger.info(f"--- Starting Stage {self.stage} {run_type} for {n_epochs} epochs ---")
         
         if is_finetuning:
-            # V5 FIX: Implement discriminative learning rates based on config
             lr_factor = fine_tuning_config.get('encoder_lr_factor', 20.0)
             lr_finetune_encoder = self.lr_base / lr_factor
             logger.info(f"--- Discriminative Fine-tuning: Unfreezing encoder with LR={lr_finetune_encoder} and Head LR={self.lr_base} ---")
             self.optimizers = []
             for m in self.models:
                 if hasattr(m, 'unfreeze_all'): m.unfreeze_all()
-                
                 param_groups = [
                     {'params': m.encoder.parameters(), 'lr': lr_finetune_encoder},
                     {'params': m.head.parameters(), 'lr': self.lr_base}
@@ -158,11 +200,9 @@ class EnhancedASLTrainer:
             self.optimizers = [torch.optim.AdamW(m.parameters(), lr=self.lr_base, weight_decay=self.weight_decay) for m in self.models]
         
         total_steps = steps_per_epoch * n_epochs
-        # Scheduler now correctly handles multiple parameter groups with different LRs
         self.schedulers = [torch.optim.lr_scheduler.OneCycleLR(opt, max_lr=[pg['lr'] for pg in opt.param_groups], total_steps=total_steps) for opt in self.optimizers]
         
         patience_counters = [0] * self.n_ensembles; self.overall_best_val_losses = [float('inf')] * self.n_ensembles
-        
         models_save_dir = output_dir / 'trained_models'
         models_save_dir.mkdir(exist_ok=True)
 
@@ -200,15 +240,55 @@ class EnhancedASLTrainer:
         total_loss = 0.0; loader_iter = iter(loader)
         
         for i in range(steps):
+            try: 
+                raw_signals, targets = next(loader_iter)
+            except StopIteration: 
+                loader_iter = iter(loader)
+                raw_signals, targets = next(loader_iter)
+            
+            # Apply On-the-fly Processing (Noise + Feature Engineering + Norm)
+            # raw_signals are on GPU already
+            processed_signals = self._process_batch_on_gpu(raw_signals)
+
+            # If Stage 1, targets need to be clean signals? No, clean targets are passed in directly.
+            # BUT, we must normalize clean targets if the network output is expected to be normalized?
+            # Usually denoising autoencoders reconstruct the *input*.
+            # If our input is normalized, our target should be normalized clean signal.
+            
+            target_for_loss = targets
+            if self.stage == 1:
+                # For denoising, we want to reconstruct the clean signal.
+                # We should apply the same normalization to the clean target.
+                # Re-use the processing function but set noise scaling to 0 temporarily?
+                # Hack: just process clean signal normally, the noise will be 0 if we passed it?
+                # No, _process adds noise.
+                # Let's manually normalize the clean target using GPU stats.
+                batch_size = targets.shape[0]
+                n_plds = targets.shape[1] // 2
+                pcasl_clean = targets[:, :n_plds]
+                vsasl_clean = targets[:, n_plds:]
+                
+                pcasl_mu = torch.mean(pcasl_clean, dim=1, keepdim=True)
+                pcasl_sigma = torch.std(pcasl_clean, dim=1, keepdim=True) + 1e-6
+                pcasl_shape = (pcasl_clean - pcasl_mu) / pcasl_sigma
+                
+                vsasl_mu = torch.mean(vsasl_clean, dim=1, keepdim=True)
+                vsasl_sigma = torch.std(vsasl_clean, dim=1, keepdim=True) + 1e-6
+                vsasl_shape = (vsasl_clean - vsasl_mu) / vsasl_sigma
+                
+                # We only reconstruct the shape curves? 
+                # In original code: decoder output_dim = n_plds * 2.
+                # So we reconstruct the shape vector.
+                target_for_loss = torch.cat([pcasl_shape, vsasl_shape], dim=1)
+            
+            # For Stage 2, targets are params, which are already normalized in main.py
+
             for model_idx, model in enumerate(models):
-                try: signals, targets = next(loader_iter)
-                except StopIteration: loader_iter = iter(loader); signals, targets = next(loader_iter)
-                signals, targets = signals.to(self.device), targets.to(self.device)
                 optimizers[model_idx].zero_grad(set_to_none=True)
                 
                 with torch.amp.autocast(device_type=self.device.type, dtype=torch.bfloat16):
-                    outputs = model(signals)
-                    loss, comps = self.custom_loss_fn(model_outputs=outputs, targets=targets, global_epoch=epoch)
+                    outputs = model(processed_signals)
+                    loss, comps = self.custom_loss_fn(model_outputs=outputs, targets=target_for_loss, global_epoch=epoch)
                 
                 loss.backward()
                 torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
@@ -221,18 +301,10 @@ class EnhancedASLTrainer:
                     lrs = schedulers[model_idx].get_last_lr()
                     log_dict = {"train/total_loss": loss.item(), "train/lr_head": lrs[-1]}
                     if len(lrs) > 1: log_dict["train/lr_encoder"] = lrs[0]
-
                     if self.stage == 1:
                         log_dict["train_comps/denoising_loss"] = comps.get('denoising_loss', torch.tensor(0.0)).item()
-                    else: # stage 2
+                    else:
                         log_dict["train_comps/nll_loss"] = comps.get('param_nll_loss', torch.tensor(0.0)).item()
-                        log_dict["train_comps/log_var_reg"] = comps.get('log_var_reg_loss', torch.tensor(0.0)).item()
-                        cbf_lvar, att_lvar = outputs[2], outputs[3]
-                        with torch.no_grad():
-                            cbf_std_learned = torch.mean(torch.exp(cbf_lvar * 0.5))
-                            att_std_learned = torch.mean(torch.exp(att_lvar * 0.5))
-                        log_dict["uncertainty/cbf_std_learned_norm"] = cbf_std_learned.item()
-                        log_dict["uncertainty/att_std_learned_norm"] = att_std_learned.item()
                     wandb.log(log_dict, step=self.global_step)
 
             self.global_step += 1
@@ -245,15 +317,21 @@ class EnhancedASLTrainer:
         num_steps = 0
 
         with torch.no_grad():
-            for signals, targets in loader:
-                signals, targets = signals.to(self.device), targets.to(self.device)
+            for inputs, targets in loader:
+                # Validation loader provides PRE-NOISED and PRE-PROCESSED inputs if they came from main.py's validation set
+                # But we need to cast to bfloat16
+                
+                # Check if inputs need processing.
+                # If using GPU resident loader for validation, inputs are likely (N, 20) (processed)
+                # Training inputs were (N, 12) (clean raw).
+                
+                # In main.py we will handle validation set preparation.
+                
                 for i, model in enumerate(models):
                     with torch.amp.autocast(device_type=self.device.type, dtype=torch.bfloat16):
-                        outputs = model(signals)
+                        outputs = model(inputs)
                         loss, _ = self.custom_loss_fn(model_outputs=outputs, targets=targets, global_epoch=epoch)
                     val_losses[i] += loss.item()
                 num_steps += 1
         
         return [{'val_loss': v / num_steps if num_steps > 0 else float('inf')} for v in val_losses]
-    
-    def predict(self, signals: np.ndarray): pass
