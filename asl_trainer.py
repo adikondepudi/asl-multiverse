@@ -65,14 +65,20 @@ class EnhancedASLTrainer:
         logger.info("Initializing models (Float32)...")
         self.models = [model_class(**model_config).to(self.device) for _ in range(n_ensembles)]
         
-        # T4 FIX: Use GradScaler for Mixed Precision Stability
         self.scaler = torch.amp.GradScaler('cuda', enabled=True)
 
         if wandb.run:
             for i, model in enumerate(self.models): wandb.watch(model, log='gradients', log_freq=200, idx=i)
         
-        loss_params = {'training_stage': stage, 'w_cbf': model_config.get('loss_weight_cbf', 1.0), 'w_att': model_config.get('loss_weight_att', 1.0),
-                       'log_var_reg_lambda': model_config.get('loss_log_var_reg_lambda', 0.0)}; self.custom_loss_fn = CustomLoss(**loss_params)
+        # Extract mse_weight from config
+        loss_params = {
+            'training_stage': stage, 
+            'w_cbf': model_config.get('loss_weight_cbf', 1.0), 
+            'w_att': model_config.get('loss_weight_att', 1.0),
+            'log_var_reg_lambda': model_config.get('loss_log_var_reg_lambda', 0.0),
+            'mse_weight': model_config.get('mse_weight', 0.0) 
+        }
+        self.custom_loss_fn = CustomLoss(**loss_params)
         self.global_step = 0; self.norm_stats = None
         
         self.ref_signal_gpu = None
@@ -110,7 +116,10 @@ class EnhancedASLTrainer:
         batch_size = raw_signals.shape[0]
         n_plds = raw_signals.shape[1] // 2
         
-        current_snr = torch.empty(batch_size, 1, device=self.device).uniform_(3.0, 20.0)
+        # CRITICAL CHANGE: Harder Training Noise (1.5 - 10.0 SNR)
+        # Stops model from "cheating" on easy data
+        current_snr = torch.empty(batch_size, 1, device=self.device).uniform_(1.5, 10.0)
+        
         noise_sigma = (self.ref_signal_gpu / current_snr) * self.noise_scale_vec_gpu
         
         gaussian_noise = torch.randn_like(raw_signals) * noise_sigma
@@ -139,9 +148,6 @@ class EnhancedASLTrainer:
         scalars_norm = (scalars - s_mean) / s_std
         
         final_input = torch.cat([shape_vector, scalars_norm], dim=1)
-        
-        # VITAL FIX: Clamp inputs to prevent Infinity/NaN entering the network
-        # This protects BatchNorm layers from being corrupted by outlier divisions
         return torch.clamp(final_input, -15.0, 15.0)
 
     def train_ensemble(self,
@@ -189,20 +195,16 @@ class EnhancedASLTrainer:
             train_loss, _ = self._train_epoch(self.models, train_loader, self.optimizers, self.schedulers, epoch, steps_per_epoch)
             val_metrics = self._validate(self.models, val_loader, epoch)
             
-            # Handle potential NaN in validation (though clamping should fix it)
             valid_losses = [m.get('val_loss', np.nan) for m in val_metrics]
             if np.isnan(valid_losses).all():
                 mean_val_loss = float('nan')
-                logger.warning(f"Epoch {epoch}: All Validation Losses are NaN. Model might be corrupted.")
             else:
                 mean_val_loss = np.nanmean(valid_losses)
 
             logger.info(f"Epoch {epoch + 1}/{n_epochs}: Train Loss = {train_loss:.6f}, Val Loss = {mean_val_loss:.6f}")
             if wandb.run: wandb.log({'epoch': epoch, 'mean_train_loss': train_loss, 'mean_val_loss': mean_val_loss}, step=self.global_step)
             
-            if np.isnan(mean_val_loss):
-                 # Don't save, don't increment patience, just continue (or break)
-                 continue
+            if np.isnan(mean_val_loss): continue
 
             for i, vm in enumerate(val_metrics):
                 val_loss = vm.get('val_loss', float('inf'))
@@ -240,44 +242,33 @@ class EnhancedASLTrainer:
                 raw_signals, targets = next(loader_iter)
             
             processed_signals = self._process_batch_on_gpu(raw_signals)
-
             target_for_loss = targets
+
             if self.stage == 1:
-                batch_size = targets.shape[0]
                 n_plds = targets.shape[1] // 2
                 pcasl_clean = targets[:, :n_plds]
                 vsasl_clean = targets[:, n_plds:]
-                
                 pcasl_mu = torch.mean(pcasl_clean, dim=1, keepdim=True)
                 pcasl_sigma = torch.std(pcasl_clean, dim=1, keepdim=True) + 1e-6
                 pcasl_shape = (pcasl_clean - pcasl_mu) / pcasl_sigma
-                
                 vsasl_mu = torch.mean(vsasl_clean, dim=1, keepdim=True)
                 vsasl_sigma = torch.std(vsasl_clean, dim=1, keepdim=True) + 1e-6
                 vsasl_shape = (vsasl_clean - vsasl_mu) / vsasl_sigma
-                
                 target_for_loss = torch.cat([pcasl_shape, vsasl_shape], dim=1)
             
             for model_idx, model in enumerate(models):
                 optimizers[model_idx].zero_grad(set_to_none=False)
                 
-                # Use Float16 for the forward pass
                 with torch.amp.autocast(device_type=self.device.type, dtype=torch.float16):
                     outputs = model(processed_signals)
-                    
-                    # VITAL FIX: Force outputs to Float32 before Loss calculation
-                    # NLL Loss is very sensitive to FP16 precision issues
                     outputs_f32 = tuple(o.float() if isinstance(o, torch.Tensor) else o for o in outputs)
-                    
                     loss, comps = self.custom_loss_fn(model_outputs=outputs_f32, targets=target_for_loss, global_epoch=epoch)
                 
                 self.scaler.scale(loss).backward()
                 self.scaler.unscale_(optimizers[model_idx])
                 torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
-                
                 self.scaler.step(optimizers[model_idx])
                 self.scaler.update()
-                
                 schedulers[model_idx].step()
                 
                 if model_idx == 0: total_loss += loss.item()
@@ -285,11 +276,9 @@ class EnhancedASLTrainer:
                 if wandb.run and model_idx == 0 and self.global_step % 20 == 0:
                     lrs = schedulers[model_idx].get_last_lr()
                     log_dict = {"train/total_loss": loss.item(), "train/lr_head": lrs[-1]}
-                    if len(lrs) > 1: log_dict["train/lr_encoder"] = lrs[0]
-                    if self.stage == 1:
-                        log_dict["train_comps/denoising_loss"] = comps.get('denoising_loss', torch.tensor(0.0)).item()
-                    else:
+                    if self.stage == 2:
                         log_dict["train_comps/nll_loss"] = comps.get('param_nll_loss', torch.tensor(0.0)).item()
+                        log_dict["train_comps/mse_loss"] = comps.get('param_mse_loss', torch.tensor(0.0)).item()
                     wandb.log(log_dict, step=self.global_step)
 
             self.global_step += 1
@@ -306,16 +295,8 @@ class EnhancedASLTrainer:
                 for i, model in enumerate(models):
                     with torch.amp.autocast(device_type=self.device.type, dtype=torch.float16):
                         outputs = model(inputs)
-                        # VITAL FIX: Cast to float32 for validation loss too
                         outputs_f32 = tuple(o.float() if isinstance(o, torch.Tensor) else o for o in outputs)
                         loss, _ = self.custom_loss_fn(model_outputs=outputs_f32, targets=targets, global_epoch=epoch)
-                    
-                    if not torch.isnan(loss):
-                        val_losses[i] += loss.item()
-                    else:
-                        # If validation produces nan, it doesn't count for average, but indicates issue
-                        pass
-                        
+                    if not torch.isnan(loss): val_losses[i] += loss.item()
                 num_steps += 1
-        
         return [{'val_loss': v / num_steps if num_steps > 0 else float('nan')} for v in val_losses]
