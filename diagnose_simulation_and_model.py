@@ -1,385 +1,350 @@
+# FILE: diagnose_simulation_and_model.py
+
 import torch
 import numpy as np
 import pandas as pd
-import matplotlib.pyplot as plt
-import seaborn as sns
 from pathlib import Path
 import json
 import argparse
 import sys
-import scipy.optimize
 from tqdm import tqdm
+import matplotlib.pyplot as plt
+import seaborn as sns
 import warnings
+from scipy.optimize import least_squares
 
-# Suppress warnings
-warnings.filterwarnings("ignore")
+# --- Suppress RuntimeWarning for mean of empty slice ---
+warnings.filterwarnings("ignore", category=RuntimeWarning)
 
-# --- Project Imports ---
+# --- Import from project codebase ---
 try:
-    from asl_simulation import ASLParameters, _generate_pcasl_signal_jit, _generate_vsasl_signal_jit
-    from enhanced_simulation import RealisticASLSimulator
+    from asl_simulation import ASLSimulator, ASLParameters, _generate_pcasl_signal_jit, _generate_vsasl_signal_jit
+    from enhanced_simulation import PhysiologicalVariation
     from enhanced_asl_network import DisentangledASLNet
-    from asl_trainer import EnhancedASLTrainer
-    from utils import engineer_signal_features_torch
+    from utils import engineer_signal_features
 except ImportError as e:
-    print(f"Error importing project modules: {e}")
+    print(f"FATAL: Could not import necessary project files. Error: {e}")
+    print("Please run this script from the root directory of the 'adikondepudi-asl-multiverse' project.")
     sys.exit(1)
 
 # --- Configuration ---
-LS_INITIAL_GUESS = [60.0, 1500.0] # [CBF, ATT] - The "trap" for LS
-LS_BOUNDS = ([0, 0], [150, 4000]) # Bounds for LS fitting
+NUM_SIMS_PER_DATAPOINT = 100 # Reduced slightly for speed, increase for final paper plots
 
-def standard_kinetic_model(p, plds, params):
-    """
-    Standard 2-compartment kinetic model function for Least Squares fitting.
-    Matches the simulator physics exactly.
-    """
-    cbf_val = p[0] / 6000.0 # Convert to ml/g/s
-    att_val = p[1]
-    
-    # Unpack physics constants
-    t1_a = params.T1_artery
-    t_tau = params.T_tau
-    alpha_pc = params.alpha_PCASL
-    alpha_vs = params.alpha_VSASL
-    
-    # Generate expected signals
-    pcasl_sig = _generate_pcasl_signal_jit(plds, att_val, cbf_val, t1_a, t_tau, alpha_pc, 1.0)
-    vsasl_sig = _generate_vsasl_signal_jit(plds, att_val, cbf_val, t1_a, alpha_vs, 1.0, 2000.0)
-    
-    return np.concatenate([pcasl_sig, vsasl_sig])
+# ==============================================================================
+# 1. STANDALONE LEAST SQUARES SOLVER (Replaces missing multiverse_functions)
+# ==============================================================================
 
-def fit_least_squares(noisy_signals, plds, asl_params):
+def kinetic_model_residuals(params_to_fit, plds, observed_signal, fixed_params):
     """
-    Runs Scipy Least Squares for a batch of signals.
-    Uses randomized initialization to prevent artificial 'perfect' fits.
+    Residual function for Scipy Least Squares.
+    params_to_fit: [cbf, att]
     """
-    preds = []
-    stuck_count = 0
+    cbf_val = params_to_fit[0] # ml/g/s
+    att_val = params_to_fit[1] # ms
     
-    for sig in noisy_signals:
-        # Define residual function: (Model - Data)
-        def residual(p):
-            return standard_kinetic_model(p, plds, asl_params) - sig
+    # Unpack fixed physics parameters
+    t1_a = fixed_params['T1_artery']
+    t_tau = fixed_params['T_tau']
+    alpha_pcasl = fixed_params['alpha_PCASL']
+    alpha_vsasl = fixed_params['alpha_VSASL']
+    t2_factor = fixed_params.get('T2_factor', 1.0)
+    t_sat_vs = fixed_params.get('T_sat_vs', 2000.0) # Default if not in config
+
+    # Generate Model Signals using the JIT functions
+    # Note: JIT functions expect specific argument order
+    model_pcasl = _generate_pcasl_signal_jit(
+        plds, att_val, cbf_val, t1_a, t_tau, alpha_pcasl, t2_factor
+    )
+    
+    model_vsasl = _generate_vsasl_signal_jit(
+        plds, att_val, cbf_val, t1_a, alpha_vsasl, t2_factor, t_sat_vs
+    )
+    
+    # Concatenate to match observed vector [PCASL..., VSASL...]
+    model_signal = np.concatenate([model_pcasl, model_vsasl])
+    
+    # Return residuals (Model - Observed)
+    # Handling NaNs just in case
+    res = model_signal - observed_signal
+    return np.nan_to_num(res)
+
+def predict_ls_single_voxel(noisy_signal: np.ndarray, plds: np.ndarray, ls_params: dict) -> tuple:
+    """
+    Runs a robust Non-Linear Least Squares (NLLS) fit using Scipy.
+    """
+    # 1. Prepare constraints and initial guess
+    # CBF in ml/g/s (0 to 0.025 which is 150 ml/100g/min), ATT in ms (0 to 6000)
+    lower_bounds = [0.0, 0.0]
+    upper_bounds = [0.025, 6000.0] 
+    
+    # Simple initial guess: CBF=60ml/100g/min, ATT=1500ms
+    x0 = [60.0/6000.0, 1500.0]
+
+    try:
+        # 2. Run Optimization
+        result = least_squares(
+            kinetic_model_residuals,
+            x0,
+            bounds=(lower_bounds, upper_bounds),
+            args=(plds, noisy_signal, ls_params),
+            method='trf',
+            ftol=1e-3, xtol=1e-3, gtol=1e-3 # Looser tolerances for speed in diagnostics
+        )
         
-        # Randomize initial guess to simulate clinical uncertainty
-        # CBF: 40-80, ATT: 1000-2000 (Centered around standard 60/1500)
-        current_guess = [np.random.uniform(40, 80), np.random.uniform(1000, 2000)]
+        if result.success:
+            cbf_ml_100g_min = result.x[0] * 6000.0
+            att_ms = result.x[1]
+            return cbf_ml_100g_min, att_ms
+        else:
+            return np.nan, np.nan
+    except Exception:
+        return np.nan, np.nan
 
-        try:
-            res = scipy.optimize.least_squares(
-                residual, 
-                x0=current_guess, 
-                bounds=LS_BOUNDS, 
-                method='trf',
-                ftol=1e-3, # Loose tolerance for speed
-                xtol=1e-3
-            )
-            pred = res.x
-        except:
-            pred = current_guess
-            
-        # Check if solver got "stuck" at initial guess (common failure mode)
-        # We check if it's close to the *specific* random guess used for this iteration
-        if np.allclose(pred, current_guess, atol=0.1):
-            stuck_count += 1
-            
-        preds.append(pred)
+# ==============================================================================
+# 2. V5 NN PREPROCESSING & HELPERS
+# ==============================================================================
+
+def preprocess_for_v5_model(raw_signal_curves: np.ndarray, norm_stats: dict, num_plds: int) -> np.ndarray:
+    """Applies the V5 preprocessing pipeline to a single sample."""
+    # 1. Per-instance normalization
+    pcasl = raw_signal_curves[:num_plds]
+    vsasl = raw_signal_curves[num_plds:]
     
-    return np.array(preds), stuck_count
+    p_mu, p_sig = np.mean(pcasl), np.std(pcasl)
+    v_mu, v_sig = np.mean(vsasl), np.std(vsasl)
+    
+    p_shape = (pcasl - p_mu) / (p_sig + 1e-6)
+    v_shape = (vsasl - v_mu) / (v_sig + 1e-6)
+    shape_vector = np.concatenate([p_shape, v_shape])
 
-def load_model_and_config(run_dir):
-    run_path = Path(run_dir)
-    with open(run_path / "research_config.json", 'r') as f:
-        config = json.load(f)
-    with open(run_path / "norm_stats.json", 'r') as f:
-        norm_stats = json.load(f)
+    # 2. Engineered features
+    eng_features = engineer_signal_features(raw_signal_curves, num_plds)
+
+    # 3. Assemble scalar features (8 features in V5)
+    scalar_features_unnorm = np.array([p_mu, p_sig, v_mu, v_sig, *eng_features])
+
+    # 4. Standardize scalars
+    s_mean = np.array(norm_stats['scalar_features_mean'])
+    s_std = np.array(norm_stats['scalar_features_std']) + 1e-6
+    scalar_features_norm = (scalar_features_unnorm - s_mean) / s_std
+
+    # 5. Concatenate
+    final_input = np.concatenate([shape_vector, scalar_features_norm])
+    return final_input.reshape(1, -1).astype(np.float32)
+
+def denormalize_predictions(cbf_norm: float, att_norm: float, norm_stats: dict) -> tuple:
+    """Denormalizes CBF and ATT predictions."""
+    cbf = cbf_norm * norm_stats['y_std_cbf'] + norm_stats['y_mean_cbf']
+    att = att_norm * norm_stats['y_std_att'] + norm_stats['y_mean_att']
+    return cbf, att
+
+def load_artifacts(model_results_root: Path) -> tuple:
+    """Robustly loads the model ensemble."""
+    print(f"--> Loading artifacts from: {model_results_root}")
+    try:
+        with open(model_results_root / 'research_config.json', 'r') as f:
+            config = json.load(f)
+        with open(model_results_root / 'norm_stats.json', 'r') as f:
+            norm_stats = json.load(f)
+
+        models = []
+        models_dir = model_results_root / 'trained_models'
+        num_plds = len(config['pld_values'])
         
-    # Determine input size
+        # V5 Input size: Shape (2*PLDs) + Scalars (8)
+        base_input_size = num_plds * 2 + 8
+
+        for model_path in sorted(models_dir.glob('ensemble_model_*.pt')):
+            model = DisentangledASLNet(mode='regression', input_size=base_input_size, **config)
+            model.to(dtype=torch.bfloat16)
+            model.load_state_dict(torch.load(model_path, map_location=torch.device('cpu')))
+            model.eval()
+            models.append(model)
+
+        if not models: raise FileNotFoundError("No models found.")
+        
+        device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+        for model in models: model.to(device)
+
+        print(f"--> Loaded {len(models)} models.")
+        return models, config, norm_stats, device
+    except Exception as e:
+        print(f"[FATAL ERROR] Artifact load failed: {e}")
+        sys.exit(1)
+
+def predict_nn_single_voxel(noisy_signal: np.ndarray, models: list, config: dict, norm_stats: dict, device: torch.device) -> tuple:
+    """Runs NN inference."""
     num_plds = len(config['pld_values'])
-    input_size = num_plds * 2 + 8 # 8 scalar features
-    
-    model = DisentangledASLNet(mode='regression', input_size=input_size, **config)
-    
-    # Load ensemble
-    models = []
-    model_files = sorted(list((run_path / "trained_models").glob("ensemble_model_*.pt")))
-    if not model_files:
-        print("No ensemble models found! Checking for single model...")
-        # Fallback logic if needed
-        
-    for mf in model_files:
-        m = DisentangledASLNet(mode='regression', input_size=input_size, **config)
-        m.load_state_dict(torch.load(mf, map_location='cpu'))
-        m.eval()
-        models.append(m)
-        
-    return models, config, norm_stats
+    norm_input = preprocess_for_v5_model(noisy_signal, norm_stats, num_plds)
+    input_tensor = torch.from_numpy(norm_input).to(device, dtype=torch.bfloat16)
 
-def predict_nn_ensemble(models, signals, norm_stats, device):
-    """
-    Run inference using the Neural Network Ensemble.
-    Handles preprocessing internally.
-    """
-    # 1. Preprocessing (Move to Torch GPU)
-    signals_tensor = torch.from_numpy(signals).float().to(device)
-    num_plds = signals.shape[1] // 2
-    
-    # Feature Engineering
-    eng_features = engineer_signal_features_torch(signals_tensor, num_plds)
-    
-    # Normalization
-    pcasl = signals_tensor[:, :num_plds]
-    vsasl = signals_tensor[:, num_plds:]
-    
-    p_mu = pcasl.mean(dim=1, keepdim=True)
-    p_std = pcasl.std(dim=1, keepdim=True) + 1e-6
-    v_mu = vsasl.mean(dim=1, keepdim=True)
-    v_std = vsasl.std(dim=1, keepdim=True) + 1e-6
-    
-    p_shape = (pcasl - p_mu) / p_std
-    v_shape = (vsasl - v_mu) / v_std
-    
-    scalars = torch.cat([p_mu, p_std, v_mu, v_std, eng_features], dim=1)
-    
-    # Normalize scalars using stored stats
-    s_mean = torch.tensor(norm_stats['scalar_features_mean'], device=device).float()
-    s_std = torch.tensor(norm_stats['scalar_features_std'], device=device).float()
-    scalars_norm = (scalars - s_mean) / s_std
-    
-    model_input = torch.cat([p_shape, v_shape, scalars_norm], dim=1)
-
-    model_input = torch.clamp(model_input, -15.0, 15.0)
-    
-    # 2. Inference
-    preds_cbf = []
-    preds_att = []
-    
     with torch.no_grad():
-        for model in models:
-            model = model.to(device)
-            out = model(model_input)
-            # out = (cbf_mean, att_mean, cbf_logvar, att_logvar)
-            preds_cbf.append(out[0].cpu().numpy())
-            preds_att.append(out[1].cpu().numpy())
-            
-    # 3. Ensemble Averaging
-    avg_cbf_norm = np.mean(preds_cbf, axis=0)
-    avg_att_norm = np.mean(preds_att, axis=0)
+        # NN returns (cbf, att, logvar_cbf, logvar_att, ...)
+        cbf_outs = [m(input_tensor)[0].cpu().float().item() for m in models]
+        att_outs = [m(input_tensor)[1].cpu().float().item() for m in models]
     
-    # 4. Denormalization
-    pred_cbf = avg_cbf_norm * norm_stats['y_std_cbf'] + norm_stats['y_mean_cbf']
-    pred_att = avg_att_norm * norm_stats['y_std_att'] + norm_stats['y_mean_att']
-    
-    return np.stack([pred_cbf, pred_att], axis=1)
+    # Ensemble averaging in normalized space
+    cbf_pred, att_pred = denormalize_predictions(np.mean(cbf_outs), np.mean(att_outs), norm_stats)
+    return cbf_pred, att_pred
 
-def run_experiment(name, param_grid, simulator, models, norm_stats, config, output_dir, snr_level=5.0):
-    print(f"\n>>> Running Experiment: {name} (SNR={snr_level})")
-    
+# ==============================================================================
+# 3. PHASES & REPORTING
+# ==============================================================================
+
+def run_full_scenario(scenario_params: dict, simulator: ASLSimulator, plds: np.ndarray, nn_args: dict, ls_args: dict, output_dir: Path, num_sims: int):
+    """Runs the simulation loop."""
+    scenario_name = scenario_params['name']
+    print(f"\n--- Running Scenario: {scenario_name} ---")
     results = []
-    plds = np.array(config['pld_values'])
-    device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
-    
-    # Prepare Simulator Params for LS
-    asl_params = ASLParameters(**{k:v for k,v in config.items() if k in ASLParameters.__annotations__})
+    physio_var = PhysiologicalVariation()
+    base_params = simulator.params
 
-    for params in tqdm(param_grid):
-        true_cbf = params['cbf']
-        true_att = params['att']
-        
-        # 1. Generate Clean Signal
-        # Note: Using simulator to generate clean, then adding simple Gaussian noise 
-        # to match the "Simple Gaussian" training paradigm perfectly.
-        vsasl_clean = simulator._generate_vsasl_signal(plds, true_att, true_cbf, simulator.params.T1_artery, simulator.params.alpha_VSASL)
-        pcasl_clean = simulator._generate_pcasl_signal(plds, true_att, true_cbf, simulator.params.T1_artery, simulator.params.T_tau, simulator.params.alpha_PCASL)
-        clean_sig = np.concatenate([pcasl_clean, vsasl_clean])
-        
-        # 2. Add Noise (Batch of 100 repetitions for stats)
-        n_reps = 100
-        clean_batch = np.tile(clean_sig, (n_reps, 1))
-        
-        # Calculate noise sigma based on reference signal
-        ref_sig = simulator._compute_reference_signal()
-        noise_std = ref_sig / snr_level
-        
-        # Apply TR Scaling
-        scalings = simulator.compute_tr_noise_scaling(plds)
-        scale_vec = np.concatenate([np.full(len(plds), scalings['PCASL']), np.full(len(plds), scalings['VSASL'])])
-        
-        noise = np.random.randn(*clean_batch.shape) * noise_std * scale_vec
-        noisy_batch = clean_batch + noise
-        
-        # 3. Neural Network Prediction
-        nn_preds = predict_nn_ensemble(models, noisy_batch, norm_stats, device)
-        
-        # 4. Least Squares Prediction
-        ls_preds, stuck_count = fit_least_squares(noisy_batch, plds, asl_params)
-        
-        # 5. Metrics Calculation
-        # NN Metrics
-        nn_cbf_err = nn_preds[:, 0] - true_cbf
-        nn_att_err = nn_preds[:, 1] - true_att
-        
-        # LS Metrics
-        ls_cbf_err = ls_preds[:, 0] - true_cbf
-        ls_att_err = ls_preds[:, 1] - true_att
-        
-        results.append({
-            'True_CBF': true_cbf,
-            'True_ATT': true_att,
+    param_iterator = list(scenario_params['iterator'])
+    
+    for gt_cbf, gt_att in tqdm(param_iterator, desc="Simulating"):
+        for _ in range(num_sims):
+            # Perturb physics slightly for realism ("Inverse Crime" prevention)
+            # But keep within reason so LS has a fighting chance
+            true_t1 = np.random.uniform(*physio_var.t1_artery_range)
+            p_tau = base_params.T_tau # * np.random.uniform(0.95, 1.05) # Minor perturbation
             
-            # Neural Net Stats
-            'NN_CBF_Bias': np.mean(nn_cbf_err),
-            'NN_CBF_MAE': np.mean(np.abs(nn_cbf_err)),
-            'NN_CBF_SD': np.std(nn_cbf_err),
-            'NN_ATT_Bias': np.mean(nn_att_err),
-            'NN_ATT_MAE': np.mean(np.abs(nn_att_err)),
-            'NN_ATT_SD': np.std(nn_att_err),
+            # Generate Data
+            data_dict = simulator.generate_synthetic_data(
+                plds, att_values=np.array([gt_att]), n_noise=1, tsnr=scenario_params['tsnr'],
+                cbf_val=gt_cbf, t1_artery_val=true_t1, t_tau_val=p_tau
+            )
             
-            # Least Squares Stats
-            'LS_CBF_Bias': np.mean(ls_cbf_err),
-            'LS_CBF_MAE': np.mean(np.abs(ls_cbf_err)),
-            'LS_CBF_SD': np.std(ls_cbf_err),
-            'LS_ATT_Bias': np.mean(ls_att_err),
-            'LS_ATT_MAE': np.mean(np.abs(ls_att_err)),
-            'LS_ATT_SD': np.std(ls_att_err),
-            'LS_Stuck_Pct': (stuck_count / n_reps) * 100
-        })
+            # Extract signal (batch 0, att_idx 0) -> Shape (plds*2,)
+            signals = data_dict['MULTIVERSE'][0, 0, :, :]
+            noisy_signal = np.concatenate([signals[:, 0], signals[:, 1]])
+            
+            # Predictions
+            nn_cbf, nn_att = predict_nn_single_voxel(noisy_signal, **nn_args)
+            ls_cbf, ls_att = predict_ls_single_voxel(noisy_signal, plds, **ls_args)
+
+            results.append({
+                'true_cbf': gt_cbf, 'true_att': gt_att,
+                'nn_cbf_pred': nn_cbf, 'nn_att_pred': nn_att,
+                'ls_cbf_pred': ls_cbf, 'ls_att_pred': ls_att,
+            })
 
     df = pd.DataFrame(results)
-    df.to_csv(output_dir / f"results_{name}.csv", index=False)
-    return df
+    csv_path = output_dir / f"Results_{scenario_name}.csv"
+    df.to_csv(csv_path, index=False)
+    return csv_path
 
-def plot_results(df, x_axis, name, output_dir):
-    """Generates detailed Bias/Precision plots."""
-    fig, axes = plt.subplots(2, 2, figsize=(16, 10))
+def generate_report(csv_path: Path, scenario_params: dict, output_dir: Path):
+    """Generates comparison plots."""
+    df = pd.read_csv(csv_path)
+    name = scenario_params['name']
+    x_param = scenario_params['x_axis_param']
     
-    # Plot Styling
-    sns.set_style("whitegrid")
-    colors = {'NN': '#E63946', 'LS': '#457B9D'} # Red vs Blue
+    # Calculate Absolute Errors
+    df['nn_cbf_abs_err'] = np.abs(df['nn_cbf_pred'] - df['true_cbf'])
+    df['ls_cbf_abs_err'] = np.abs(df['ls_cbf_pred'] - df['true_cbf'])
+    df['nn_att_abs_err'] = np.abs(df['nn_att_pred'] - df['true_att'])
+    df['ls_att_abs_err'] = np.abs(df['ls_att_pred'] - df['true_att'])
+
+    # Remove LS outliers (failed fits) for cleaner plots
+    df_clean = df[df['ls_att_pred'] < 8000].copy()
+
+    # Binning
+    bins = np.linspace(df[x_param].min(), df[x_param].max(), 15)
+    df_clean['bin'] = pd.cut(df_clean[x_param], bins)
     
-    # --- CBF Plots ---
-    # Bias (Accuracy)
-    ax = axes[0,0]
-    ax.plot(df[x_axis], df['NN_CBF_Bias'], label='Neural Net Bias', color=colors['NN'], marker='o', linewidth=2)
-    ax.plot(df[x_axis], df['LS_CBF_Bias'], label='Least Squares Bias', color=colors['LS'], marker='s', linestyle='--', linewidth=2)
-    ax.fill_between(df[x_axis], 
-                    df['NN_CBF_Bias'] - df['NN_CBF_SD'], 
-                    df['NN_CBF_Bias'] + df['NN_CBF_SD'], 
-                    color=colors['NN'], alpha=0.15, label='NN Precision (SD)')
-    ax.set_title(f"CBF Accuracy (Bias & Precision) vs {x_axis}")
-    ax.set_ylabel("CBF Error (ml/100g/min)")
+    summary = df_clean.groupby('bin', observed=True).agg({
+        x_param: 'mean',
+        'nn_cbf_abs_err': 'mean', 'ls_cbf_abs_err': 'mean',
+        'nn_att_abs_err': 'mean', 'ls_att_abs_err': 'mean'
+    }).reset_index()
+
+    # Plotting
+    fig, axes = plt.subplots(1, 2, figsize=(16, 6))
+    
+    # CBF Error Plot
+    ax = axes[0]
+    ax.plot(summary[x_param], summary['nn_cbf_abs_err'], 'o-', color='crimson', label='Neural Net', linewidth=2)
+    ax.plot(summary[x_param], summary['ls_cbf_abs_err'], 's--', color='gray', label='Least Squares', linewidth=2)
+    ax.set_xlabel(f'Ground Truth {x_param.upper()}')
+    ax.set_ylabel('Mean Absolute Error (CBF)')
+    ax.set_title(f'CBF Accuracy: {name}')
     ax.legend()
-    
-    # MAE (Overall Error)
-    ax = axes[1,0]
-    ax.plot(df[x_axis], df['NN_CBF_MAE'], label='Neural Net MAE', color=colors['NN'], marker='o')
-    ax.plot(df[x_axis], df['LS_CBF_MAE'], label='Least Squares MAE', color=colors['LS'], marker='s', linestyle='--')
-    ax.set_title(f"CBF Mean Absolute Error vs {x_axis}")
-    ax.set_ylabel("MAE")
-    ax.set_xlabel(x_axis)
-    
-    # --- ATT Plots ---
-    # Bias
-    ax = axes[0,1]
-    ax.plot(df[x_axis], df['NN_ATT_Bias'], label='Neural Net Bias', color=colors['NN'], marker='o', linewidth=2)
-    ax.plot(df[x_axis], df['LS_ATT_Bias'], label='Least Squares Bias', color=colors['LS'], marker='s', linestyle='--', linewidth=2)
-    ax.fill_between(df[x_axis], 
-                    df['NN_ATT_Bias'] - df['NN_ATT_SD'], 
-                    df['NN_ATT_Bias'] + df['NN_ATT_SD'], 
-                    color=colors['NN'], alpha=0.15, label='NN Precision (SD)')
-    ax.set_title(f"ATT Accuracy (Bias & Precision) vs {x_axis}")
-    ax.set_ylabel("ATT Error (ms)")
+    ax.grid(True, alpha=0.3)
+
+    # ATT Error Plot
+    ax = axes[1]
+    ax.plot(summary[x_param], summary['nn_att_abs_err'], 'o-', color='crimson', label='Neural Net', linewidth=2)
+    ax.plot(summary[x_param], summary['ls_att_abs_err'], 's--', color='gray', label='Least Squares', linewidth=2)
+    ax.set_xlabel(f'Ground Truth {x_param.upper()}')
+    ax.set_ylabel('Mean Absolute Error (ATT)')
+    ax.set_title(f'ATT Accuracy: {name}')
     ax.legend()
-    
-    # MAE
-    ax = axes[1,1]
-    ax.plot(df[x_axis], df['NN_ATT_MAE'], label='Neural Net MAE', color=colors['NN'], marker='o')
-    ax.plot(df[x_axis], df['LS_ATT_MAE'], label='Least Squares MAE', color=colors['LS'], marker='s', linestyle='--')
-    
-    # Add LS Stuck annotation if relevant
-    stuck_avg = df['LS_Stuck_Pct'].mean()
-    if stuck_avg > 5:
-        ax.annotate(f"LS Stuck Rate: {stuck_avg:.1f}%", xy=(0.05, 0.9), xycoords='axes fraction', color='red', fontweight='bold')
-        
-    ax.set_title(f"ATT Mean Absolute Error vs {x_axis}")
-    ax.set_ylabel("MAE")
-    ax.set_xlabel(x_axis)
-    
+    ax.grid(True, alpha=0.3)
+
     plt.tight_layout()
     plt.savefig(output_dir / f"Plot_{name}.png", dpi=150)
     plt.close()
+    print(f"  -> Plot saved: {output_dir / f'Plot_{name}.png'}")
+
+# ==============================================================================
+# MAIN
+# ==============================================================================
 
 def main():
     parser = argparse.ArgumentParser()
-    parser.add_argument("run_dir", type=str, help="Path to the training run directory")
-    parser.add_argument("--output_dir", type=str, default="diagnostics_output")
+    parser.add_argument("model_artifacts_dir", type=str)
+    parser.add_argument("output_dir", type=str)
     args = parser.parse_args()
-    
-    output_path = Path(args.output_dir)
-    output_path.mkdir(exist_ok=True, parents=True)
-    
-    print(f"Loading artifacts from {args.run_dir}...")
-    models, config, norm_stats = load_model_and_config(args.run_dir)
-    
-    sim_params = ASLParameters(**{k:v for k,v in config.items() if k in ASLParameters.__annotations__})
-    simulator = RealisticASLSimulator(params=sim_params)
-    
-    # --- Scenario 1: Varying ATT (Fixed CBF) ---
-    # Matches "First Figure" request
-    att_range = np.linspace(500, 4000, 15)
-    grid_A = [{'att': a, 'cbf': 60.0} for a in att_range]
-    df_A = run_experiment("A_VaryingATT_FixedCBF", grid_A, simulator, models, norm_stats, config, output_path, snr_level=5.0)
-    plot_results(df_A, "True_ATT", "A_VaryingATT_FixedCBF", output_path)
-    
-    # --- Scenario 2: Varying CBF (Fixed ATT) ---
-    # Matches "Second Figure" request
-    cbf_range = np.linspace(10, 100, 10)
-    grid_B = [{'att': 1500.0, 'cbf': c} for c in cbf_range]
-    df_B = run_experiment("B_VaryingCBF_FixedATT", grid_B, simulator, models, norm_stats, config, output_path, snr_level=5.0)
-    plot_results(df_B, "True_CBF", "B_VaryingCBF_FixedATT", output_path)
-    
-    # --- Scenario 3: High Noise Varying ATT ---
-    # Matches "Fourth Figure" request
-    df_C = run_experiment("C_HighNoise_VaryingATT", grid_A, simulator, models, norm_stats, config, output_path, snr_level=2.0) # SNR dropped to 2.0
-    plot_results(df_C, "True_ATT", "C_HighNoise_VaryingATT", output_path)
-    
-    # --- Scenario 4: The PI's "Third Figure" (Global Robustness) ---
-    # "Group all different CBF values... plot as function of ATT"
-    # We create a random grid of (CBF, ATT) pairs, then bin by ATT
-    print("\n>>> Running Experiment: D_Global_Robustness (Random Grid)")
-    n_samples = 500
-    random_grid = []
-    for _ in range(n_samples):
-        random_grid.append({
-            'cbf': np.random.uniform(20, 100),
-            'att': np.random.uniform(500, 4000)
-        })
-    
-    df_D_raw = run_experiment("D_Global_Raw", random_grid, simulator, models, norm_stats, config, output_path)
-    
-    # Binning for plotting
-    df_D_raw['ATT_Bin'] = pd.cut(df_D_raw['True_ATT'], bins=np.linspace(500, 4000, 8), labels=np.linspace(750, 3750, 7))
-    df_D_grouped = df_D_raw.groupby('ATT_Bin').mean().reset_index()
-    # Need to handle numeric conversion for plotting
-    df_D_grouped['True_ATT'] = df_D_grouped['ATT_Bin'].astype(float)
-    
-    plot_results(df_D_grouped, "True_ATT", "D_Global_Robustness", output_path)
 
-    print("\n===========================================")
-    print("       DIAGNOSTIC SUMMARY TABLES           ")
-    print("===========================================")
+    model_dir = Path(args.model_artifacts_dir)
+    output_dir = Path(args.output_dir)
+    output_dir.mkdir(parents=True, exist_ok=True)
+
+    # 1. Load System
+    models, config, norm_stats, device = load_artifacts(model_dir)
+    plds = np.array(config['pld_values'])
     
-    print("\n1. VARYING ATT (Fixed CBF=60) - AVERAGE PERFORMANCE")
-    print(df_A[['True_ATT', 'NN_CBF_MAE', 'LS_CBF_MAE', 'NN_ATT_MAE', 'LS_ATT_MAE']].round(2).to_string(index=False))
+    # Simulator with base parameters
+    sim_params = ASLParameters(**{k: v for k, v in config.items() if k in ASLParameters.__annotations__})
+    simulator = ASLSimulator(params=sim_params)
     
-    print("\n2. LS STUCK PERCENTAGE (Did LS fail to converge?)")
-    stuck_A = df_A['LS_Stuck_Pct'].mean()
-    stuck_C = df_C['LS_Stuck_Pct'].mean()
-    print(f"Scenario A (Normal Noise): {stuck_A:.1f}% of samples stuck")
-    print(f"Scenario C (High Noise):   {stuck_C:.1f}% of samples stuck")
+    # Params for LS solver (need to extract relevant physics consts)
+    ls_params_dict = {
+        'T1_artery': sim_params.T1_artery, 'T_tau': sim_params.T_tau,
+        'alpha_PCASL': sim_params.alpha_PCASL, 'alpha_VSASL': sim_params.alpha_VSASL,
+        'T2_factor': sim_params.T2_factor, 'T_sat_vs': sim_params.T_sat_vs
+    }
     
-    print(f"\nDone! Detailed CSVs and plots saved to {output_path}")
+    nn_args = {'models': models, 'config': config, 'norm_stats': norm_stats, 'device': device}
+    ls_args = {'ls_params': ls_params_dict}
+
+    # 2. Define Scenarios
+    scenarios = [
+        {
+            'name': 'A_VaryingATT_FixedCBF',
+            'tsnr': 10.0, 'x_axis_param': 'true_att',
+            'iterator': [(60.0, att) for att in np.linspace(500, 4000, 20)]
+        },
+        {
+            'name': 'B_VaryingCBF_FixedATT',
+            'tsnr': 10.0, 'x_axis_param': 'true_cbf',
+            'iterator': [(cbf, 1500.0) for cbf in np.linspace(10, 100, 20)]
+        },
+        {
+             # More challenging noise
+            'name': 'C_HighNoise_VaryingATT',
+            'tsnr': 5.0, 'x_axis_param': 'true_att',
+            'iterator': [(60.0, att) for att in np.linspace(500, 4000, 20)]
+        }
+    ]
+
+    # 3. Run Loop
+    print("--- Starting Diagnostics ---")
+    for sc in scenarios:
+        csv = run_full_scenario(sc, simulator, plds, nn_args, ls_args, output_dir, NUM_SIMS_PER_DATAPOINT)
+        generate_report(csv, sc, output_dir)
+
+    print("\nDone! Results in:", output_dir)
 
 if __name__ == "__main__":
     main()
