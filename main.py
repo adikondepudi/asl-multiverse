@@ -184,11 +184,19 @@ def run_comprehensive_asl_research(config: ResearchConfig, stage: int, output_di
     if stage == 1:
         gpu_targets = gpu_signals_clean.clone()
     else:
-        cbf = raw_params[:, 0]; att = raw_params[:, 1]
+        # Stage 2: Extract CBF, ATT, T1
+        # raw_params is now [N, 3]
+        cbf = raw_params[:, 0]
+        att = raw_params[:, 1]
+        t1 = raw_params[:, 2] # New T1 column
+        
         cbf_norm = (cbf - norm_stats['y_mean_cbf']) / norm_stats['y_std_cbf']
         att_norm = (att - norm_stats['y_mean_att']) / norm_stats['y_std_att']
-        params_norm = np.stack([cbf_norm, att_norm], axis=1)
-        gpu_targets = torch.from_numpy(params_norm).float().to(device)
+        
+        # Pass T1 un-normalized (Trainer handles normalization)
+        # Stack: [cbf_norm, att_norm, raw_t1]
+        targets_stack = np.stack([cbf_norm, att_norm, t1], axis=1)
+        gpu_targets = torch.from_numpy(targets_stack).float().to(device)
 
     train_loader = FastTensorDataLoader(gpu_signals_clean, gpu_targets, batch_size=config.batch_size, shuffle=True)
     

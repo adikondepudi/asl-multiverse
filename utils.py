@@ -7,8 +7,8 @@ from asl_simulation import _generate_pcasl_signal_jit, _generate_vsasl_signal_ji
 
 def engineer_signal_features_torch(raw_signal: torch.Tensor, num_plds: int) -> torch.Tensor:
     """
-    GPU-accelerated version of feature engineering using PyTorch.
-    Includes safeguards against division by zero.
+    GPU-accelerated feature engineering.
+    Returns: [pcasl_ttp, vsasl_ttp, pcasl_com, vsasl_com, pcasl_peak, vsasl_peak]
     """
     pcasl_curves = raw_signal[:, :num_plds]
     vsasl_curves = raw_signal[:, num_plds:]
@@ -20,28 +20,26 @@ def engineer_signal_features_torch(raw_signal: torch.Tensor, num_plds: int) -> t
     pcasl_ttp = torch.argmax(pcasl_curves, dim=1).float()
     vsasl_ttp = torch.argmax(vsasl_curves, dim=1).float()
 
-    # Feature 2: Center of mass
-    # SAFEGUARD: Use a larger epsilon and absolute value for the denominator check
+    # Feature 2: Center of mass (Safe division)
     pcasl_sum = torch.sum(pcasl_curves, dim=1)
     vsasl_sum = torch.sum(vsasl_curves, dim=1)
     
-    # Avoid division by zero if sum is tiny (e.g., pure noise around 0)
-    # We replace near-zero sums with 1.0 (arbitrary, but prevents Inf)
     pcasl_sum_safe = torch.where(torch.abs(pcasl_sum) < 1e-4, torch.ones_like(pcasl_sum), pcasl_sum)
     vsasl_sum_safe = torch.where(torch.abs(vsasl_sum) < 1e-4, torch.ones_like(vsasl_sum), vsasl_sum)
     
     pcasl_com = torch.sum(pcasl_curves * plds_indices, dim=1) / pcasl_sum_safe
     vsasl_com = torch.sum(vsasl_curves * plds_indices, dim=1) / vsasl_sum_safe
     
-    # Check for NaNs just in case and replace them
-    pcasl_com = torch.nan_to_num(pcasl_com, nan=0.0)
-    vsasl_com = torch.nan_to_num(vsasl_com, nan=0.0)
+    # Feature 3: Peak Height (NEW)
+    pcasl_peak = torch.max(pcasl_curves, dim=1).values
+    vsasl_peak = torch.max(vsasl_curves, dim=1).values
 
-    return torch.stack([pcasl_ttp, vsasl_ttp, pcasl_com, vsasl_com], dim=1)
+    # Stack all 6 features
+    return torch.stack([pcasl_ttp, vsasl_ttp, pcasl_com, vsasl_com, pcasl_peak, vsasl_peak], dim=1)
 
 # ... (Keep the rest of the file: engineer_signal_features (numpy), _worker_generate_sample, ParallelStreamingStatsCalculator as they were) ...
 def engineer_signal_features(raw_signal: np.ndarray, num_plds: int) -> np.ndarray:
-    """Legacy Numpy version."""
+    """Legacy Numpy version updated with Peak Height."""
     is_1d = raw_signal.ndim == 1
     if is_1d:
         raw_signal = raw_signal.reshape(1, -1)
@@ -58,7 +56,11 @@ def engineer_signal_features(raw_signal: np.ndarray, num_plds: int) -> np.ndarra
     pcasl_com = np.sum(pcasl_curves * plds_indices, axis=1) / pcasl_sum
     vsasl_com = np.sum(vsasl_curves * plds_indices, axis=1) / vsasl_sum
     
-    engineered_features = np.stack([pcasl_ttp, vsasl_ttp, pcasl_com, vsasl_com], axis=1)
+    # NEW: Peak Height
+    pcasl_peak = np.max(pcasl_curves, axis=1)
+    vsasl_peak = np.max(vsasl_curves, axis=1)
+    
+    engineered_features = np.stack([pcasl_ttp, vsasl_ttp, pcasl_com, vsasl_com, pcasl_peak, vsasl_peak], axis=1)
 
     if is_1d:
         return engineered_features.flatten().astype(np.float32)
@@ -74,6 +76,7 @@ def _worker_generate_sample(args_tuple):
     true_cbf = np.random.uniform(*physio_var.cbf_range)
     true_t1_artery = np.random.uniform(*physio_var.t1_artery_range)
     
+    # Generate clean signals with specific T1
     vsasl_clean = simulator._generate_vsasl_signal(plds, true_att, true_cbf, true_t1_artery, simulator.params.alpha_VSASL)
     pcasl_clean = simulator._generate_pcasl_signal(plds, true_att, true_cbf, true_t1_artery, simulator.params.T_tau, simulator.params.alpha_PCASL)
     
@@ -84,11 +87,15 @@ def _worker_generate_sample(args_tuple):
     shape_vector = np.concatenate([pcasl_shape, vsasl_shape])
 
     raw_signal_vector = np.concatenate([pcasl_clean, vsasl_clean])
+    
+    # Calculate features including new Peaks
     eng_features = engineer_signal_features(raw_signal_vector, len(plds))
     
+    # scalars: [mu_p, sig_p, mu_v, sig_v, ttp_p, ttp_v, com_p, com_v, peak_p, peak_v]
     scalar_features = np.array([pcasl_mu, pcasl_sigma, vsasl_mu, vsasl_sigma, *eng_features])
     
-    return shape_vector, true_cbf, true_att, scalar_features
+    # Return t1_artery as well so we can calculate stats for it
+    return shape_vector, true_cbf, true_att, true_t1_artery, scalar_features
 
 class ParallelStreamingStatsCalculator:
     def __init__(self, simulator, plds, num_samples, num_workers):
@@ -97,7 +104,7 @@ class ParallelStreamingStatsCalculator:
         self.num_samples = num_samples
         self.num_workers = num_workers
         self.num_plds = len(plds)
-        self.num_scalar_features = 8
+        self.num_scalar_features = 10
 
         self.count = 0
         self.shape_vector_mean = np.zeros(self.num_plds * 2)
@@ -120,13 +127,18 @@ class ParallelStreamingStatsCalculator:
         base_seed = int(time.time())
         worker_args = [(self.simulator, self.plds, base_seed + i) for i in range(self.num_samples)]
         
+        self.num_scalar_features = 10 # Updated from 8 to 10
+        self.t1_mean, self.t1_m2 = 0.0, 0.0 # New T1 trackers
+
         with mp.Pool(processes=self.num_workers) as pool:
             results_iterator = pool.imap_unordered(_worker_generate_sample, worker_args)
-            for shape_vec, cbf, att, scalars in results_iterator:
+            # Unpack new return tuple including t1
+            for shape_vec, cbf, att, t1, scalars in results_iterator:
                 self.count += 1
                 self.shape_vector_mean, self.shape_vector_m2 = self._update_stats((self.shape_vector_mean, self.shape_vector_m2), shape_vec)
                 self.cbf_mean, self.cbf_m2 = self._update_stats((self.cbf_mean, self.cbf_m2), cbf)
                 self.att_mean, self.att_m2 = self._update_stats((self.att_mean, self.att_m2), att)
+                self.t1_mean, self.t1_m2 = self._update_stats((self.t1_mean, self.t1_m2), t1) # Update T1 stats
                 self.scalar_mean, self.scalar_m2 = self._update_stats((self.scalar_mean, self.scalar_m2), scalars)
 
         if self.count < 2: return {}
@@ -134,6 +146,7 @@ class ParallelStreamingStatsCalculator:
         shape_vector_std = np.sqrt(self.shape_vector_m2 / self.count)
         cbf_std = np.sqrt(self.cbf_m2 / self.count)
         att_std = np.sqrt(self.att_m2 / self.count)
+        t1_std = np.sqrt(self.t1_m2 / self.count)
         scalar_std = np.sqrt(self.scalar_m2 / self.count)
 
         return {
@@ -143,6 +156,8 @@ class ParallelStreamingStatsCalculator:
             'y_std_cbf': max(float(cbf_std), 1e-6),
             'y_mean_att': self.att_mean,
             'y_std_att': max(float(att_std), 1e-6),
+            'y_mean_t1': self.t1_mean,
+            'y_std_t1': max(float(t1_std), 1e-6),
             'scalar_features_mean': self.scalar_mean.tolist(),
             'scalar_features_std': np.clip(scalar_std, 1e-6, None).tolist()
         }

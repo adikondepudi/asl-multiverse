@@ -2,14 +2,14 @@
 training:
   model_class_name: "DisentangledASLNet"
   encoder_type: "physics_processor"
-  hidden_sizes: [256, 128, 128]
+  hidden_sizes: [128, 64, 32]
 
   dropout_rate: 0.1
   weight_decay: 0.0001
   learning_rate: 0.0003
   
   # OPTIMIZATION FOR T4 GPU RESIDENT DATA
-  batch_size: 16384   # Doubled for saturation
+  batch_size: 4096   # Doubled for saturation
   n_ensembles: 1 
   
   # With dynamic noise, we need more passes to see variety.
@@ -29,7 +29,7 @@ training:
 data:
   use_offline_dataset: true
   offline_dataset_path: "asl_offline_dataset_10M_baseline_v1"
-  num_samples_to_load: 10000000 
+  num_samples_to_load: 2000000 
   pld_values: [500, 1000, 1500, 2000, 2500, 3000]
 
 simulation:

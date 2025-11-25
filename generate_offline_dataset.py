@@ -67,7 +67,7 @@ def generate_and_save_chunk(args):
         
         signals_noisy_chunk.append(final_noisy_input.astype(np.float32))
         signals_clean_chunk.append(clean_signal_vector.astype(np.float32))
-        params_chunk.append(np.array([true_cbf, true_att]).astype(np.float32))
+        params_chunk.append(np.array([true_cbf, true_att, true_t1_artery]).astype(np.float32))
         
     np.savez_compressed(
         output_dir / f'dataset_chunk_{chunk_id:04d}.npz',

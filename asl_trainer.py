@@ -107,9 +107,14 @@ class EnhancedASLTrainer:
                 self.norm_stats_gpu[k] = torch.tensor(v, device=self.device, dtype=torch.float32)
             else:
                 self.norm_stats_gpu[k] = torch.tensor(v, device=self.device, dtype=torch.float32)
+        
+        # NEW: Register T1 stats for normalization
+        self.t1_mean_gpu = torch.tensor(norm_stats.get('y_mean_t1', 1850.0), device=self.device, dtype=torch.float32)
+        self.t1_std_gpu = torch.tensor(norm_stats.get('y_std_t1', 200.0), device=self.device, dtype=torch.float32)
+        
         logger.info("GPU Noise parameters and Norm Stats loaded successfully.")
 
-    def _process_batch_on_gpu(self, raw_signals):
+    def _process_batch_on_gpu(self, raw_signals, t1_values=None):
         if self.noise_scale_vec_gpu is None:
             return raw_signals 
 
@@ -146,6 +151,13 @@ class EnhancedASLTrainer:
         s_std = self.norm_stats_gpu['scalar_features_std'] + 1e-6
         
         scalars_norm = (scalars - s_mean) / s_std
+        
+        # NEW: Handle T1 Injection
+        if t1_values is not None:
+            # Normalize T1
+            t1_norm = (t1_values - self.t1_mean_gpu) / (self.t1_std_gpu + 1e-6)
+            # Concatenate to scalars -> Now 11 dimensions
+            scalars_norm = torch.cat([scalars_norm, t1_norm], dim=1)
         
         final_input = torch.cat([shape_vector, scalars_norm], dim=1)
         return torch.clamp(final_input, -15.0, 15.0)
@@ -241,8 +253,17 @@ class EnhancedASLTrainer:
                 loader_iter = iter(loader)
                 raw_signals, targets = next(loader_iter)
             
-            processed_signals = self._process_batch_on_gpu(raw_signals)
-            target_for_loss = targets
+            # SPLIT TARGETS
+            # Targets now: [CBF, ATT, T1]
+            if self.stage == 2:
+                training_targets = targets[:, :2] # CBF, ATT for loss
+                t1_inputs = targets[:, 2:3]       # T1 for input
+                processed_signals = self._process_batch_on_gpu(raw_signals, t1_values=t1_inputs)
+                target_for_loss = training_targets
+            else:
+                # Stage 1 logic
+                processed_signals = self._process_batch_on_gpu(raw_signals, t1_values=None)
+                target_for_loss = targets
 
             if self.stage == 1:
                 n_plds = targets.shape[1] // 2

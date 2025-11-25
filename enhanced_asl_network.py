@@ -192,7 +192,7 @@ class PhysicsInformedASLProcessor(nn.Module):
     def __init__(self, n_plds: int, feature_dim: int, nhead: int, dropout_rate: float, **kwargs):
         super().__init__()
         self.n_plds = n_plds
-        self.num_scalar_features = 8 # V6: pcasl_mu, pcasl_sigma, vsasl_mu, vsasl_sigma, 2xTTP, 2xCOM
+        self.num_scalar_features = 11 # 4 stats (mu/std) + 4 eng (ttp/com) + 2 eng (peaks) + 1 global (T1) = 11
 
         # Two separate towers for the disentangled shape vectors
         self.pcasl_tower = Conv1DFeatureExtractor(in_channels=1, feature_dim=feature_dim, dropout_rate=dropout_rate)
@@ -213,9 +213,13 @@ class PhysicsInformedASLProcessor(nn.Module):
         )
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
-        # Input x is 20-dim: [pcasl_shape (6), vsasl_shape(6), standardized_scalars (8)]
+        # Input x structure:
+        # [pcasl_shape (6), vsasl_shape(6), standardized_scalars (11)]
+        
         pcasl_shape_input = x[:, :self.n_plds].unsqueeze(1)
         vsasl_shape_input = x[:, self.n_plds:self.n_plds * 2].unsqueeze(1)
+        
+        # Extract the scalar features (including the appended T1)
         scalar_features = x[:, self.n_plds * 2:]
 
         # 1. Process shapes independently
