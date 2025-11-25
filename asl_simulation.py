@@ -7,11 +7,6 @@ import multiprocessing as mp
 from itertools import product
 import numba
 
-# --- CHANGED FOR BASELINE EXPERIMENT ---
-# The SIB (Signal Intensity of Blood) factor has been removed.
-# This function now implements the simple two-condition VSASL model from the main paper,
-# which assumes fresh blood is always available for labeling (SIB=1.0).
-# This creates a "perfect world" scenario for debugging the network.
 @numba.jit(nopython=True, cache=True)
 def _generate_vsasl_signal_jit(plds, att, cbf_ml_g_s, t1_artery, alpha2, T2_factor, t_sat_vs):
     """JIT-compiled worker for VSASL signal generation (SIMPLE MODEL)."""
@@ -36,7 +31,6 @@ def _generate_vsasl_signal_jit(plds, att, cbf_ml_g_s, t1_artery, alpha2, T2_fact
                          T2_factor)
             
     return signal
-# --- END OF CHANGE ---
 
 @numba.jit(nopython=True, cache=True)
 def _generate_pcasl_signal_jit(plds, att, cbf_ml_g_s, t1_artery, t_tau, alpha1, T2_factor):
