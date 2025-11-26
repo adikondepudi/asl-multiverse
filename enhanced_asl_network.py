@@ -359,7 +359,8 @@ class CustomLoss(nn.Module):
                  training_stage: int,
                  w_cbf: float = 1.0, 
                  w_att: float = 1.0,
-                 log_var_reg_lambda: float = 0.0):
+                 log_var_reg_lambda: float = 0.0,
+                 mse_weight: float = 0.0):
         super().__init__()
         if training_stage not in [1, 2]:
             raise ValueError("training_stage must be 1 or 2.")
@@ -367,6 +368,7 @@ class CustomLoss(nn.Module):
         self.w_cbf = w_cbf
         self.w_att = w_att
         self.log_var_reg_lambda = log_var_reg_lambda
+        self.mse_weight = mse_weight
         self.mse_loss = nn.MSELoss()
 
     def forward(self,
@@ -400,11 +402,20 @@ class CustomLoss(nn.Module):
             if self.log_var_reg_lambda > 0:
                 log_var_regularization = self.log_var_reg_lambda * (torch.mean(cbf_log_var**2) + torch.mean(att_log_var**2))
             
-            total_loss = total_param_loss + log_var_regularization
+            # --- NEW LOGIC: Add MSE Component if mse_weight > 0 ---
+            mse_component = torch.tensor(0.0, device=total_param_loss.device)
+            if self.mse_weight > 0:
+                # Calculate simple MSE for CBF and ATT
+                cbf_mse = F.mse_loss(cbf_pred_norm, cbf_true_norm)
+                att_mse = F.mse_loss(att_pred_norm, att_true_norm)
+                mse_component = self.mse_weight * (cbf_mse + att_mse)
+
+            total_loss = total_param_loss + log_var_regularization + mse_component
             
             loss_components = {
                 'param_nll_loss': total_param_loss,
                 'log_var_reg_loss': log_var_regularization,
+                'param_mse_loss': mse_component,
                 'unreduced_loss': combined_nll_loss
             }
             return total_loss, loss_components
