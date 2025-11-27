@@ -128,8 +128,11 @@ def load_artifacts(model_results_root: Path) -> tuple:
         # V5 Input size: Shape (2*PLDs) + Scalars (8)
         base_input_size = num_plds * 2 + 8
 
+        # Calculate dynamic number of scalar features (stats + T1)
+        num_scalar_features_dynamic = len(norm_stats['scalar_features_mean']) + 1
+
         for model_path in sorted(models_dir.glob('ensemble_model_*.pt')):
-            model = DisentangledASLNet(mode='regression', input_size=base_input_size, **config)
+            model = DisentangledASLNet(mode='regression', input_size=base_input_size, num_scalar_features=num_scalar_features_dynamic, **config)
             model.to(dtype=torch.bfloat16)
             model.load_state_dict(torch.load(model_path, map_location=torch.device('cpu')))
             model.eval()

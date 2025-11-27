@@ -320,7 +320,12 @@ class EnhancedASLTrainer:
                     with torch.amp.autocast(device_type=self.device.type, dtype=torch.float16):
                         outputs = model(inputs)
                         outputs_f32 = tuple(o.float() if isinstance(o, torch.Tensor) else o for o in outputs)
-                        loss, _ = self.custom_loss_fn(model_outputs=outputs_f32, targets=targets, global_epoch=epoch)
+                        # Handle Stage 1 Validation where targets might include T1 (13 cols) vs Output (12 cols)
+                        target_for_loss = targets
+                        if self.stage == 1 and targets.shape[1] > outputs_f32[0].shape[1]:
+                            target_for_loss = targets[:, :-1]
+                        
+                        loss, _ = self.custom_loss_fn(model_outputs=outputs_f32, targets=target_for_loss, global_epoch=epoch)
                     if not torch.isnan(loss): val_losses[i] += loss.item()
                 num_steps += 1
         return [{'val_loss': v / num_steps if num_steps > 0 else float('nan')} for v in val_losses]
