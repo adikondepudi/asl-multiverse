@@ -38,7 +38,6 @@ def engineer_signal_features_torch(raw_signal: torch.Tensor, num_plds: int) -> t
     # Stack all 6 features
     return torch.stack([pcasl_ttp, vsasl_ttp, pcasl_com, vsasl_com, pcasl_peak, vsasl_peak], dim=1)
 
-# ... (Keep the rest of the file: engineer_signal_features (numpy), _worker_generate_sample, ParallelStreamingStatsCalculator as they were) ...
 def engineer_signal_features(raw_signal: np.ndarray, num_plds: int) -> np.ndarray:
     """Legacy Numpy version updated with Peak Height."""
     is_1d = raw_signal.ndim == 1
@@ -201,3 +200,66 @@ def process_signals_cpu(signals_unnorm: np.ndarray, norm_stats: dict, num_plds: 
         scalar_features_norm = np.concatenate([scalar_features_norm, t1_norm], axis=1)
 
     return np.concatenate([shape_vector, scalar_features_norm], axis=1)
+
+def get_grid_search_initial_guess(
+    observed_signal: np.ndarray,
+    plds: np.ndarray,
+    asl_params: dict
+) -> list:
+    """
+    Performs a coarse grid search for a single voxel to find a robust
+    initial guess for NLLS fitting.
+
+    Args:
+        observed_signal: A numpy array of shape (num_plds * 2,)
+                         containing concatenated PCASL and VSASL signals.
+        plds: A numpy array of the PLD values.
+        asl_params: A dictionary containing the physical parameters needed for
+                    the kinetic model (T1_artery, T_tau, alpha_PCASL, etc.).
+
+    Returns:
+        A list containing the best-fit [cbf_init, att_init] in units of
+        [ml/g/s, ms].
+    """
+    # --- 1. Define the search grid ---
+    # These ranges should be wide enough to cover all plausible physiological scenarios.
+    cbf_values_grid = np.linspace(1, 150, 15)  # 15 steps for CBF
+    att_values_grid = np.linspace(100, 4500, 22) # 22 steps for ATT
+
+    # --- 2. Pre-calculate model parameters ---
+    # This logic is copied from ASLSimulator to match the model exactly
+    t1_artery = asl_params['T1_artery']
+    t_tau = asl_params['T_tau']
+    t2_factor = asl_params.get('T2_factor', 1.0)
+    alpha_bs1 = asl_params.get('alpha_BS1', 1.0)
+    alpha_pcasl = asl_params['alpha_PCASL'] * (alpha_bs1**4)
+    alpha_vsasl = asl_params['alpha_VSASL'] * (alpha_bs1**3)
+    
+    num_plds = len(plds)
+    observed_pcasl = observed_signal[:num_plds]
+    observed_vsasl = observed_signal[num_plds:]
+
+    best_mse = float('inf')
+    best_params = [50.0 / 6000.0, 1500.0] # Default fallback
+
+    # --- 3. Iterate through the grid to find the best fit ---
+    for cbf in cbf_values_grid:
+        cbf_cgs = cbf / 6000.0  # Convert CBF to ml/g/s for the model
+        for att in att_values_grid:
+            # Predict the signal for this grid point
+            pcasl_pred = _generate_pcasl_signal_jit(
+                plds, att, cbf_cgs, t1_artery, t_tau, alpha_pcasl, t2_factor
+            )
+            vsasl_pred = _generate_vsasl_signal_jit(
+                plds, att, cbf_cgs, t1_artery, alpha_vsasl, t2_factor
+            )
+
+            # Calculate Mean Squared Error
+            mse = np.mean((observed_pcasl - pcasl_pred)**2) + \
+                  np.mean((observed_vsasl - vsasl_pred)**2)
+
+            if mse < best_mse:
+                best_mse = mse
+                best_params = [cbf_cgs, att]
+
+    return best_params
