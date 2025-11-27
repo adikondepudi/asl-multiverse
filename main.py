@@ -23,7 +23,7 @@ from enhanced_asl_network import DisentangledASLNet, PhysicsInformedASLProcessor
 from asl_simulation import ASLParameters
 from enhanced_simulation import RealisticASLSimulator
 from asl_trainer import EnhancedASLTrainer, FastTensorDataLoader
-from utils import ParallelStreamingStatsCalculator, engineer_signal_features
+from utils import ParallelStreamingStatsCalculator, engineer_signal_features, process_signals_cpu
 
 script_logger = logging.getLogger(__name__)
 
@@ -116,30 +116,7 @@ def _generate_simple_validation_set(simulator: RealisticASLSimulator, plds: np.n
     dataset['parameters'] = np.array(dataset['parameters'])
     return dataset
 
-def process_signals_cpu(signals_unnorm: np.ndarray, norm_stats: dict, num_plds: int) -> np.ndarray:
-    """CPU version of preprocessing for validation data."""
-    raw_curves = signals_unnorm[:, :num_plds * 2]
-    eng_ttp_com = signals_unnorm[:, num_plds * 2:]
 
-    pcasl_raw = raw_curves[:, :num_plds]
-    vsasl_raw = raw_curves[:, num_plds:]
-
-    pcasl_mu = np.mean(pcasl_raw, axis=1, keepdims=True)
-    pcasl_sigma = np.std(pcasl_raw, axis=1, keepdims=True)
-    pcasl_shape = (pcasl_raw - pcasl_mu) / (pcasl_sigma + 1e-6)
-
-    vsasl_mu = np.mean(vsasl_raw, axis=1, keepdims=True)
-    vsasl_sigma = np.std(vsasl_raw, axis=1, keepdims=True)
-    vsasl_shape = (vsasl_raw - vsasl_mu) / (vsasl_sigma + 1e-6)
-
-    shape_vector = np.concatenate([pcasl_shape, vsasl_shape], axis=1)
-    scalar_features_unnorm = np.concatenate([pcasl_mu, pcasl_sigma, vsasl_mu, vsasl_sigma, eng_ttp_com], axis=1)
-    
-    s_mean = np.array(norm_stats['scalar_features_mean'])
-    s_std = np.array(norm_stats['scalar_features_std']) + 1e-6
-    scalar_features_norm = (scalar_features_unnorm - s_mean) / s_std
-
-    return np.concatenate([shape_vector, scalar_features_norm], axis=1)
 
 def run_comprehensive_asl_research(config: ResearchConfig, stage: int, output_dir: Path, norm_stats: Dict) -> Dict:
     output_dir.mkdir(parents=True, exist_ok=True)
@@ -214,7 +191,14 @@ def run_comprehensive_asl_research(config: ResearchConfig, stage: int, output_di
     val_signals_noisy_raw = validation_data_dict['signals']
     val_features_eng = engineer_signal_features(val_signals_noisy_raw, num_plds)
     val_signals_concat = np.concatenate([val_signals_noisy_raw, val_features_eng], axis=1)
-    val_signals_processed = process_signals_cpu(val_signals_concat, norm_stats, num_plds)
+    
+    # Extract T1 for validation
+    val_t1_list_input = []
+    for params in validation_data_dict['perturbed_params']:
+        val_t1_list_input.append(params['t1_artery'])
+    val_t1_input_np = np.array(val_t1_list_input).reshape(-1, 1).astype(np.float32)
+
+    val_signals_processed = process_signals_cpu(val_signals_concat, norm_stats, num_plds, t1_values=val_t1_input_np)
     
     val_signals_gpu = torch.from_numpy(val_signals_processed.astype(np.float32)).to(device)
 

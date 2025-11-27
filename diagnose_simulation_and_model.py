@@ -21,7 +21,7 @@ try:
     from asl_simulation import ASLSimulator, ASLParameters, _generate_pcasl_signal_jit, _generate_vsasl_signal_jit
     from enhanced_simulation import PhysiologicalVariation
     from enhanced_asl_network import DisentangledASLNet
-    from utils import engineer_signal_features
+    from utils import engineer_signal_features, process_signals_cpu
 except ImportError as e:
     print(f"FATAL: Could not import necessary project files. Error: {e}")
     print("Please run this script from the root directory of the 'adikondepudi-asl-multiverse' project.")
@@ -104,33 +104,7 @@ def predict_ls_single_voxel(noisy_signal: np.ndarray, plds: np.ndarray, ls_param
 # 2. V5 NN PREPROCESSING & HELPERS
 # ==============================================================================
 
-def preprocess_for_v5_model(raw_signal_curves: np.ndarray, norm_stats: dict, num_plds: int) -> np.ndarray:
-    """Applies the V5 preprocessing pipeline to a single sample."""
-    # 1. Per-instance normalization
-    pcasl = raw_signal_curves[:num_plds]
-    vsasl = raw_signal_curves[num_plds:]
-    
-    p_mu, p_sig = np.mean(pcasl), np.std(pcasl)
-    v_mu, v_sig = np.mean(vsasl), np.std(vsasl)
-    
-    p_shape = (pcasl - p_mu) / (p_sig + 1e-6)
-    v_shape = (vsasl - v_mu) / (v_sig + 1e-6)
-    shape_vector = np.concatenate([p_shape, v_shape])
 
-    # 2. Engineered features
-    eng_features = engineer_signal_features(raw_signal_curves, num_plds)
-
-    # 3. Assemble scalar features (8 features in V5)
-    scalar_features_unnorm = np.array([p_mu, p_sig, v_mu, v_sig, *eng_features])
-
-    # 4. Standardize scalars
-    s_mean = np.array(norm_stats['scalar_features_mean'])
-    s_std = np.array(norm_stats['scalar_features_std']) + 1e-6
-    scalar_features_norm = (scalar_features_unnorm - s_mean) / s_std
-
-    # 5. Concatenate
-    final_input = np.concatenate([shape_vector, scalar_features_norm])
-    return final_input.reshape(1, -1).astype(np.float32)
 
 def denormalize_predictions(cbf_norm: float, att_norm: float, norm_stats: dict) -> tuple:
     """Denormalizes CBF and ATT predictions."""
@@ -172,10 +146,15 @@ def load_artifacts(model_results_root: Path) -> tuple:
         print(f"[FATAL ERROR] Artifact load failed: {e}")
         sys.exit(1)
 
-def predict_nn_single_voxel(noisy_signal: np.ndarray, models: list, config: dict, norm_stats: dict, device: torch.device) -> tuple:
+def predict_nn_single_voxel(noisy_signal: np.ndarray, models: list, config: dict, norm_stats: dict, device: torch.device, t1_val: float) -> tuple:
     """Runs NN inference."""
     num_plds = len(config['pld_values'])
-    norm_input = preprocess_for_v5_model(noisy_signal, norm_stats, num_plds)
+    
+    eng_feats = engineer_signal_features(noisy_signal, num_plds)
+    nn_input_unnorm = np.concatenate([noisy_signal, eng_feats]).reshape(1, -1)
+    
+    t1_values = np.array([[t1_val]], dtype=np.float32)
+    norm_input = process_signals_cpu(nn_input_unnorm, norm_stats, num_plds, t1_values=t1_values)
     input_tensor = torch.from_numpy(norm_input).to(device, dtype=torch.bfloat16)
 
     with torch.no_grad():
@@ -219,7 +198,7 @@ def run_full_scenario(scenario_params: dict, simulator: ASLSimulator, plds: np.n
             noisy_signal = np.concatenate([signals[:, 0], signals[:, 1]])
             
             # Predictions
-            nn_cbf, nn_att = predict_nn_single_voxel(noisy_signal, **nn_args)
+            nn_cbf, nn_att = predict_nn_single_voxel(noisy_signal, t1_val=true_t1, **nn_args)
             ls_cbf, ls_att = predict_ls_single_voxel(noisy_signal, plds, **ls_args)
 
             results.append({

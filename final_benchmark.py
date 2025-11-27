@@ -16,7 +16,7 @@ import seaborn as sns
 from enhanced_asl_network import DisentangledASLNet
 from enhanced_simulation import RealisticASLSimulator, ASLParameters, PhysiologicalVariation
 from multiverse_functions import fit_PCVSASL_misMatchPLD_vectInit_pep
-from utils import engineer_signal_features, get_grid_search_initial_guess
+from utils import engineer_signal_features, get_grid_search_initial_guess, process_signals_cpu
 from predict_on_invivo import denormalize_predictions # Re-use utility functions
 
 # --- Configuration ---
@@ -58,27 +58,7 @@ def load_artifacts(model_results_root: Path) -> tuple:
         print(f"[FATAL ERROR] Could not load artifacts: {e}. Exiting.")
         sys.exit(1)
 
-def apply_normalization_disentangled(batch: np.ndarray, norm_stats: dict, num_plds: int) -> np.ndarray:
-    """Applies normalization for the DisentangledASLNet input format."""
-    raw_signal = batch[:, :num_plds*2]
-    eng_features = batch[:, num_plds*2:]
-    
-    amplitude = np.linalg.norm(raw_signal, axis=1, keepdims=True) + 1e-6
-    shape_vector = raw_signal / amplitude
-    
-    amplitude_norm = (amplitude - norm_stats['amplitude_mean']) / (norm_stats['amplitude_std'] + 1e-6)
-    
-    return np.concatenate([shape_vector, eng_features, amplitude_norm], axis=1)
 
-def apply_normalization_unified(batch: np.ndarray, norm_stats: dict, num_plds: int) -> np.ndarray:
-    """Applies normalization for the original EnhancedASLNet input format."""
-    pcasl_raw, vsasl_raw = batch[:, :num_plds], batch[:, num_plds:num_plds*2]
-    features = batch[:, num_plds*2:]
-    
-    pcasl_norm = (pcasl_raw - norm_stats['pcasl_mean']) / (np.array(norm_stats['pcasl_std']) + 1e-6)
-    vsasl_norm = (vsasl_raw - norm_stats['vsasl_mean']) / (np.array(norm_stats['vsasl_std']) + 1e-6)
-    
-    return np.concatenate([pcasl_norm, vsasl_norm, features], axis=1)
 
 
 def calculate_metrics(df_group):
@@ -132,10 +112,13 @@ def test_scenario(scenario_name: str, cbf_range: tuple, att_range: tuple, tsnr_g
             eng_feats = engineer_signal_features(noisy_signal, num_plds)
             nn_input_unnorm = np.concatenate([noisy_signal, eng_feats]).reshape(1, -1)
             
-            if is_disentangled:
-                norm_input = apply_normalization_disentangled(nn_input_unnorm, norm_stats, num_plds)
-            else:
-                norm_input = apply_normalization_unified(nn_input_unnorm, norm_stats, num_plds)
+            nn_input_unnorm = np.concatenate([noisy_signal, eng_feats]).reshape(1, -1)
+            
+            # Pass T1 (using simulator params as ground truth for this scenario)
+            t1_val = simulator.params.T1_artery
+            t1_values = np.array([[t1_val]], dtype=np.float32)
+
+            norm_input = process_signals_cpu(nn_input_unnorm, norm_stats, num_plds, t1_values=t1_values)
             
             input_tensor = torch.from_numpy(norm_input).to(device, dtype=torch.bfloat16)
 

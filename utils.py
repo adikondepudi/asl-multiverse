@@ -1,5 +1,6 @@
 # FILE: utils.py
 import numpy as np
+from typing import Optional, Dict
 import multiprocessing as mp
 import time
 import torch
@@ -169,3 +170,34 @@ class ParallelStreamingStatsCalculator:
             'scalar_features_mean': self.scalar_mean.tolist(),
             'scalar_features_std': np.clip(scalar_std, 1e-6, None).tolist()
         }
+
+def process_signals_cpu(signals_unnorm: np.ndarray, norm_stats: dict, num_plds: int, t1_values: Optional[np.ndarray] = None) -> np.ndarray:
+    """CPU version of preprocessing for validation data."""
+    raw_curves = signals_unnorm[:, :num_plds * 2]
+    eng_ttp_com = signals_unnorm[:, num_plds * 2:]
+
+    pcasl_raw = raw_curves[:, :num_plds]
+    vsasl_raw = raw_curves[:, num_plds:]
+
+    pcasl_mu = np.mean(pcasl_raw, axis=1, keepdims=True)
+    pcasl_sigma = np.std(pcasl_raw, axis=1, keepdims=True)
+    pcasl_shape = (pcasl_raw - pcasl_mu) / (pcasl_sigma + 1e-6)
+
+    vsasl_mu = np.mean(vsasl_raw, axis=1, keepdims=True)
+    vsasl_sigma = np.std(vsasl_raw, axis=1, keepdims=True)
+    vsasl_shape = (vsasl_raw - vsasl_mu) / (vsasl_sigma + 1e-6)
+
+    shape_vector = np.concatenate([pcasl_shape, vsasl_shape], axis=1)
+    scalar_features_unnorm = np.concatenate([pcasl_mu, pcasl_sigma, vsasl_mu, vsasl_sigma, eng_ttp_com], axis=1)
+    
+    s_mean = np.array(norm_stats['scalar_features_mean'])
+    s_std = np.array(norm_stats['scalar_features_std']) + 1e-6
+    scalar_features_norm = (scalar_features_unnorm - s_mean) / s_std
+
+    if t1_values is not None:
+        t1_mean = norm_stats.get('y_mean_t1', 1850.0)
+        t1_std = norm_stats.get('y_std_t1', 200.0)
+        t1_norm = (t1_values - t1_mean) / (t1_std + 1e-6)
+        scalar_features_norm = np.concatenate([scalar_features_norm, t1_norm], axis=1)
+
+    return np.concatenate([shape_vector, scalar_features_norm], axis=1)

@@ -258,7 +258,6 @@ class DisentangledASLNet(nn.Module):
                  log_var_att_min: float = 0.0,
                  log_var_att_max: float = 14.0,
                  moe: Optional[Dict[str, Any]] = None,
-                 moe: Optional[Dict[str, Any]] = None,
                  encoder_type: str = 'physics_processor',
                  num_scalar_features: int = 11,
                  **kwargs):
