@@ -182,7 +182,11 @@ def run_comprehensive_asl_research(config: ResearchConfig, stage: int, output_di
     gpu_signals_clean = torch.from_numpy(raw_signals_clean).float().to(device)
     
     if stage == 1:
-        gpu_targets = gpu_signals_clean.clone()
+        # Stage 1: Targets are [Clean Signals (N, 2*P), T1 (N, 1)]
+        # We need T1 for conditioning the encoder even in Stage 1
+        t1_values = raw_params[:, 2:3] # Extract T1 column
+        gpu_t1 = torch.from_numpy(t1_values).float().to(device)
+        gpu_targets = torch.cat([gpu_signals_clean, gpu_t1], dim=1)
     else:
         # Stage 2: Extract CBF, ATT, T1
         # raw_params is now [N, 3]
@@ -236,7 +240,15 @@ def run_comprehensive_asl_research(config: ResearchConfig, stage: int, output_di
         vsasl_shape = (vsasl_c_raw - vsasl_mu) / vsasl_sigma
         
         val_targets_processed = np.concatenate([pcasl_shape, vsasl_shape], axis=1)
-        val_targets_gpu = torch.from_numpy(val_targets_processed).float().to(device)
+        
+        # Add T1 to validation targets for Stage 1
+        val_t1_list = []
+        for params in validation_data_dict['perturbed_params']:
+            val_t1_list.append(params['t1_artery'])
+        val_t1_np = np.array(val_t1_list).reshape(-1, 1).astype(np.float32)
+        
+        val_targets_combined = np.concatenate([val_targets_processed, val_t1_np], axis=1)
+        val_targets_gpu = torch.from_numpy(val_targets_combined).float().to(device)
 
     else:
         val_params = validation_data_dict['parameters']
@@ -250,7 +262,19 @@ def run_comprehensive_asl_research(config: ResearchConfig, stage: int, output_di
     base_input_size_nn = num_plds * 2 + 8
     model_creation_config = asdict(config)
     model_mode = 'denoising' if stage == 1 else 'regression'
-    def create_model_closure(**kwargs): return DisentangledASLNet(mode=model_mode, input_size=base_input_size_nn, **kwargs)
+    
+    # Calculate dynamic number of scalar features
+    # norm_stats['scalar_features_mean'] contains the stats for engineered features
+    # We add 1 for the T1 value which is appended later
+    num_scalar_features_dynamic = len(norm_stats['scalar_features_mean']) + 1
+    
+    def create_model_closure(**kwargs): 
+        return DisentangledASLNet(
+            mode=model_mode, 
+            input_size=base_input_size_nn, 
+            num_scalar_features=num_scalar_features_dynamic,
+            **kwargs
+        )
 
     trainer = EnhancedASLTrainer(stage=stage, model_config=model_creation_config, model_class=create_model_closure, 
                                  weight_decay=config.weight_decay, batch_size=config.batch_size, 

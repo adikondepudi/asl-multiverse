@@ -104,15 +104,16 @@ class ParallelStreamingStatsCalculator:
         self.num_samples = num_samples
         self.num_workers = num_workers
         self.num_plds = len(plds)
-        self.num_scalar_features = 10
+        self.num_plds = len(plds)
+        self.num_scalar_features = None # Will be determined dynamically
 
         self.count = 0
         self.shape_vector_mean = np.zeros(self.num_plds * 2)
         self.shape_vector_m2 = np.zeros(self.num_plds * 2)
         self.cbf_mean, self.cbf_m2 = 0.0, 0.0
         self.att_mean, self.att_m2 = 0.0, 0.0
-        self.scalar_mean = np.zeros(self.num_scalar_features)
-        self.scalar_m2 = np.zeros(self.num_scalar_features)
+        self.scalar_mean = None
+        self.scalar_m2 = None
 
     def _update_stats(self, existing_agg, new_value):
         mean, m2 = existing_agg
@@ -127,13 +128,20 @@ class ParallelStreamingStatsCalculator:
         base_seed = int(time.time())
         worker_args = [(self.simulator, self.plds, base_seed + i) for i in range(self.num_samples)]
         
-        self.num_scalar_features = 10 # Updated from 8 to 10
+        base_seed = int(time.time())
+        worker_args = [(self.simulator, self.plds, base_seed + i) for i in range(self.num_samples)]
+        
         self.t1_mean, self.t1_m2 = 0.0, 0.0 # New T1 trackers
 
         with mp.Pool(processes=self.num_workers) as pool:
             results_iterator = pool.imap_unordered(_worker_generate_sample, worker_args)
             # Unpack new return tuple including t1
             for shape_vec, cbf, att, t1, scalars in results_iterator:
+                if self.num_scalar_features is None:
+                    self.num_scalar_features = len(scalars)
+                    self.scalar_mean = np.zeros(self.num_scalar_features)
+                    self.scalar_m2 = np.zeros(self.num_scalar_features)
+                
                 self.count += 1
                 self.shape_vector_mean, self.shape_vector_m2 = self._update_stats((self.shape_vector_mean, self.shape_vector_m2), shape_vec)
                 self.cbf_mean, self.cbf_m2 = self._update_stats((self.cbf_mean, self.cbf_m2), cbf)

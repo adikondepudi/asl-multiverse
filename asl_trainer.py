@@ -262,13 +262,16 @@ class EnhancedASLTrainer:
                 target_for_loss = training_targets
             else:
                 # Stage 1 logic
-                processed_signals = self._process_batch_on_gpu(raw_signals, t1_values=None)
-                target_for_loss = targets
-
-            if self.stage == 1:
-                n_plds = targets.shape[1] // 2
-                pcasl_clean = targets[:, :n_plds]
-                vsasl_clean = targets[:, n_plds:]
+                # Targets are [Clean Signals (N, 2*P), T1 (N, 1)]
+                n_plds = (targets.shape[1] - 1) // 2
+                t1_inputs = targets[:, -1:]
+                
+                processed_signals = self._process_batch_on_gpu(raw_signals, t1_values=t1_inputs)
+                
+                clean_signals_only = targets[:, :-1]
+                pcasl_clean = clean_signals_only[:, :n_plds]
+                vsasl_clean = clean_signals_only[:, n_plds:]
+                
                 pcasl_mu = torch.mean(pcasl_clean, dim=1, keepdim=True)
                 pcasl_sigma = torch.std(pcasl_clean, dim=1, keepdim=True) + 1e-6
                 pcasl_shape = (pcasl_clean - pcasl_mu) / pcasl_sigma

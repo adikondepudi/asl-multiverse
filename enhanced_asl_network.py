@@ -189,10 +189,10 @@ class PhysicsInformedASLProcessor(nn.Module):
     separate FiLM layers to inject rich physical context (amplitudes, timing features)
     into each stream before fusing them for the prediction head.
     """
-    def __init__(self, n_plds: int, feature_dim: int, nhead: int, dropout_rate: float, **kwargs):
+    def __init__(self, n_plds: int, feature_dim: int, nhead: int, dropout_rate: float, num_scalar_features: int = 11, **kwargs):
         super().__init__()
         self.n_plds = n_plds
-        self.num_scalar_features = 11 # 4 stats (mu/std) + 4 eng (ttp/com) + 2 eng (peaks) + 1 global (T1) = 11
+        self.num_scalar_features = num_scalar_features
 
         # Two separate towers for the disentangled shape vectors
         self.pcasl_tower = Conv1DFeatureExtractor(in_channels=1, feature_dim=feature_dim, dropout_rate=dropout_rate)
@@ -258,7 +258,9 @@ class DisentangledASLNet(nn.Module):
                  log_var_att_min: float = 0.0,
                  log_var_att_max: float = 14.0,
                  moe: Optional[Dict[str, Any]] = None,
+                 moe: Optional[Dict[str, Any]] = None,
                  encoder_type: str = 'physics_processor',
+                 num_scalar_features: int = 11,
                  **kwargs):
         super().__init__()
         
@@ -270,7 +272,8 @@ class DisentangledASLNet(nn.Module):
                 n_plds=n_plds, 
                 feature_dim=kwargs.get('transformer_d_model_focused'),
                 nhead=kwargs.get('transformer_nhead_model'),
-                dropout_rate=kwargs.get('dropout_rate')
+                dropout_rate=kwargs.get('dropout_rate'),
+                num_scalar_features=num_scalar_features
             )
             fused_feature_size = 256 # Output of the final_fusion_mlp
         else:
