@@ -62,7 +62,7 @@ class ASLValidator:
             self.device = torch.device('cpu')
         
         # 1. Load Params
-        self.plds = np.array([500, 1000, 1500, 2000, 2500, 3000])
+        self.plds = np.array([500, 1000, 1500, 2000, 2500, 3000], dtype=np.float64)
         self.params = ASLParameters(
             T1_artery=1850.0, T_tau=1800.0, 
             alpha_PCASL=0.85, alpha_VSASL=0.56,
@@ -91,6 +91,92 @@ class ASLValidator:
 
         # 4. Load Ensemble Models
         self.models = self._load_ensemble()
+    
+    def _log_llm_metrics(self, scenario_name, nn_preds, ls_preds, ground_truth, label):
+        """
+        Calculates high-level statistics optimized for LLM interpretation.
+        """
+        def calc_stats(preds, truth):
+            # Handle NaNs (common in LS)
+            mask = ~np.isnan(preds)
+            if np.sum(mask) == 0:
+                return {k: None for k in ["MAE", "RMSE", "Bias", "R2", "Failure_Rate"]}
+            
+            p, t = preds[mask], truth[mask]
+            err = p - t
+            
+            mae = np.mean(np.abs(err))
+            rmse = np.sqrt(np.mean(err**2))
+            bias = np.mean(err)
+            
+            # R2 Score
+            ss_res = np.sum(err**2)
+            ss_tot = np.sum((t - np.mean(t))**2)
+            r2 = 1 - (ss_res / (ss_tot + 1e-6))
+            
+            return {
+                "MAE": float(mae),
+                "RMSE": float(rmse),
+                "Bias": float(bias),
+                "R2": float(r2),
+                "Failure_Rate": float(1.0 - (len(p) / len(preds)))
+            }
+
+        nn_stats = calc_stats(nn_preds, ground_truth)
+        ls_stats = calc_stats(ls_preds, ground_truth)
+        
+        # Calculate "Win Rate" (How often NN is closer to truth than LS)
+        valid_idx = (~np.isnan(nn_preds)) & (~np.isnan(ls_preds))
+        if np.sum(valid_idx) > 0:
+            nn_err = np.abs(nn_preds[valid_idx] - ground_truth[valid_idx])
+            ls_err = np.abs(ls_preds[valid_idx] - ground_truth[valid_idx])
+            nn_wins = np.sum(nn_err < ls_err)
+            win_rate = float(nn_wins / len(nn_err))
+        else:
+            win_rate = None
+
+        # Store in dictionary
+        if not hasattr(self, 'llm_report'):
+            self.llm_report = {}
+            
+        if scenario_name not in self.llm_report:
+            self.llm_report[scenario_name] = {}
+            
+        self.llm_report[scenario_name][label] = {
+            "Neural_Net": nn_stats,
+            "Least_Squares": ls_stats,
+            "NN_vs_LS_Win_Rate": win_rate
+        }
+
+    def save_llm_report(self):
+        """Saves the stats to JSON and Markdown for easy LLM pasting."""
+        # 1. Save JSON (Machine Readable)
+        json_path = self.output_dir / "llm_analysis_report.json"
+        with open(json_path, 'w') as f:
+            json.dump(self.llm_report, f, indent=4)
+            
+        # 2. Save Markdown (Human/LLM Readable)
+        md_path = self.output_dir / "llm_analysis_report.md"
+        with open(md_path, 'w') as f:
+            f.write("# ASL Multiverse Validation Report (LLM Optimized)\n\n")
+            for scenario, metrics in self.llm_report.items():
+                f.write(f"## Scenario: {scenario}\n")
+                for param, data in metrics.items():
+                    f.write(f"### Parameter: {param}\n")
+                    f.write(f"- **NN vs LS Win Rate**: {data['NN_vs_LS_Win_Rate']:.2%}\n" if data['NN_vs_LS_Win_Rate'] is not None else "- **NN vs LS Win Rate**: N/A\n")
+                    
+                    nn = data['Neural_Net']
+                    ls = data['Least_Squares']
+                    
+                    f.write("| Metric | Neural Net | Least Squares |\n")
+                    f.write("| :--- | :--- | :--- |\n")
+                    f.write(f"| MAE | {nn['MAE']:.4f} | {ls['MAE']:.4f} |\n")
+                    f.write(f"| RMSE | {nn['RMSE']:.4f} | {ls['RMSE']:.4f} |\n")
+                    f.write(f"| Bias | {nn['Bias']:.4f} | {ls['Bias']:.4f} |\n")
+                    f.write(f"| R² | {nn['R2']:.4f} | {ls['R2']:.4f} |\n")
+                    f.write(f"| Fail Rate | {nn['Failure_Rate']:.1%} | {ls['Failure_Rate']:.1%} |\n\n")
+        
+        print(f"\n--- [LLM REPORT SAVED] ---\nJSON: {json_path}\nMarkdown: {md_path}")
 
     def _load_ensemble(self):
         models_dir = self.run_dir / 'trained_models'
@@ -215,6 +301,11 @@ class ASLValidator:
                 cbf_preds.append(res[0] * 6000.0)
                 att_preds.append(res[1])
             except Exception as e:
+                # FIX: Print the error for the first failure so we can debug
+                if i == 0: 
+                    print(f"\n!!! LS GRID SEARCH FAILED: {e}")
+                    import traceback
+                    traceback.print_exc()
                 cbf_preds.append(np.nan)
                 att_preds.append(np.nan)
                 
@@ -248,7 +339,7 @@ class ASLValidator:
         def get_stats(preds, truths, x_vals):
             bins = 15
             with warnings.catch_warnings():
-                warnings.simplefilter('ignore', r'Mean of empty slice')
+                warnings.filterwarnings('ignore', message='Mean of empty slice', category=RuntimeWarning)
                 
                 bin_bias = binned_statistic(x_vals, preds - truths, statistic=np.nanmean, bins=bins)
                 bin_std = binned_statistic(x_vals, preds, statistic=np.nanstd, bins=bins)
@@ -294,6 +385,12 @@ class ASLValidator:
         sigs = np.array(sigs)
         nn_c, nn_a = self.run_nn_inference(sigs, np.full(n, 1850.0))
         ls_c, ls_a = self.run_ls_inference(sigs, 1850.0)
+        
+        # --- NEW: Log Stats ---
+        self._log_llm_metrics("A_FixedCBF_VarATT", nn_c, ls_c, t_cbf, "CBF")
+        self._log_llm_metrics("A_FixedCBF_VarATT", nn_a, ls_a, t_att, "ATT")
+        # ----------------------
+        
         self._plot_scenario("A_FixedCBF_VarATT", t_att, "ATT (ms)", nn_c, nn_a, ls_c, ls_a, t_cbf, t_att)
 
         # B: Fixed ATT, Varying CBF
@@ -305,6 +402,12 @@ class ASLValidator:
         sigs = np.array(sigs)
         nn_c, nn_a = self.run_nn_inference(sigs, np.full(n, 1850.0))
         ls_c, ls_a = self.run_ls_inference(sigs, 1850.0)
+
+        # --- NEW: Log Stats ---
+        self._log_llm_metrics("B_FixedATT_VarCBF", nn_c, ls_c, t_cbf, "CBF")
+        self._log_llm_metrics("B_FixedATT_VarCBF", nn_a, ls_a, t_att, "ATT")
+        # ----------------------
+
         self._plot_scenario("B_FixedATT_VarCBF", t_cbf, "CBF", nn_c, nn_a, ls_c, ls_a, t_cbf, t_att)
         
         # C & D
@@ -317,8 +420,17 @@ class ASLValidator:
             sigs = np.array(sigs)
             nn_c, nn_a = self.run_nn_inference(sigs, np.full(n, 1850.0))
             ls_c, ls_a = self.run_ls_inference(sigs, 1850.0)
-            self._plot_scenario(label, t_att, "ATT (ms)", nn_c, nn_a, ls_c, ls_a, t_cbf, t_att)
+            
+            # --- NEW: Log Stats ---
+            self._log_llm_metrics(label, nn_c, ls_c, t_cbf, "CBF")
+            self._log_llm_metrics(label, nn_a, ls_a, t_att, "ATT")
+            # ----------------------
 
+            self._plot_scenario(label, t_att, "ATT (ms)", nn_c, nn_a, ls_c, ls_a, t_cbf, t_att)
+            
+        # --- NEW: Save the Report ---
+        self.save_llm_report()
+        
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
     parser.add_argument("--run_dir", type=str, required=True)

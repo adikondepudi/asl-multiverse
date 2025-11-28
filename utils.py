@@ -232,6 +232,7 @@ def get_grid_search_initial_guess(
     t_tau = asl_params['T_tau']
     t2_factor = asl_params.get('T2_factor', 1.0)
     alpha_bs1 = asl_params.get('alpha_BS1', 1.0)
+    t_sat_vs = asl_params.get('T_sat_vs', 2000.0) 
     alpha_pcasl = asl_params['alpha_PCASL'] * (alpha_bs1**4)
     alpha_vsasl = asl_params['alpha_VSASL'] * (alpha_bs1**3)
     
@@ -251,7 +252,7 @@ def get_grid_search_initial_guess(
                 plds, att, cbf_cgs, t1_artery, t_tau, alpha_pcasl, t2_factor
             )
             vsasl_pred = _generate_vsasl_signal_jit(
-                plds, att, cbf_cgs, t1_artery, alpha_vsasl, t2_factor
+                plds, att, cbf_cgs, t1_artery, alpha_vsasl, t2_factor, t_sat_vs
             )
 
             # Calculate Mean Squared Error
