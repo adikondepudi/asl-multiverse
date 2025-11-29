@@ -33,6 +33,22 @@ def _generate_vsasl_signal_jit(plds, att, cbf_ml_g_s, t1_artery, alpha2, T2_fact
     return signal
 
 @numba.jit(nopython=True, cache=True)
+def _generate_arterial_signal_jit(plds, att, aBV, t1_artery, alpha_bs_combined):
+    """JIT-compiled worker for Macrovascular (Arterial) signal."""
+    M0_b = 1.0
+    signal = np.zeros_like(plds, dtype=np.float64)
+    
+    # Arterial signal exists primarily when bolus is still in transit (PLD < ATT)
+    # Simplified macroscopic model: signal proportional to blood volume
+    for i in range(plds.shape[0]):
+        if plds[i] < att:
+            # Decay based on T1 of blood
+            signal[i] = (2 * M0_b * aBV * alpha_bs_combined * 
+                         np.exp(-plds[i] / t1_artery))
+            
+    return signal
+
+@numba.jit(nopython=True, cache=True)
 def _generate_pcasl_signal_jit(plds, att, cbf_ml_g_s, t1_artery, t_tau, alpha1, T2_factor):
     """JIT-compiled worker for PCASL signal generation."""
     M0_b = 1.0
