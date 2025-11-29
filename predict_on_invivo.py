@@ -42,7 +42,7 @@ def denormalize_predictions(cbf_norm, att_norm, cbf_log_var_norm, att_log_var_no
 
     return cbf_denorm, att_denorm, cbf_std_denorm, att_std_denorm
 
-def batch_predict_nn(signals_masked: np.ndarray, subject_plds: np.ndarray, models: List, config: Dict, norm_stats: Dict, device: torch.device, is_disentangled: bool) -> Tuple:
+def batch_predict_nn(signals_masked: np.ndarray, z_coords: np.ndarray, subject_plds: np.ndarray, models: List, config: Dict, norm_stats: Dict, device: torch.device, is_disentangled: bool) -> Tuple:
     """
     Runs batched inference, handling PLD resampling and feature engineering correctly.
     """
@@ -74,8 +74,10 @@ def batch_predict_nn(signals_masked: np.ndarray, subject_plds: np.ndarray, model
     # Construct T1 values (using T1_artery from config or default)
     t1_val = config.get('T1_artery', 1850.0)
     t1_values = np.full((unnormalized_input.shape[0], 1), t1_val, dtype=np.float32)
+    # Use loaded Z-coordinates
+    z_values = z_coords.astype(np.float32)
 
-    norm_input = process_signals_cpu(unnormalized_input, norm_stats, num_model_plds, t1_values=t1_values)
+    norm_input = process_signals_cpu(unnormalized_input, norm_stats, num_model_plds, t1_values=t1_values, z_values=z_values)
     
     input_tensor = torch.FloatTensor(norm_input).to(device)
     
@@ -133,6 +135,7 @@ def predict_subject(subject_dir: Path, models: List, config: Dict, norm_stats: D
     subject_output_dir.mkdir(parents=True, exist_ok=True)
     
     low_snr_signals = np.load(subject_dir / 'low_snr_signals.npy')
+    z_coords = np.load(subject_dir / 'z_coords.npy') # Load Z map
     brain_mask_flat = np.load(subject_dir / 'brain_mask.npy').flatten()
     plds = np.load(subject_dir / 'plds.npy')
     dims, affine, header = tuple(np.load(subject_dir/'image_dims.npy')), np.load(subject_dir/'image_affine.npy'), np.load(subject_dir/'image_header.npy', allow_pickle=True).item()
@@ -141,7 +144,7 @@ def predict_subject(subject_dir: Path, models: List, config: Dict, norm_stats: D
     timings = {}
     
     start_time_nn = time.time()
-    nn_results = batch_predict_nn(low_snr_masked, plds, models, config, norm_stats, device, is_disentangled)
+    nn_results = batch_predict_nn(low_snr_masked, z_coords[brain_mask_flat], plds, models, config, norm_stats, device, is_disentangled)
     timings['nn_total_s'] = time.time() - start_time_nn
     
     start_time_ls = time.time()
@@ -173,14 +176,14 @@ def load_artifacts(model_root: Path) -> tuple:
     if is_disentangled:
         print("  --> Detected DisentangledASLNet model type.")
         model_class = DisentangledASLNet
-        base_input_size = num_plds * 2 + 4 + 1
+        base_input_size = num_plds * 2 + 4 + 2 # +2 for T1 and Z
     else:
         print("  --> Detected original EnhancedASLNet model type.")
         model_class = EnhancedASLNet
-        base_input_size = num_plds * 2 + 4
-
-    # Calculate dynamic number of scalar features (stats + T1)
-    num_scalar_features_dynamic = len(norm_stats['scalar_features_mean']) + 1
+        base_input_size = num_plds * 2 + 4 + 1 # +1 for Z, assuming T1 is also added
+        
+    # Calculate dynamic number of scalar features (stats + T1 + Z)
+    num_scalar_features_dynamic = len(norm_stats['scalar_features_mean']) + 2
 
     for model_path in models_dir.glob('ensemble_model_*.pt'):
         model = model_class(mode='regression', input_size=base_input_size, num_scalar_features=num_scalar_features_dynamic, **config)

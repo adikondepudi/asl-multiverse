@@ -28,6 +28,7 @@ try:
     from enhanced_simulation import RealisticASLSimulator
     from enhanced_asl_network import DisentangledASLNet
     from utils import engineer_signal_features, process_signals_cpu, get_grid_search_initial_guess
+    from multiverse_functions import fit_PCVSASL_misMatchPLD_vectInit_pep
     print("--- [DEBUG] Custom ASL modules imported successfully. ---")
 except ImportError as e:
     print(f"!!! [CRITICAL ERROR] Could not import project files: {e}")
@@ -329,7 +330,7 @@ class ASLValidator:
         return cbf_pred, att_pred
 
     def run_ls_inference(self, signals, t1_artery_val):
-        logger.info("Running Least Squares (Grid Search)...")
+        logger.info("Running Least Squares (Grid Search + Optimizer)...")
         n_samples = signals.shape[0]
         cbf_preds = []
         att_preds = []
@@ -343,15 +344,31 @@ class ASLValidator:
             'alpha_BS1': self.params.alpha_BS1
         }
         
+        # Prepare PLD time input for the optimizer
+        pldti = np.column_stack([self.plds, self.plds])
+        
         iter_wrapper = tqdm(range(n_samples), desc="LS Fitting") if n_samples > 10 else range(n_samples)
 
         for i in iter_wrapper:
             try:
                 if isinstance(t1_artery_val, np.ndarray):
                     ls_params['T1_artery'] = t1_artery_val[i]
-                res = get_grid_search_initial_guess(signals[i], self.plds, ls_params)
-                cbf_preds.append(res[0] * 6000.0)
-                att_preds.append(res[1])
+                
+                # 1. Get Initial Guess via Grid Search
+                init_guess = get_grid_search_initial_guess(signals[i], self.plds, ls_params)
+                
+                # 2. Refine using Least Squares Optimizer
+                signal_reshaped = signals[i].reshape((len(self.plds), 2), order='F')
+                
+                beta, _, _, _ = fit_PCVSASL_misMatchPLD_vectInit_pep(
+                    pldti, 
+                    signal_reshaped, 
+                    init_guess, 
+                    **ls_params
+                )
+                
+                cbf_preds.append(beta[0] * 6000.0)
+                att_preds.append(beta[1])
             except Exception as e:
                 # FIX: Print the error for the first failure so we can debug
                 if i == 0: 

@@ -116,6 +116,9 @@ class ASLSimulator:
                               att_values: np.ndarray, # Array of ATT values to simulate for
                               n_noise: int = 1000, # Number of noise realizations per ATT
                               tsnr: float = 5.0,
+                              # New optional physics parameters
+                              arterial_blood_volume: Optional[float] = 0.0,
+                              slice_index: Optional[int] = 0,
                               # Optional parameters to override self.params for this specific generation run
                               # This is useful if RealisticASLSimulator wants to pass perturbed params
                               cbf_val: Optional[float] = None,
@@ -131,6 +134,16 @@ class ASLSimulator:
         current_t_tau = t_tau_val if t_tau_val is not None else self.params.T_tau
         current_alpha_pcasl = alpha_pcasl_val if alpha_pcasl_val is not None else self.params.alpha_PCASL
         current_alpha_vsasl = alpha_vsasl_val if alpha_vsasl_val is not None else self.params.alpha_VSASL
+
+        # Enhancement B: Slice-Dependent Background Suppression
+        # Assume ~45ms per slice readout delay. This relaxes the inversion recovery.
+        # Effective efficiency drops as we wait longer for the slice.
+        slice_time_offset = float(slice_index) * 45.0
+        bs_decay = np.exp(-slice_time_offset / 1000.0) # Simple T1 decay approx for the suppression
+        
+        # Modulate alphas
+        current_alpha_pcasl = current_alpha_pcasl * bs_decay
+        current_alpha_vsasl = current_alpha_vsasl * bs_decay
 
         # Reference signal level for noise calculation.
         # MUST be calculated using the FIXED, base parameters from self.params
@@ -153,8 +166,14 @@ class ASLSimulator:
         # Generate base signals and add noise
         for i, att in enumerate(att_values):
             # Generate clean signals using potentially overridden parameters
-            vsasl_sig = self._generate_vsasl_signal(plds, att, cbf_ml_100g_min=current_cbf, t1_artery=current_t1_artery, alpha_vsasl=current_alpha_vsasl)
-            pcasl_sig = self._generate_pcasl_signal(plds, att, cbf_ml_100g_min=current_cbf, t1_artery=current_t1_artery, t_tau=current_t_tau, alpha_pcasl=current_alpha_pcasl)
+            # Enhancement A: Add Arterial Component
+            art_sig = self._generate_arterial_signal(plds, att, arterial_blood_volume, current_t1_artery, current_alpha_pcasl)
+            
+            vsasl_tissue = self._generate_vsasl_signal(plds, att, cbf_ml_100g_min=current_cbf, t1_artery=current_t1_artery, alpha_vsasl=current_alpha_vsasl)
+            pcasl_tissue = self._generate_pcasl_signal(plds, att, cbf_ml_100g_min=current_cbf, t1_artery=current_t1_artery, t_tau=current_t_tau, alpha_pcasl=current_alpha_pcasl)
+            
+            vsasl_sig = vsasl_tissue # VSASL usually crushes arterial signal effectively
+            pcasl_sig = pcasl_tissue + art_sig
 
             # Add scaled noise
             for n in range(n_noise):
@@ -178,6 +197,11 @@ class ASLSimulator:
             cbf_ml_100g_min=ref_cbf, t1_artery=ref_t1_artery,
             t_tau=ref_t_tau, alpha_pcasl=ref_alpha_pcasl
         )[0]
+
+    def _generate_arterial_signal(self, plds: np.ndarray, att: float, aBV: float, t1_artery: float, alpha_pcasl: float) -> np.ndarray:
+        """Wrapper for JIT arterial signal."""
+        alpha_bs_combined = alpha_pcasl * (self.params.alpha_BS1**4)
+        return _generate_arterial_signal_jit(plds, att, aBV, t1_artery, alpha_bs_combined)
 
     def _generate_vsasl_signal(self, plds: np.ndarray, att: float,
                                cbf_ml_100g_min: float, t1_artery: float, alpha_vsasl: float) -> np.ndarray:

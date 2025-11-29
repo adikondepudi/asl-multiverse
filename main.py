@@ -104,7 +104,9 @@ def _generate_simple_validation_set(simulator: RealisticASLSimulator, plds: np.n
             multiverse_signal_flat = np.concatenate([pcasl_noisy, vsasl_noisy])
             
             dataset['signals'].append(multiverse_signal_flat)
-            dataset['parameters'].append([cbf, att])
+            # Validation set slice index logic (0-indexed 20 slices)
+            val_slice_idx = np.random.randint(0, 20)
+            dataset['parameters'].append([cbf, att, t1_a, float(val_slice_idx)])
             dataset['conditions'].append(condition)
             dataset['noise_levels'].append(snr)
             dataset['perturbed_params'].append({
@@ -161,22 +163,26 @@ def run_comprehensive_asl_research(config: ResearchConfig, stage: int, output_di
     if stage == 1:
         # Stage 1: Targets are [Clean Signals (N, 2*P), T1 (N, 1)]
         # We need T1 for conditioning the encoder even in Stage 1
-        t1_values = raw_params[:, 2:3] # Extract T1 column
-        gpu_t1 = torch.from_numpy(t1_values).float().to(device)
-        gpu_targets = torch.cat([gpu_signals_clean, gpu_t1], dim=1)
+        # Params columns: 0:CBF, 1:ATT, 2:T1, 3:SliceIdx
+        t1_values = raw_params[:, 2:3]
+        z_values = raw_params[:, 3:4]
+        
+        gpu_cond = torch.from_numpy(np.concatenate([t1_values, z_values], axis=1)).float().to(device)
+        gpu_targets = torch.cat([gpu_signals_clean, gpu_cond], dim=1)
     else:
         # Stage 2: Extract CBF, ATT, T1
         # raw_params is now [N, 3]
         cbf = raw_params[:, 0]
         att = raw_params[:, 1]
         t1 = raw_params[:, 2] # New T1 column
+        z_idx = raw_params[:, 3] # New Slice Index
         
         cbf_norm = (cbf - norm_stats['y_mean_cbf']) / norm_stats['y_std_cbf']
         att_norm = (att - norm_stats['y_mean_att']) / norm_stats['y_std_att']
         
-        # Pass T1 un-normalized (Trainer handles normalization)
-        # Stack: [cbf_norm, att_norm, raw_t1]
-        targets_stack = np.stack([cbf_norm, att_norm, t1], axis=1)
+        # Pass T1 and Z un-normalized (Trainer handles normalization)
+        # Stack: [cbf_norm, att_norm, raw_t1, raw_z]
+        targets_stack = np.stack([cbf_norm, att_norm, t1, z_idx], axis=1)
         gpu_targets = torch.from_numpy(targets_stack).float().to(device)
 
     train_loader = FastTensorDataLoader(gpu_signals_clean, gpu_targets, batch_size=config.batch_size, shuffle=True)
@@ -194,11 +200,14 @@ def run_comprehensive_asl_research(config: ResearchConfig, stage: int, output_di
     
     # Extract T1 for validation
     val_t1_list_input = []
+    val_z_list_input = []
     for params in validation_data_dict['perturbed_params']:
         val_t1_list_input.append(params['t1_artery'])
+        # Validation dataset 'parameters' stores slice idx at index 3
+    val_z_input_np = validation_data_dict['parameters'][:, 3:4].astype(np.float32)
     val_t1_input_np = np.array(val_t1_list_input).reshape(-1, 1).astype(np.float32)
 
-    val_signals_processed = process_signals_cpu(val_signals_concat, norm_stats, num_plds, t1_values=val_t1_input_np)
+    val_signals_processed = process_signals_cpu(val_signals_concat, norm_stats, num_plds, t1_values=val_t1_input_np, z_values=val_z_input_np)
     
     val_signals_gpu = torch.from_numpy(val_signals_processed.astype(np.float32)).to(device)
 
@@ -249,8 +258,8 @@ def run_comprehensive_asl_research(config: ResearchConfig, stage: int, output_di
     
     # Calculate dynamic number of scalar features
     # norm_stats['scalar_features_mean'] contains the stats for engineered features
-    # We add 1 for the T1 value which is appended later
-    num_scalar_features_dynamic = len(norm_stats['scalar_features_mean']) + 1
+    # We add 2 for T1 and Z-coordinate
+    num_scalar_features_dynamic = len(norm_stats['scalar_features_mean']) + 2
     
     def create_model_closure(**kwargs): 
         return DisentangledASLNet(

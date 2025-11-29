@@ -30,14 +30,26 @@ def generate_and_save_chunk(args):
         true_cbf = np.random.uniform(*physio_var.cbf_range)
         true_att = np.random.uniform(*physio_var.att_range)
         true_t1_artery = np.random.uniform(*physio_var.t1_artery_range)
+        true_abv = np.random.uniform(*physio_var.arterial_blood_volume_range) if np.random.rand() > 0.6 else 0.0
+        true_slice_idx = np.random.randint(0, 30) # Random Z-position
+        
+        # Enhancement B: Slice timing effect
+        slice_delay_factor = np.exp(-(true_slice_idx * 45.0)/1000.0)
+        
         current_snr = np.random.choice([3.0, 5.0, 10.0, 15.0, 20.0])
 
         perturbed_t_tau = simulator.params.T_tau * (1 + np.random.uniform(*physio_var.t_tau_perturb_range))
         perturbed_alpha_pcasl = np.clip(simulator.params.alpha_PCASL * (1 + np.random.uniform(*physio_var.alpha_perturb_range)), 0.1, 1.1)
         perturbed_alpha_vsasl = np.clip(simulator.params.alpha_VSASL * (1 + np.random.uniform(*physio_var.alpha_perturb_range)), 0.1, 1.0)
 
-        vsasl_clean = simulator._generate_vsasl_signal(plds, true_att, true_cbf, true_t1_artery, perturbed_alpha_vsasl)
-        pcasl_clean = simulator._generate_pcasl_signal(plds, true_att, true_cbf, true_t1_artery, perturbed_t_tau, perturbed_alpha_pcasl)
+        eff_alpha_p = perturbed_alpha_pcasl * slice_delay_factor
+        eff_alpha_v = perturbed_alpha_vsasl * slice_delay_factor
+
+        vsasl_clean = simulator._generate_vsasl_signal(plds, true_att, true_cbf, true_t1_artery, eff_alpha_v)
+        pcasl_clean = simulator._generate_pcasl_signal(plds, true_att, true_cbf, true_t1_artery, perturbed_t_tau, eff_alpha_p)
+        art_sig = simulator._generate_arterial_signal(plds, true_att, true_abv, true_t1_artery, eff_alpha_p)
+        
+        pcasl_clean += art_sig # Enhancement A: Macrovascular
         clean_signal_vector = np.concatenate([pcasl_clean, vsasl_clean])
 
         # --- CHANGED FOR BASELINE EXPERIMENT ---
@@ -67,7 +79,8 @@ def generate_and_save_chunk(args):
         
         signals_noisy_chunk.append(final_noisy_input.astype(np.float32))
         signals_clean_chunk.append(clean_signal_vector.astype(np.float32))
-        params_chunk.append(np.array([true_cbf, true_att, true_t1_artery]).astype(np.float32))
+        # Save Slice Index as param 3 (0-indexed)
+        params_chunk.append(np.array([true_cbf, true_att, true_t1_artery, float(true_slice_idx)]).astype(np.float32))
         
     np.savez_compressed(
         output_dir / f'dataset_chunk_{chunk_id:04d}.npz',

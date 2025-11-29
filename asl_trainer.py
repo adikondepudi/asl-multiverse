@@ -112,9 +112,13 @@ class EnhancedASLTrainer:
         self.t1_mean_gpu = torch.tensor(norm_stats.get('y_mean_t1', 1850.0), device=self.device, dtype=torch.float32)
         self.t1_std_gpu = torch.tensor(norm_stats.get('y_std_t1', 200.0), device=self.device, dtype=torch.float32)
         
+        # NEW: Register Z stats
+        self.z_mean_gpu = torch.tensor(norm_stats.get('y_mean_z', 15.0), device=self.device, dtype=torch.float32)
+        self.z_std_gpu = torch.tensor(norm_stats.get('y_std_z', 8.0), device=self.device, dtype=torch.float32)
+        
         logger.info("GPU Noise parameters and Norm Stats loaded successfully.")
 
-    def _process_batch_on_gpu(self, raw_signals, t1_values=None):
+    def _process_batch_on_gpu(self, raw_signals, t1_values=None, z_values=None):
         if self.noise_scale_vec_gpu is None:
             return raw_signals 
 
@@ -156,8 +160,13 @@ class EnhancedASLTrainer:
         if t1_values is not None:
             # Normalize T1
             t1_norm = (t1_values - self.t1_mean_gpu) / (self.t1_std_gpu + 1e-6)
-            # Concatenate to scalars -> Now 11 dimensions
+            # Concatenate to scalars
             scalars_norm = torch.cat([scalars_norm, t1_norm], dim=1)
+            
+        if z_values is not None:
+            # Normalize Z
+            z_norm = (z_values - self.z_mean_gpu) / (self.z_std_gpu + 1e-6)
+            scalars_norm = torch.cat([scalars_norm, z_norm], dim=1)
         
         final_input = torch.cat([shape_vector, scalars_norm], dim=1)
         return torch.clamp(final_input, -15.0, 15.0)
@@ -254,21 +263,24 @@ class EnhancedASLTrainer:
                 raw_signals, targets = next(loader_iter)
             
             # SPLIT TARGETS
-            # Targets now: [CBF, ATT, T1]
+            # Targets now: [CBF, ATT, T1, Z]
             if self.stage == 2:
                 training_targets = targets[:, :2] # CBF, ATT for loss
                 t1_inputs = targets[:, 2:3]       # T1 for input
-                processed_signals = self._process_batch_on_gpu(raw_signals, t1_values=t1_inputs)
+                z_inputs = targets[:, 3:4]        # Z for input
+                processed_signals = self._process_batch_on_gpu(raw_signals, t1_values=t1_inputs, z_values=z_inputs)
                 target_for_loss = training_targets
             else:
-                # Stage 1 logic
-                # Targets are [Clean Signals (N, 2*P), T1 (N, 1)]
-                n_plds = (targets.shape[1] - 1) // 2
-                t1_inputs = targets[:, -1:]
+                # Stage 1 logic: Targets are [Clean Signals, T1, Z]
+                # actually targets.shape[1] = 2*P + 2 (T1 + Z)
+                n_plds = (targets.shape[1] - 2) // 2
                 
-                processed_signals = self._process_batch_on_gpu(raw_signals, t1_values=t1_inputs)
+                t1_inputs = targets[:, -2:-1]
+                z_inputs = targets[:, -1:]
                 
-                clean_signals_only = targets[:, :-1]
+                processed_signals = self._process_batch_on_gpu(raw_signals, t1_values=t1_inputs, z_values=z_inputs)
+                
+                clean_signals_only = targets[:, :-2]
                 pcasl_clean = clean_signals_only[:, :n_plds]
                 vsasl_clean = clean_signals_only[:, n_plds:]
                 
