@@ -86,12 +86,19 @@ def _generate_simple_validation_set(simulator: RealisticASLSimulator, plds: np.n
         cbf_range, att_range, t1_range = condition_map.get(condition, (physio_var.cbf_range, physio_var.att_range, physio_var.t1_artery_range))
         cbf = np.random.uniform(*cbf_range); att = np.random.uniform(*att_range); t1_a = np.random.uniform(*t1_range)
         
+        # Physics consistency: Sample aBV and Slice Index
+        val_slice_idx = np.random.randint(0, 30)
+        slice_delay = np.exp(-(val_slice_idx * 45.0)/1000.0)
+        val_abv = np.random.uniform(0.0, 0.015) if np.random.rand() > 0.5 else 0.0
+
         perturbed_t_tau = base_params.T_tau * (1 + np.random.uniform(*physio_var.t_tau_perturb_range))
         perturbed_alpha_pcasl = np.clip(base_params.alpha_PCASL * (1 + np.random.uniform(*physio_var.alpha_perturb_range)), 0.1, 1.1)
         perturbed_alpha_vsasl = np.clip(base_params.alpha_VSASL * (1 + np.random.uniform(*physio_var.alpha_perturb_range)), 0.1, 1.0)
         
-        vsasl_clean = simulator._generate_vsasl_signal(plds, att, cbf, t1_a, perturbed_alpha_vsasl)
-        pcasl_clean = simulator._generate_pcasl_signal(plds, att, cbf, t1_a, perturbed_t_tau, perturbed_alpha_pcasl)
+        vsasl_clean = simulator._generate_vsasl_signal(plds, att, cbf, t1_a, perturbed_alpha_vsasl * slice_delay)
+        pcasl_clean = simulator._generate_pcasl_signal(plds, att, cbf, t1_a, perturbed_t_tau, perturbed_alpha_pcasl * slice_delay)
+        art_sig = simulator._generate_arterial_signal(plds, att, val_abv, t1_a, perturbed_alpha_pcasl * slice_delay)
+        pcasl_clean += art_sig
         
         for snr in noise_levels:
             ref_signal_level = simulator._compute_reference_signal()
@@ -104,8 +111,7 @@ def _generate_simple_validation_set(simulator: RealisticASLSimulator, plds: np.n
             multiverse_signal_flat = np.concatenate([pcasl_noisy, vsasl_noisy])
             
             dataset['signals'].append(multiverse_signal_flat)
-            # Validation set slice index logic (0-indexed 20 slices)
-            val_slice_idx = np.random.randint(0, 20)
+            # Save parameters consistent with training data structure [CBF, ATT, T1, Z]
             dataset['parameters'].append([cbf, att, t1_a, float(val_slice_idx)])
             dataset['conditions'].append(condition)
             dataset['noise_levels'].append(snr)
