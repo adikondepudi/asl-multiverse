@@ -95,7 +95,7 @@ class ASLValidator:
     
     def _log_llm_metrics(self, scenario_name, nn_preds, ls_preds, ground_truth, label):
         """
-        Calculates high-level statistics AND local binned statistics optimized for LLM interpretation.
+        Calculates high-level statistics optimized for LLM interpretation.
         """
         def calc_stats(preds, truth):
             # Handle NaNs (common in LS)
@@ -113,25 +113,20 @@ class ASLValidator:
             # R2 Score
             ss_res = np.sum(err**2)
             ss_tot = np.sum((t - np.mean(t))**2)
-            # Handle constant ground truth (avoid divide by zero)
-            if ss_tot < 1e-9:
-                r2 = float('nan') 
-            else:
-                r2 = 1 - (ss_res / ss_tot)
+            r2 = 1 - (ss_res / (ss_tot + 1e-6))
             
             return {
                 "MAE": float(mae),
                 "RMSE": float(rmse),
                 "Bias": float(bias),
-                "R2": float(r2) if not np.isnan(r2) else "N/A (Const Truth)",
-                "Count": int(len(p))
+                "R2": float(r2),
+                "Failure_Rate": float(1.0 - (len(p) / len(preds)))
             }
 
-        # 1. Global Stats
-        nn_global = calc_stats(nn_preds, ground_truth)
-        ls_global = calc_stats(ls_preds, ground_truth)
-
-        # 2. Win Rate
+        nn_stats = calc_stats(nn_preds, ground_truth)
+        ls_stats = calc_stats(ls_preds, ground_truth)
+        
+        # Calculate "Win Rate" (How often NN is closer to truth than LS)
         valid_idx = (~np.isnan(nn_preds)) & (~np.isnan(ls_preds))
         if np.sum(valid_idx) > 0:
             nn_err = np.abs(nn_preds[valid_idx] - ground_truth[valid_idx])
@@ -141,37 +136,6 @@ class ASLValidator:
         else:
             win_rate = None
 
-        # 3. Binned Stats (Local Analysis)
-        binned_analysis = {}
-        
-        # Define Bins based on parameter type
-        if label == "ATT":
-            # 0 to 4000 in steps of 250
-            bins = np.arange(0, 4250, 250) 
-        elif label == "CBF":
-            # 0 to 120 in steps of 20
-            bins = np.arange(0, 140, 20)
-        else:
-            bins = [] # No binning for unknown params
-
-        for i in range(len(bins) - 1):
-            low, high = bins[i], bins[i+1]
-            bin_name = f"{low}-{high}"
-            
-            # Find indices where ground truth falls in this bin
-            mask = (ground_truth >= low) & (ground_truth < high)
-            
-            if np.sum(mask) > 0:
-                nn_bin_stats = calc_stats(nn_preds[mask], ground_truth[mask])
-                ls_bin_stats = calc_stats(ls_preds[mask], ground_truth[mask])
-                binned_analysis[bin_name] = {
-                    "NN_MAE": nn_bin_stats['MAE'],
-                    "LS_MAE": ls_bin_stats['MAE'],
-                    "NN_Bias": nn_bin_stats['Bias'],
-                    "LS_Bias": ls_bin_stats['Bias'],
-                    "Count": int(np.sum(mask))
-                }
-
         # Store in dictionary
         if not hasattr(self, 'llm_report'):
             self.llm_report = {}
@@ -180,12 +144,9 @@ class ASLValidator:
             self.llm_report[scenario_name] = {}
             
         self.llm_report[scenario_name][label] = {
-            "Global": {
-                "Neural_Net": nn_global,
-                "Least_Squares": ls_global,
-                "NN_vs_LS_Win_Rate": win_rate
-            },
-            "Local_Bins": binned_analysis
+            "Neural_Net": nn_stats,
+            "Least_Squares": ls_stats,
+            "NN_vs_LS_Win_Rate": win_rate
         }
 
     def save_llm_report(self):
@@ -198,39 +159,26 @@ class ASLValidator:
         # 2. Save Markdown (Human/LLM Readable)
         md_path = self.output_dir / "llm_analysis_report.md"
         with open(md_path, 'w') as f:
-            f.write("# ASL Multiverse Validation Report (Binned Analysis)\n\n")
+            f.write("# ASL Multiverse Validation Report (LLM Optimized)\n\n")
             for scenario, metrics in self.llm_report.items():
                 f.write(f"## Scenario: {scenario}\n")
                 for param, data in metrics.items():
                     f.write(f"### Parameter: {param}\n")
+                    f.write(f"- **NN vs LS Win Rate**: {data['NN_vs_LS_Win_Rate']:.2%}\n" if data['NN_vs_LS_Win_Rate'] is not None else "- **NN vs LS Win Rate**: N/A\n")
                     
-                    # Global Section
-                    glob = data['Global']
-                    f.write(f"**Global Win Rate (NN vs LS)**: {glob['NN_vs_LS_Win_Rate']:.2%}\n\n")
+                    nn = data['Neural_Net']
+                    ls = data['Least_Squares']
+                    
                     f.write("| Metric | Neural Net | Least Squares |\n")
                     f.write("| :--- | :--- | :--- |\n")
-                    f.write(f"| MAE | {glob['Neural_Net']['MAE']:.4f} | {glob['Least_Squares']['MAE']:.4f} |\n")
-                    f.write(f"| Bias | {glob['Neural_Net']['Bias']:.4f} | {glob['Least_Squares']['Bias']:.4f} |\n")
-                    f.write(f"| R² | {glob['Neural_Net']['R2']} | {glob['Least_Squares']['R2']} |\n\n")
-                    
-                    # Local Section
-                    f.write("#### Local Performance (Binned MAE)\n")
-                    f.write("| Range | NN MAE | LS MAE | NN Bias | LS Bias | Count |\n")
-                    f.write("| :--- | :--- | :--- | :--- | :--- | :--- |\n")
-                    
-                    binned = data['Local_Bins']
-                    for bin_range, stats in binned.items():
-                        # formatting safe checks
-                        nn_mae = f"{stats['NN_MAE']:.2f}" if stats['NN_MAE'] is not None else "N/A"
-                        ls_mae = f"{stats['LS_MAE']:.2f}" if stats['LS_MAE'] is not None else "N/A"
-                        nn_bias = f"{stats['NN_Bias']:.2f}" if stats['NN_Bias'] is not None else "N/A"
-                        ls_bias = f"{stats['LS_Bias']:.2f}" if stats['LS_Bias'] is not None else "N/A"
-                        
-                        f.write(f"| {bin_range} | {nn_mae} | {ls_mae} | {nn_bias} | {ls_bias} | {stats['Count']} |\n")
-                    f.write("\n")
+                    f.write(f"| MAE | {nn['MAE']:.4f} | {ls['MAE']:.4f} |\n")
+                    f.write(f"| RMSE | {nn['RMSE']:.4f} | {ls['RMSE']:.4f} |\n")
+                    f.write(f"| Bias | {nn['Bias']:.4f} | {ls['Bias']:.4f} |\n")
+                    f.write(f"| R² | {nn['R2']:.4f} | {ls['R2']:.4f} |\n")
+                    f.write(f"| Fail Rate | {nn['Failure_Rate']:.1%} | {ls['Failure_Rate']:.1%} |\n\n")
         
         print(f"\n--- [LLM REPORT SAVED] ---\nJSON: {json_path}\nMarkdown: {md_path}")
-        
+
     def _load_ensemble(self):
         models_dir = self.run_dir / 'trained_models'
         if not models_dir.exists():
