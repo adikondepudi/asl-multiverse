@@ -253,8 +253,19 @@ class ASLValidator:
         nhead = self.config.get('transformer_nhead_model', 4)
         moe_config = self.config.get('moe', None) # <--- CRITICAL FIX
         
-        num_scalar_features = len(self.norm_stats['scalar_features_mean']) + 1
         input_size = len(self.plds) * 2 + 8 
+
+        # --- AUTO-DETECT NUM_SCALAR_FEATURES ---
+        # Peek at the first model to find the input dimension of the FiLM layer
+        try:
+            first_state = torch.load(model_files[0], map_location='cpu')
+            sd = first_state['model_state_dict'] if 'model_state_dict' in first_state else first_state
+            # Shape is [out, in]. index 1 is input dimension.
+            self.detected_scalar_features = sd['encoder.pcasl_film.generator.0.weight'].shape[1]
+            logger.info(f"Auto-detected scalar features from checkpoint: {self.detected_scalar_features}")
+        except Exception as e:
+            logger.warning(f"Could not auto-detect scalar features: {e}. Defaulting to norm_stats + 1.")
+            self.detected_scalar_features = len(self.norm_stats['scalar_features_mean']) + 1
 
         for mp in model_files:
             print(f"   ... Loading {mp.name}")
@@ -264,7 +275,7 @@ class ASLValidator:
                 mode='regression',
                 input_size=input_size,
                 n_plds=len(self.plds),
-                num_scalar_features=num_scalar_features,
+                num_scalar_features=self.detected_scalar_features,
                 hidden_sizes=hidden_sizes,
                 transformer_d_model_focused=d_model,
                 transformer_nhead_model=nhead,
@@ -303,10 +314,26 @@ class ASLValidator:
     def run_nn_inference(self, signals, t1_values):
         n_plds = len(self.plds)
         eng_features = engineer_signal_features(signals, n_plds)
+        
+        # --- FIX: Truncate extra features (e.g. Peak Height) if norm_stats is from older run ---
+        # norm_stats includes 4 basic stats (mu/sig per modality) + N engineered features.
+        expected_total = len(self.norm_stats['scalar_features_mean'])
+        expected_eng = expected_total - 4
+        
+        if eng_features.shape[1] > expected_eng:
+            eng_features = eng_features[:, :expected_eng]
+            
         signals_concat = np.concatenate([signals, eng_features], axis=1)
         
         t1_input = t1_values.reshape(-1, 1).astype(np.float32)
-        processed = process_signals_cpu(signals_concat, self.norm_stats, n_plds, t1_values=t1_input)
+        
+        # Logic to match inputs to detected model size
+        base_feats = len(self.norm_stats['scalar_features_mean'])
+        
+        # If model expects base features only, don't pass T1
+        pass_t1 = t1_input if (self.detected_scalar_features > base_feats) else None
+        
+        processed = process_signals_cpu(signals_concat, self.norm_stats, n_plds, t1_values=pass_t1)
         
         inputs_tensor = torch.from_numpy(processed.astype(np.float32)).to(self.device)
         

@@ -9,7 +9,7 @@ set -e # Exit immediately if a command exits with a non-zero status.
 
 # --- 1. Define Input Directories ---
 # Use the environment variable if it's set, otherwise use a default.
-MODEL_ARTIFACTS_DIR=${MODEL_ARTIFACTS_DIR:-"prod_v5_run_20251126_224446_stage2_MoE_finetune"}
+MODEL_ARTIFACTS_DIR=${MODEL_ARTIFACTS_DIR:-"prod_v5_run_20251129_214227_stage2_MoE_finetune"}
 RAW_INVIVO_SOURCE_DIR="Multiverse"
 
 # --- 2. Define Output Directories (These will be created specific to the model run) ---

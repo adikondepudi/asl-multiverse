@@ -75,16 +75,10 @@ def _worker_generate_sample(args_tuple):
     true_att = np.random.uniform(*physio_var.att_range)
     true_cbf = np.random.uniform(*physio_var.cbf_range)
     true_t1_artery = np.random.uniform(*physio_var.t1_artery_range)
-    true_slice_idx = np.random.randint(0, 30)
-    true_abv = np.random.uniform(*physio_var.arterial_blood_volume_range) if np.random.rand() > 0.6 else 0.0
-    
-    slice_delay = np.exp(-(true_slice_idx * 45.0)/1000.0)
     
     # Generate clean signals with specific T1
-    vsasl_clean = simulator._generate_vsasl_signal(plds, true_att, true_cbf, true_t1_artery, simulator.params.alpha_VSASL * slice_delay)
-    pcasl_clean = simulator._generate_pcasl_signal(plds, true_att, true_cbf, true_t1_artery, simulator.params.T_tau, simulator.params.alpha_PCASL * slice_delay)
-    art_sig = simulator._generate_arterial_signal(plds, true_att, true_abv, true_t1_artery, simulator.params.alpha_PCASL * slice_delay)
-    pcasl_clean += art_sig
+    vsasl_clean = simulator._generate_vsasl_signal(plds, true_att, true_cbf, true_t1_artery, simulator.params.alpha_VSASL)
+    pcasl_clean = simulator._generate_pcasl_signal(plds, true_att, true_cbf, true_t1_artery, simulator.params.T_tau, simulator.params.alpha_PCASL)
     
     pcasl_mu, pcasl_sigma = np.mean(pcasl_clean), np.std(pcasl_clean)
     vsasl_mu, vsasl_sigma = np.mean(vsasl_clean), np.std(vsasl_clean)
@@ -101,7 +95,7 @@ def _worker_generate_sample(args_tuple):
     scalar_features = np.array([pcasl_mu, pcasl_sigma, vsasl_mu, vsasl_sigma, *eng_features])
     
     # Return t1_artery as well so we can calculate stats for it
-    return shape_vector, true_cbf, true_att, true_t1_artery, true_slice_idx, scalar_features
+    return shape_vector, true_cbf, true_att, true_t1_artery, scalar_features
 
 class ParallelStreamingStatsCalculator:
     def __init__(self, simulator, plds, num_samples, num_workers):
@@ -109,7 +103,6 @@ class ParallelStreamingStatsCalculator:
         self.plds = plds
         self.num_samples = num_samples
         self.num_workers = num_workers
-        self.num_plds = len(plds)
         self.num_plds = len(plds)
         self.num_scalar_features = None # Will be determined dynamically
 
@@ -120,7 +113,6 @@ class ParallelStreamingStatsCalculator:
         self.att_mean, self.att_m2 = 0.0, 0.0
         self.scalar_mean = None
         self.scalar_m2 = None
-        self.z_mean, self.z_m2 = 0.0, 0.0
 
     def _update_stats(self, existing_agg, new_value):
         mean, m2 = existing_agg
@@ -135,15 +127,12 @@ class ParallelStreamingStatsCalculator:
         base_seed = int(time.time())
         worker_args = [(self.simulator, self.plds, base_seed + i) for i in range(self.num_samples)]
         
-        base_seed = int(time.time())
-        worker_args = [(self.simulator, self.plds, base_seed + i) for i in range(self.num_samples)]
-        
         self.t1_mean, self.t1_m2 = 0.0, 0.0 # New T1 trackers
 
         with mp.Pool(processes=self.num_workers) as pool:
             results_iterator = pool.imap_unordered(_worker_generate_sample, worker_args)
             # Unpack new return tuple including t1
-            for shape_vec, cbf, att, t1, z_idx, scalars in results_iterator:
+            for shape_vec, cbf, att, t1, scalars in results_iterator:
                 if self.num_scalar_features is None:
                     self.num_scalar_features = len(scalars)
                     self.scalar_mean = np.zeros(self.num_scalar_features)
@@ -154,7 +143,6 @@ class ParallelStreamingStatsCalculator:
                 self.cbf_mean, self.cbf_m2 = self._update_stats((self.cbf_mean, self.cbf_m2), cbf)
                 self.att_mean, self.att_m2 = self._update_stats((self.att_mean, self.att_m2), att)
                 self.t1_mean, self.t1_m2 = self._update_stats((self.t1_mean, self.t1_m2), t1) # Update T1 stats
-                self.z_mean, self.z_m2 = self._update_stats((self.z_mean, self.z_m2), float(z_idx))
                 self.scalar_mean, self.scalar_m2 = self._update_stats((self.scalar_mean, self.scalar_m2), scalars)
 
         if self.count < 2: return {}
@@ -163,7 +151,6 @@ class ParallelStreamingStatsCalculator:
         cbf_std = np.sqrt(self.cbf_m2 / self.count)
         att_std = np.sqrt(self.att_m2 / self.count)
         t1_std = np.sqrt(self.t1_m2 / self.count)
-        z_std = np.sqrt(self.z_m2 / self.count)
         scalar_std = np.sqrt(self.scalar_m2 / self.count)
 
         return {
@@ -175,14 +162,15 @@ class ParallelStreamingStatsCalculator:
             'y_std_att': max(float(att_std), 1e-6),
             'y_mean_t1': self.t1_mean,
             'y_std_t1': max(float(t1_std), 1e-6),
-            'y_mean_z': self.z_mean,
-            'y_std_z': max(float(z_std), 1e-6),
             'scalar_features_mean': self.scalar_mean.tolist(),
             'scalar_features_std': np.clip(scalar_std, 1e-6, None).tolist()
         }
 
-def process_signals_cpu(signals_unnorm: np.ndarray, norm_stats: dict, num_plds: int, t1_values: Optional[np.ndarray] = None, z_values: Optional[np.ndarray] = None) -> np.ndarray:
-    """CPU version of preprocessing for validation data."""
+def process_signals_cpu(signals_unnorm: np.ndarray, norm_stats: dict, num_plds: int, t1_values: Optional[np.ndarray] = None) -> np.ndarray:
+    """
+    CPU version of preprocessing for validation data.
+    Gracefully handles dimension mismatch between new engineered features (10) and old stats (8).
+    """
     raw_curves = signals_unnorm[:, :num_plds * 2]
     eng_ttp_com = signals_unnorm[:, num_plds * 2:]
 
@@ -202,6 +190,18 @@ def process_signals_cpu(signals_unnorm: np.ndarray, norm_stats: dict, num_plds: 
     
     s_mean = np.array(norm_stats['scalar_features_mean'])
     s_std = np.array(norm_stats['scalar_features_std']) + 1e-6
+    
+    # --- LEGACY FIX ---
+    # Check dimensions. If unnorm has more features than stats, slice unnorm.
+    # The new features (Peaks) are at the END of eng_ttp_com (indices 8, 9).
+    # The stats (8 features) expect indices 0-7.
+    # We truncate unnorm to match s_mean.
+    
+    if scalar_features_unnorm.shape[1] > s_mean.shape[0]:
+        # Truncate input features to match the normalization stats
+        scalar_features_unnorm = scalar_features_unnorm[:, :s_mean.shape[0]]
+    
+    # Now shapes match (8,8) or (10,10)
     scalar_features_norm = (scalar_features_unnorm - s_mean) / s_std
 
     if t1_values is not None:
@@ -209,12 +209,6 @@ def process_signals_cpu(signals_unnorm: np.ndarray, norm_stats: dict, num_plds: 
         t1_std = norm_stats.get('y_std_t1', 200.0)
         t1_norm = (t1_values - t1_mean) / (t1_std + 1e-6)
         scalar_features_norm = np.concatenate([scalar_features_norm, t1_norm], axis=1)
-        
-    if z_values is not None:
-        z_mean = norm_stats.get('y_mean_z', 15.0)
-        z_std = norm_stats.get('y_std_z', 8.0)
-        z_norm = (z_values - z_mean) / (z_std + 1e-6)
-        scalar_features_norm = np.concatenate([scalar_features_norm, z_norm], axis=1)
 
     return np.concatenate([shape_vector, scalar_features_norm], axis=1)
 
@@ -226,25 +220,12 @@ def get_grid_search_initial_guess(
     """
     Performs a coarse grid search for a single voxel to find a robust
     initial guess for NLLS fitting.
-
-    Args:
-        observed_signal: A numpy array of shape (num_plds * 2,)
-                         containing concatenated PCASL and VSASL signals.
-        plds: A numpy array of the PLD values.
-        asl_params: A dictionary containing the physical parameters needed for
-                    the kinetic model (T1_artery, T_tau, alpha_PCASL, etc.).
-
-    Returns:
-        A list containing the best-fit [cbf_init, att_init] in units of
-        [ml/g/s, ms].
     """
     # --- 1. Define the search grid ---
-    # These ranges should be wide enough to cover all plausible physiological scenarios.
     cbf_values_grid = np.linspace(1, 150, 15)  # 15 steps for CBF
     att_values_grid = np.linspace(100, 4500, 22) # 22 steps for ATT
 
     # --- 2. Pre-calculate model parameters ---
-    # This logic is copied from ASLSimulator to match the model exactly
     t1_artery = asl_params['T1_artery']
     t_tau = asl_params['T_tau']
     t2_factor = asl_params.get('T2_factor', 1.0)
