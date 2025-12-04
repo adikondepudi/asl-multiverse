@@ -30,18 +30,45 @@ GRID = {
     ]
 }
 
-# Base Config (Defaults)
+# Base Config (Defaults) - Must include all required fields for main.py
 BASE_CONFIG = {
     "training": {
-        "learning_rate": 0.0001,
-        "n_epochs": 100,
+        "model_class_name": "DisentangledASLNet",
+        "encoder_type": "physics_processor",
+        "hidden_sizes": [128, 64, 32],
+        "dropout_rate": 0.1,
+        "weight_decay": 0.0001,
+        "learning_rate": 0.0003,
         "batch_size": 4096,
-        "n_ensembles": 3
+        "n_ensembles": 1,
+        "n_epochs": 50,
+        "validation_steps_per_epoch": 25,
+        "early_stopping_patience": 10,
+        "early_stopping_min_delta": 0.0,
+        "norm_type": "batch",
+        "transformer_d_model_focused": 32,
+        "transformer_nhead_model": 4,
+        "transformer_nlayers_model": 2
     },
-    "simulation": {
+    "data": {
+        "use_offline_dataset": True,
+        "offline_dataset_path": "asl_offline_dataset_10M_baseline_v1",
+        "num_samples_to_load": 2000000,
         "pld_values": [500, 1000, 1500, 2000, 2500, 3000]
     },
-    "wandb": {"wandb_project": "asl-ablation-study"}
+    "simulation": {
+        "T1_artery": 1850.0,
+        "T_tau": 1800.0,
+        "T2_factor": 1.0,
+        "alpha_BS1": 1.0,
+        "alpha_PCASL": 0.85,
+        "alpha_VSASL": 0.56,
+        "pld_values": [500, 1000, 1500, 2000, 2500, 3000]
+    },
+    "wandb": {
+        "wandb_project": "asl-ablation-study",
+        "wandb_entity": "adikondepudi"
+    }
 }
 
 def generate_slurm_script(job_name, run_dir, config_name):
