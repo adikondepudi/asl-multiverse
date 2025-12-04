@@ -260,11 +260,23 @@ class DisentangledASLNet(nn.Module):
                  moe: Optional[Dict[str, Any]] = None,
                  encoder_type: str = 'physics_processor',
                  num_scalar_features: int = 11,
+                 active_features_list: Optional[List[str]] = None,
                  **kwargs):
         super().__init__()
         
         self.mode = mode
         self.encoder_frozen = False
+        
+        # DYNAMIC CALCULATION of scalar dimension from active_features_list
+        # This prevents shape mismatch errors when ablating different feature combinations
+        if active_features_list is not None:
+            scalar_dim = 0
+            for feat in active_features_list:
+                if feat in ['mean', 'std', 'ttp', 'com', 'peak']: 
+                    scalar_dim += 2
+                elif feat in ['t1_artery', 'z_coord']: 
+                    scalar_dim += 1
+            num_scalar_features = scalar_dim
         
         if encoder_type.lower() == 'physics_processor':
             self.encoder = PhysicsInformedASLProcessor(

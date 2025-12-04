@@ -33,6 +33,45 @@ class RealisticASLSimulator(ASLSimulator):
         super().__init__(params)
         self.physio_var = PhysiologicalVariation()
 
+    def add_modular_noise(self, signal, snr, noise_components=['thermal']):
+        """
+        Applies noise components based on a list string.
+        options: 'thermal', 'physio', 'drift', 'spikes'
+        """
+        noisy_signal = signal.copy()
+        sig_len = signal.shape[-1]
+        t = np.arange(sig_len)
+        
+        # 1. Base Thermal Level
+        mean_sig = np.mean(np.abs(signal))
+        noise_sd = (mean_sig / snr) if snr > 0 else 0
+        
+        # 2. Additive Layers
+        if 'physio' in noise_components:
+            # Cardiac (Fast) + Respiratory (Slow)
+            cardiac = (noise_sd * 0.5) * np.sin(2 * np.pi * 1.0 * t / sig_len * 5 + np.random.rand())
+            resp = (noise_sd * 0.3) * np.sin(2 * np.pi * 0.3 * t / sig_len * 5 + np.random.rand())
+            noisy_signal += (cardiac + resp)
+
+        if 'drift' in noise_components:
+            # Low freq baseline shift
+            drift = (noise_sd * 0.4) * np.linspace(-1, 1, sig_len)
+            noisy_signal += drift
+
+        if 'spikes' in noise_components:
+            # Random outliers
+            if np.random.rand() < 0.2: # 20% of samples get a spike
+                idx = np.random.randint(0, sig_len)
+                noisy_signal[idx] += 5 * noise_sd * np.random.choice([-1, 1])
+
+        # 3. Final Rician/Thermal Noise (Correct MRI Physics)
+        if 'thermal' in noise_components:
+            n_real = np.random.normal(0, noise_sd, signal.shape)
+            n_imag = np.random.normal(0, noise_sd, signal.shape)
+            noisy_signal = np.sqrt((noisy_signal + n_real)**2 + n_imag**2)
+            
+        return noisy_signal
+
     def add_realistic_noise(self, signal: np.ndarray, snr: float = 5.0,
                             temporal_correlation: float = 0.3, include_spike_artifacts: bool = True,
                             spike_probability: float = 0.01, spike_magnitude_factor: float = 5.0,

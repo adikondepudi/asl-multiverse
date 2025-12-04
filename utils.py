@@ -67,6 +67,83 @@ def engineer_signal_features(raw_signal: np.ndarray, num_plds: int) -> np.ndarra
     else:
         return engineered_features.astype(np.float32)
 
+def calculate_all_features(raw_signal, num_plds):
+    """Calculates dictionary of ALL possible scalar features."""
+    pcasl_curves = raw_signal[:, :num_plds]
+    vsasl_curves = raw_signal[:, num_plds:]
+    plds_indices = np.arange(num_plds)
+
+    # Basic Stats
+    pcasl_mu = np.mean(pcasl_curves, axis=1)
+    pcasl_sigma = np.std(pcasl_curves, axis=1)
+    vsasl_mu = np.mean(vsasl_curves, axis=1)
+    vsasl_sigma = np.std(vsasl_curves, axis=1)
+
+    # Advanced Shape Stats
+    pcasl_sum = np.sum(pcasl_curves, axis=1) + 1e-6
+    vsasl_sum = np.sum(vsasl_curves, axis=1) + 1e-6
+    
+    pcasl_ttp = np.argmax(pcasl_curves, axis=1)
+    vsasl_ttp = np.argmax(vsasl_curves, axis=1)
+    pcasl_com = np.sum(pcasl_curves * plds_indices, axis=1) / pcasl_sum
+    vsasl_com = np.sum(vsasl_curves * plds_indices, axis=1) / vsasl_sum
+    pcasl_peak = np.max(pcasl_curves, axis=1)
+    vsasl_peak = np.max(vsasl_curves, axis=1)
+
+    # Return dictionary for easy selection later
+    return {
+        'mean': np.stack([pcasl_mu, vsasl_mu], axis=1),
+        'std': np.stack([pcasl_sigma, vsasl_sigma], axis=1),
+        'ttp': np.stack([pcasl_ttp, vsasl_ttp], axis=1),
+        'com': np.stack([pcasl_com, vsasl_com], axis=1),
+        'peak': np.stack([pcasl_peak, vsasl_peak], axis=1)
+    }
+
+def process_signals_dynamic(raw_signals, norm_stats, config, t1_values=None, z_values=None):
+    """
+    Dynamically constructs input vectors based on config['active_features'].
+    """
+    num_plds = len(config['pld_values'])
+    
+    # 1. Curve Normalization (Always standard)
+    pcasl_raw = raw_signals[:, :num_plds]
+    vsasl_raw = raw_signals[:, num_plds:]
+    
+    pcasl_mu = np.mean(pcasl_raw, axis=1, keepdims=True)
+    pcasl_std = np.std(pcasl_raw, axis=1, keepdims=True) + 1e-6
+    pcasl_shape = (pcasl_raw - pcasl_mu) / pcasl_std
+    
+    vsasl_mu = np.mean(vsasl_raw, axis=1, keepdims=True)
+    vsasl_std = np.std(vsasl_raw, axis=1, keepdims=True) + 1e-6
+    vsasl_shape = (vsasl_raw - vsasl_mu) / vsasl_std
+    
+    input_parts = [pcasl_shape, vsasl_shape]
+
+    # 2. Scalar Feature Selection via Config
+    all_feats = calculate_all_features(raw_signals, num_plds)
+    active_list = config.get('active_features', ['mean', 'std']) # Default
+    
+    for feat_name in active_list:
+        if feat_name in all_feats:
+            # Normalize using stored stats
+            feat_val = all_feats[feat_name]
+            mu = np.array(norm_stats[f'feat_{feat_name}_mean'])
+            std = np.array(norm_stats[f'feat_{feat_name}_std']) + 1e-6
+            feat_norm = (feat_val - mu) / std
+            input_parts.append(feat_norm)
+        
+        elif feat_name == 't1_artery' and t1_values is not None:
+            mu = norm_stats.get('y_mean_t1', 1850.0)
+            std = norm_stats.get('y_std_t1', 200.0)
+            input_parts.append((t1_values - mu) / std)
+            
+        elif feat_name == 'z_coord' and z_values is not None:
+             mu = norm_stats.get('y_mean_z', 15.0)
+             std = norm_stats.get('y_std_z', 8.0)
+             input_parts.append((z_values - mu) / std)
+
+    return np.concatenate(input_parts, axis=1)
+
 def _worker_generate_sample(args_tuple):
     simulator, plds, seed = args_tuple
     np.random.seed(seed)

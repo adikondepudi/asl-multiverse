@@ -1,0 +1,26 @@
+active_features:
+- mean
+- std
+- peak
+- t1_artery
+data_noise_components:
+- thermal
+simulation:
+  pld_values:
+  - 500
+  - 1000
+  - 1500
+  - 2000
+  - 2500
+  - 3000
+training:
+  batch_size: 4096
+  hidden_sizes:
+  - 128
+  - 64
+  - 32
+  learning_rate: 0.0001
+  n_ensembles: 3
+  n_epochs: 100
+wandb:
+  wandb_project: asl-ablation-study
