@@ -242,6 +242,46 @@ class PhysicsInformedASLProcessor(nn.Module):
         
         return final_output_vector
 
+class MLPOnlyEncoder(nn.Module):
+    """
+    MLP-Only Encoder for Ablation Studies.
+    This encoder skips the Conv1D processing and directly uses the flattened
+    signal + scalar features through an MLP. Used to test whether the Conv1D
+    temporal processing is strictly necessary, or if scalars are sufficient.
+    
+    The "Blue Box" control: Does the network strictly need Conv1D, or can we 
+    achieve similar performance with just the engineered scalar features?
+    """
+    def __init__(self, n_plds: int, feature_dim: int, nhead: int, dropout_rate: float, num_scalar_features: int = 11, **kwargs):
+        super().__init__()
+        self.n_plds = n_plds
+        self.num_scalar_features = num_scalar_features
+        
+        # Input: [pcasl_shape (n_plds), vsasl_shape (n_plds), scalars (num_scalar_features)]
+        input_dim = (n_plds * 2) + num_scalar_features
+        
+        # Simple MLP encoder (no Conv1D, no attention)
+        self.encoder_mlp = nn.Sequential(
+            nn.Linear(input_dim, 128),
+            nn.BatchNorm1d(128),
+            nn.ReLU(),
+            nn.Dropout(dropout_rate),
+            nn.Linear(128, 256),
+            nn.BatchNorm1d(256),
+            nn.ReLU(),
+            nn.Dropout(dropout_rate),
+            nn.Linear(256, 256),
+            nn.LayerNorm(256)
+        )
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        """
+        Direct MLP processing of the entire input.
+        Input x: [pcasl_shape (n_plds), vsasl_shape (n_plds), scalars]
+        Output: (batch, 256) - same output dim as PhysicsInformedASLProcessor
+        """
+        return self.encoder_mlp(x)
+
 class DisentangledASLNet(nn.Module):
     """
     Main network class. It uses a specified encoder (like the V5 PhysicsInformedASLProcessor)
@@ -287,8 +327,18 @@ class DisentangledASLNet(nn.Module):
                 num_scalar_features=num_scalar_features
             )
             fused_feature_size = 256 # Output of the final_fusion_mlp
+        elif encoder_type.lower() == 'mlp_only':
+            # MLP-only encoder for ablation studies (no Conv1D)
+            self.encoder = MLPOnlyEncoder(
+                n_plds=n_plds,
+                feature_dim=kwargs.get('transformer_d_model_focused', 32),
+                nhead=kwargs.get('transformer_nhead_model', 4),
+                dropout_rate=kwargs.get('dropout_rate', 0.1),
+                num_scalar_features=num_scalar_features
+            )
+            fused_feature_size = 256 # MLPOnlyEncoder also outputs 256
         else:
-            raise ValueError(f"Unknown encoder_type: '{encoder_type}'. Only 'physics_processor' is supported in this version.")
+            raise ValueError(f"Unknown encoder_type: '{encoder_type}'. Supported: 'physics_processor', 'mlp_only'")
         
         dropout_rate = kwargs.get('dropout_rate', 0.1)
 
