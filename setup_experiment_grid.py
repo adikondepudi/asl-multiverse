@@ -104,15 +104,17 @@ def main():
         with open(slurm_path, 'w') as f:
             f.write(generate_slurm_script(exp_id, str(exp_dir), str(config_path)))
             
-        # 4. Add to Master Submit Script
+        # 4. Add to Master Submit Script (use double quotes for variable expansion)
         submit_script_lines.append(f"JOB_{i}=$(sbatch --parsable {slurm_path})")
-        submit_script_lines.append(f"echo 'Submitted {exp_id} as Job ID: $JOB_{i}'")
+        submit_script_lines.append(f'echo "Submitted {exp_id} as Job ID: $JOB_{i}"')
 
-    # 5. Add Aggregator Job (Dependency)
-    # This runs only when ALL experiments finish
-    submit_script_lines.append("\n# Launch Aggregator with Dependency")
-    submit_script_lines.append("ALL_JOBS=$(squeue --me --noheader --format %i | tr '\\n' ':')")
-    submit_script_lines.append("sbatch --dependency=afterany:$ALL_JOBS aggregate_results.slurm")
+    # 5. Build dependency string from captured job IDs
+    num_jobs = len(experiments)
+    job_vars = ":".join([f"$JOB_{i}" for i in range(num_jobs)])
+    submit_script_lines.append("\n# Launch Aggregator with Dependency on all jobs")
+    submit_script_lines.append(f'DEPENDENCY="{job_vars}"')
+    submit_script_lines.append('sbatch --dependency=afterany:${DEPENDENCY} aggregate_results.slurm')
+    submit_script_lines.append('echo "Aggregator job submitted with dependency on all experiments"')
     
     # Write Master Script
     with open("submit_all.sh", "w") as f:
