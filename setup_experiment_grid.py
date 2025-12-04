@@ -45,25 +45,28 @@ BASE_CONFIG = {
 }
 
 def generate_slurm_script(job_name, run_dir, config_name):
-    """Creates a self-validating SLURM script."""
+    """Creates a self-validating SLURM script that runs both training stages."""
     return f"""#!/bin/bash
 #SBATCH --job-name={job_name}
 #SBATCH --partition=gpu
 #SBATCH --gres=gpu:1
 #SBATCH --nodes=1
-#SBATCH --time=04:00:00
+#SBATCH --time=08:00:00
 #SBATCH --output={run_dir}/slurm.out
 #SBATCH --error={run_dir}/slurm.err
 
 source ~/.bashrc
 conda activate asl_multiverse
 
-echo "--- 1. STARTING TRAINING ---"
-python main.py {config_name} --stage 2 --output-dir {run_dir}
+cd $SLURM_SUBMIT_DIR
 
-echo "--- 2. AUTO-VALIDATION (NN vs LS) ---"
-# This script compares the model against LS on in-vivo data
-# and saves 'metrics.json'
+echo "--- 1. STAGE 1: DENOISING PRE-TRAINING ---"
+python main.py {config_name} --stage 1 --output-dir {run_dir}
+
+echo "--- 2. STAGE 2: REGRESSION TRAINING ---"
+python main.py {config_name} --stage 2 --output-dir {run_dir} --load-weights-from {run_dir}
+
+echo "--- 3. AUTO-VALIDATION (NN vs LS) ---"
 python validate.py --run_dir {run_dir} --output_dir {run_dir}/validation_results
 
 echo "--- JOB COMPLETE ---"
