@@ -205,7 +205,7 @@ def build_leaderboard_df(experiments: dict, selected_exps: list) -> pd.DataFrame
 
 def render_leaderboard_tab(experiments: dict, selected_exps: list):
     """Render the Leaderboard tab content."""
-    st.subheader("🏆 Global Performance Summary")
+    st.subheader("Global Performance Summary")
     
     df_scores = build_leaderboard_df(experiments, selected_exps)
     

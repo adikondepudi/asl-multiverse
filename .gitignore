@@ -36,6 +36,7 @@ trained_models/
 # Ignore Logs
 *.out
 *.err
+*.png
 slurm_logs/
 __pycache__/
 
