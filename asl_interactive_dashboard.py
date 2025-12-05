@@ -4,11 +4,11 @@ ASL Ablation Study Interactive Dashboard
 A comprehensive research workbench for exploring ablation study results.
 
 Features:
-- 🏆 Leaderboard: Aggregate MAE scores with bar charts
-- 📈 Curve Explorer: Multi-scenario stacking, auto-rescaling, "Difference vs LS" mode
-- ⚙️ Config Inspector: Side-by-side hyperparameter comparison
-- 🎨 Consistent colors: Same experiment = same color everywhere
-- 🔍 Hover comparison: See all model values at any X-coordinate
+- Leaderboard: Aggregate MAE scores with bar charts
+- Curve Explorer: Multi-scenario stacking, auto-rescaling, "Difference vs LS" mode
+- Config Inspector: Side-by-side hyperparameter comparison
+- Consistent colors: Same experiment = same color everywhere
+- Hover comparison: See all model values at any X-coordinate
 
 Usage:
     streamlit run asl_interactive_dashboard.py
@@ -38,7 +38,6 @@ except ImportError:
 # ============================================================================
 st.set_page_config(
     page_title="ASL Ablation Dashboard",
-    page_icon="🧠",
     layout="wide",
     initial_sidebar_state="expanded"
 )
@@ -230,7 +229,7 @@ def render_leaderboard_tab(experiments: dict, selected_exps: list):
     
     with col1:
         if "Avg CBF MAE" in df_scores.columns:
-            st.markdown("#### 🩸 CBF Error Comparison")
+            st.markdown("#### CBF Error Comparison")
             fig = px.bar(
                 df_scores, 
                 x="Experiment", 
@@ -243,7 +242,7 @@ def render_leaderboard_tab(experiments: dict, selected_exps: list):
     
     with col2:
         if "Avg ATT MAE" in df_scores.columns:
-            st.markdown("#### ⏱️ ATT Error Comparison")
+            st.markdown("#### ATT Error Comparison")
             fig = px.bar(
                 df_scores, 
                 x="Experiment", 
@@ -377,7 +376,7 @@ def render_curve_explorer_tab(
     
     with c1:
         selected_scenarios = st.multiselect(
-            "📊 Select Scenarios:",
+            "Select Scenarios:",
             available_scenarios,
             default=[available_scenarios[0]] if available_scenarios else []
         )
@@ -400,21 +399,21 @@ def render_curve_explorer_tab(
     
     # Render plots for each selected scenario
     for scenario in selected_scenarios:
-        st.markdown(f"### 🔬 Scenario: {scenario}")
+        st.markdown(f"### Scenario: {scenario}")
         
         # 2x2 grid: CBF row, ATT row
         col1, col2 = st.columns(2)
         
         with col1:
             fig = create_metric_plot(
-                experiments, scenario, "CBF_Bias", "🩸 CBF Bias (Accuracy)",
+                experiments, scenario, "CBF_Bias", "CBF Bias (Accuracy)",
                 selected_exps, color_map, view_mode, show_ls
             )
             st.plotly_chart(fig, use_container_width=True)
         
         with col2:
             fig = create_metric_plot(
-                experiments, scenario, "CBF_CoV", "🩸 CBF CoV (Precision)",
+                experiments, scenario, "CBF_CoV", "CBF CoV (Precision)",
                 selected_exps, color_map, view_mode, show_ls
             )
             st.plotly_chart(fig, use_container_width=True)
@@ -423,14 +422,14 @@ def render_curve_explorer_tab(
         
         with col3:
             fig = create_metric_plot(
-                experiments, scenario, "ATT_Bias", "⏱️ ATT Bias (Accuracy)",
+                experiments, scenario, "ATT_Bias", "ATT Bias (Accuracy)",
                 selected_exps, color_map, view_mode, show_ls
             )
             st.plotly_chart(fig, use_container_width=True)
         
         with col4:
             fig = create_metric_plot(
-                experiments, scenario, "ATT_CoV", "⏱️ ATT CoV (Precision)",
+                experiments, scenario, "ATT_CoV", "ATT CoV (Precision)",
                 selected_exps, color_map, view_mode, show_ls
             )
             st.plotly_chart(fig, use_container_width=True)
@@ -444,7 +443,7 @@ def render_curve_explorer_tab(
 
 def render_config_inspector_tab(experiments: dict, selected_exps: list):
     """Render the Config Inspector tab content."""
-    st.subheader("⚙️ Hyperparameter Comparison")
+    st.subheader("Hyperparameter Comparison")
     
     if not YAML_AVAILABLE:
         st.warning("Install PyYAML (`pip install pyyaml`) to enable config inspection.")
@@ -480,7 +479,7 @@ def render_config_inspector_tab(experiments: dict, selected_exps: list):
         return
     
     # Raw YAML view
-    st.markdown("### 📄 Raw Config View")
+    st.markdown("### Raw Config View")
     
     cols = st.columns(min(len(selected_exps), 3))
     for i, exp in enumerate(selected_exps[:3]):
@@ -498,11 +497,11 @@ def render_config_inspector_tab(experiments: dict, selected_exps: list):
 # ============================================================================
 
 def main():
-    st.title("🧠 ASL Ablation Study Dashboard")
+    st.title("ASL Ablation Study Dashboard")
     st.markdown("*Interactive exploration of neural network vs. least squares performance*")
     
     # Sidebar
-    st.sidebar.title("🎛️ Controls")
+    st.sidebar.title("Controls")
     
     # Data source
     data_path = st.sidebar.text_input(
@@ -515,7 +514,7 @@ def main():
     experiments = load_all_experiments(data_path)
     
     if not experiments:
-        st.error(f"❌ No data found in '{data_path}'")
+        st.error(f"No data found in '{data_path}'")
         st.markdown("""
         **Expected structure:**
         ```
@@ -537,7 +536,7 @@ def main():
         st.stop()
     
     # Success message
-    st.sidebar.success(f"✅ Loaded {len(experiments)} experiments")
+    st.sidebar.success(f"Loaded {len(experiments)} experiments")
     
     # Get all experiment names and create color map
     all_exp_names = sorted(list(experiments.keys()))
@@ -570,9 +569,9 @@ def main():
     
     # Main tabs
     tab1, tab2, tab3 = st.tabs([
-        "🏆 Leaderboard",
-        "📈 Curve Explorer", 
-        "⚙️ Config Inspector"
+        "Leaderboard",
+        "Curve Explorer", 
+        "Config Inspector"
     ])
     
     with tab1:
