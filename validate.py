@@ -110,8 +110,11 @@ class ASLValidator:
         else:
             logger.error(f"Could not find norm_stats.json in {self.run_dir}")
             sys.exit(1)
+        
+        # 5. Initialize plot data storage for interactive dashboard
+        self.plot_data_storage = {}
 
-        # 4. Load Ensemble Models
+        # 6. Load Ensemble Models
         self.models = self._load_ensemble()
     
     def _log_llm_metrics(self, scenario_name, nn_preds, ls_preds, ground_truth, label):
@@ -199,6 +202,21 @@ class ASLValidator:
                     f.write(f"| Fail Rate | {nn['Failure_Rate']:.1%} | {ls['Failure_Rate']:.1%} |\n\n")
         
         print(f"\n--- [LLM REPORT SAVED] ---\nJSON: {json_path}\nMarkdown: {md_path}")
+
+    def save_plot_data_json(self):
+        """Saves raw plot coordinates for the interactive Streamlit dashboard."""
+        json_path = self.output_dir / "interactive_plot_data.json"
+        
+        # Helper to handle NaN values for JSON serialization
+        def nan_to_none(obj):
+            if isinstance(obj, float) and np.isnan(obj):
+                return None
+            raise TypeError(f"Object of type {type(obj)} is not JSON serializable")
+        
+        with open(json_path, 'w') as f:
+            json.dump(self.plot_data_storage, f, indent=2, default=nan_to_none)
+        
+        print(f"   > Saved interactive dashboard data to {json_path}")
 
     def _load_ensemble(self):
         models_dir = self.run_dir / 'trained_models'
@@ -395,34 +413,73 @@ class ASLValidator:
             print(f"   > Saved Phase1 Plot {i+1}")
 
     def _plot_scenario(self, scenario_name, x_values, x_label, nn_cbf, nn_att, ls_cbf, ls_att, true_cbf, true_att):
-        print(f"   > Generating plots for {scenario_name}")
+        print(f"   > Generating plots and caching data for {scenario_name}")
         x_values = np.array(x_values)
         
-        def get_stats(preds, truths, x_vals):
+        # --- 1. Curve Binning Logic ---
+        def get_binned_stats(preds, truths, x_vals):
             bins = 15
             with warnings.catch_warnings():
                 warnings.filterwarnings('ignore', message='Mean of empty slice', category=RuntimeWarning)
                 
+                # Bias = Pred - Truth
                 bin_bias = binned_statistic(x_vals, preds - truths, statistic=np.nanmean, bins=bins)
-                bin_std = binned_statistic(x_vals, preds, statistic=np.nanstd, bins=bins)
+                # CoV = Std / Mean_Truth
+                bin_pred_std = binned_statistic(x_vals, preds, statistic=np.nanstd, bins=bins)
                 bin_truth_mean = binned_statistic(x_vals, truths, statistic=np.nanmean, bins=bins).statistic
+                cov_stat = (bin_pred_std.statistic / (bin_truth_mean + 1e-6)) * 100
                 
-                cov_stat = (bin_std.statistic / (bin_truth_mean + 1e-6)) * 100
                 bin_centers = 0.5 * (bin_bias.bin_edges[1:] + bin_bias.bin_edges[:-1])
-                return bin_centers, bin_bias.statistic, cov_stat
-
-        nn_x, nn_bias, nn_cov = get_stats(nn_cbf, true_cbf, x_values)
-        ls_x, ls_bias, ls_cov = get_stats(ls_cbf, true_cbf, x_values)
-        _, nn_bias_att, nn_cov_att = get_stats(nn_att, true_att, x_values)
-        _, ls_bias_att, ls_cov_att = get_stats(ls_att, true_att, x_values)
-
+                # Convert to list for JSON serialization
+                return bin_centers.tolist(), bin_bias.statistic.tolist(), cov_stat.tolist()
+        
+        # --- 2. Scalar Metric Logic (Global MAE for leaderboard) ---
+        def get_scalar_mae(preds, truths):
+            mask = ~np.isnan(preds)
+            if mask.sum() == 0:
+                return None
+            return float(np.mean(np.abs(preds[mask] - truths[mask])))
+        
+        # Calculate Binned Curves
+        nn_x, nn_bias, nn_cov = get_binned_stats(nn_cbf, true_cbf, x_values)
+        ls_x, ls_bias, ls_cov = get_binned_stats(ls_cbf, true_cbf, x_values)
+        _, nn_bias_att, nn_cov_att = get_binned_stats(nn_att, true_att, x_values)
+        _, ls_bias_att, ls_cov_att = get_binned_stats(ls_att, true_att, x_values)
+        
+        # Calculate Scalar Metrics for Leaderboard
+        metrics = {
+            "CBF_MAE_NN": get_scalar_mae(nn_cbf, true_cbf),
+            "CBF_MAE_LS": get_scalar_mae(ls_cbf, true_cbf),
+            "ATT_MAE_NN": get_scalar_mae(nn_att, true_att),
+            "ATT_MAE_LS": get_scalar_mae(ls_att, true_att),
+        }
+        
+        # --- 3. Store Everything for Interactive Dashboard ---
+        self.plot_data_storage[scenario_name] = {
+            "x_axis": nn_x,
+            "x_label": x_label,
+            "metrics": metrics,
+            "curves": {
+                "CBF_Bias": {"nn": nn_bias, "ls": ls_bias},
+                "CBF_CoV": {"nn": nn_cov, "ls": ls_cov},
+                "ATT_Bias": {"nn": nn_bias_att, "ls": ls_bias_att},
+                "ATT_CoV": {"nn": nn_cov_att, "ls": ls_cov_att}
+            }
+        }
+        
+        # --- 4. Static PNG Plotting (keep existing behavior) ---
         def make_plot(metric_name, nn_y, ls_y, ylabel):
             plt.figure(figsize=(6, 4))
-            plt.plot(nn_x, nn_y, 'o-', color='purple', label=f'Neural Net', linewidth=2, markersize=5)
+            nn_y_arr = np.array(nn_y)
+            ls_y_arr = np.array(ls_y)
+            nn_x_arr = np.array(nn_x)
+            ls_x_arr = np.array(ls_x)
             
-            valid_ls = ~np.isnan(ls_y)
+            plt.plot(nn_x_arr, nn_y_arr, 'o-', color='purple', label='Neural Net', linewidth=2, markersize=5)
+            
+            valid_ls = ~np.isnan(ls_y_arr)
             if np.sum(valid_ls) > 0:
-                plt.plot(ls_x[valid_ls], ls_y[valid_ls], 'x--', color='gray', label='LS', linewidth=1.5, markersize=5)
+                plt.plot(ls_x_arr[valid_ls], ls_y_arr[valid_ls], 'x--', color='gray', label='LS', linewidth=1.5, markersize=5)
             
             plt.xlabel(x_label); plt.ylabel(ylabel); plt.title(f"{scenario_name}: {metric_name}")
             plt.legend(); plt.grid(True, alpha=0.3); plt.axhline(0, color='black', linewidth=0.5)
@@ -490,8 +547,9 @@ class ASLValidator:
 
             self._plot_scenario(label, t_att, "ATT (ms)", nn_c, nn_a, ls_c, ls_a, t_cbf, t_att)
             
-        # --- NEW: Save the Report ---
+        # --- Save Reports ---
         self.save_llm_report()
+        self.save_plot_data_json()
         
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
