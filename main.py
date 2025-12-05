@@ -66,6 +66,9 @@ class ResearchConfig:
     transformer_d_model_focused: int = 32      
     transformer_nhead_model: int = 4
     transformer_nlayers_model: int = 2
+    # NEW: Ablation Study Configs
+    active_features: List[str] = field(default_factory=lambda: ['mean', 'std', 'peak', 't1_artery'])
+    data_noise_components: List[str] = field(default_factory=lambda: ['thermal'])
 
 def _generate_simple_validation_set(simulator: RealisticASLSimulator, plds: np.ndarray, n_subjects: int, conditions: List, noise_levels: List) -> Dict:
     """Generates a fixed validation set."""
@@ -262,16 +265,24 @@ def run_comprehensive_asl_research(config: ResearchConfig, stage: int, output_di
     model_creation_config = asdict(config)
     model_mode = 'denoising' if stage == 1 else 'regression'
     
-    # Calculate dynamic number of scalar features
-    # norm_stats['scalar_features_mean'] contains the stats for engineered features
-    # We add 2 for T1 and Z-coordinate
-    num_scalar_features_dynamic = len(norm_stats['scalar_features_mean']) + 2
+    # Calculate dynamic number of scalar features based on active_features config
+    # Each feature adds 2 scalars (one per modality) except t1_artery and z_coord which add 1
+    active_feats = config.active_features
+    num_scalar_features_dynamic = 0
+    for feat in active_feats:
+        if feat in ['mean', 'std', 'ttp', 'com', 'peak']:
+            num_scalar_features_dynamic += 2  # One per modality
+        elif feat in ['t1_artery', 'z_coord']:
+            num_scalar_features_dynamic += 1
+    
+    script_logger.info(f"Active features: {active_feats} -> {num_scalar_features_dynamic} scalar dimensions")
     
     def create_model_closure(**kwargs): 
         return DisentangledASLNet(
             mode=model_mode, 
             input_size=base_input_size_nn, 
             num_scalar_features=num_scalar_features_dynamic,
+            active_features_list=active_feats,  # Pass to network for dynamic sizing
             **kwargs
         )
 

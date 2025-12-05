@@ -243,7 +243,7 @@ class ParallelStreamingStatsCalculator:
             'scalar_features_std': np.clip(scalar_std, 1e-6, None).tolist()
         }
 
-def process_signals_cpu(signals_unnorm: np.ndarray, norm_stats: dict, num_plds: int, t1_values: Optional[np.ndarray] = None) -> np.ndarray:
+def process_signals_cpu(signals_unnorm: np.ndarray, norm_stats: dict, num_plds: int, t1_values: Optional[np.ndarray] = None, z_values: Optional[np.ndarray] = None) -> np.ndarray:
     """
     CPU version of preprocessing for validation data.
     Gracefully handles dimension mismatch between new engineered features (10) and old stats (8).
@@ -286,6 +286,12 @@ def process_signals_cpu(signals_unnorm: np.ndarray, norm_stats: dict, num_plds: 
         t1_std = norm_stats.get('y_std_t1', 200.0)
         t1_norm = (t1_values - t1_mean) / (t1_std + 1e-6)
         scalar_features_norm = np.concatenate([scalar_features_norm, t1_norm], axis=1)
+
+    if z_values is not None:
+        z_mean = norm_stats.get('y_mean_z', 15.0)
+        z_std = norm_stats.get('y_std_z', 8.0)
+        z_norm = (z_values - z_mean) / (z_std + 1e-6)
+        scalar_features_norm = np.concatenate([scalar_features_norm, z_norm], axis=1)
 
     return np.concatenate([shape_vector, scalar_features_norm], axis=1)
 

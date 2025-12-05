@@ -62,6 +62,12 @@ class EnhancedASLTrainer:
         self.lr_base = float(model_config.get('learning_rate', 0.001)); self.weight_decay = float(weight_decay)
         self.n_ensembles = n_ensembles; self.validation_steps_per_epoch = model_config.get('validation_steps_per_epoch', 50)
         
+        # NEW: Ablation Study Configs
+        self.active_features = model_config.get('active_features', ['mean', 'std', 'peak', 't1_artery'])
+        self.data_noise_components = model_config.get('data_noise_components', ['thermal'])
+        logger.info(f"Ablation Config - Active Features: {self.active_features}")
+        logger.info(f"Ablation Config - Noise Components: {self.data_noise_components}")
+        
         logger.info("Initializing models (Float32)...")
         self.models = [model_class(**model_config).to(self.device) for _ in range(n_ensembles)]
         
@@ -84,20 +90,25 @@ class EnhancedASLTrainer:
         self.ref_signal_gpu = None
         self.noise_scale_vec_gpu = None
         self.norm_stats_gpu = None
+        self.simulator = None  # Will be set in setup_gpu_noise_params
 
     def setup_gpu_noise_params(self, simulator, pld_list, norm_stats):
         if simulator is None or pld_list is None:
             return
 
+        # Store simulator and plds for modular noise
+        self.simulator = simulator
+        self.pld_list = pld_list
+        self.n_plds = len(pld_list)
+
         ref_signal = simulator._compute_reference_signal()
         self.ref_signal_gpu = torch.tensor(ref_signal, device=self.device, dtype=torch.float32)
         
         scalings = simulator.compute_tr_noise_scaling(np.array(pld_list))
-        n_plds = len(pld_list)
         
         scale_vec = np.concatenate([
-            np.full(n_plds, scalings['PCASL']),
-            np.full(n_plds, scalings['VSASL'])
+            np.full(self.n_plds, scalings['PCASL']),
+            np.full(self.n_plds, scalings['VSASL'])
         ])
         self.noise_scale_vec_gpu = torch.tensor(scale_vec, device=self.device, dtype=torch.float32)
         
@@ -108,37 +119,69 @@ class EnhancedASLTrainer:
             else:
                 self.norm_stats_gpu[k] = torch.tensor(v, device=self.device, dtype=torch.float32)
         
-        # NEW: Register T1 stats for normalization
+        # Register T1 stats for normalization
         self.t1_mean_gpu = torch.tensor(norm_stats.get('y_mean_t1', 1850.0), device=self.device, dtype=torch.float32)
         self.t1_std_gpu = torch.tensor(norm_stats.get('y_std_t1', 200.0), device=self.device, dtype=torch.float32)
         
-        # NEW: Register Z stats
+        # Register Z stats
         self.z_mean_gpu = torch.tensor(norm_stats.get('y_mean_z', 15.0), device=self.device, dtype=torch.float32)
         self.z_std_gpu = torch.tensor(norm_stats.get('y_std_z', 8.0), device=self.device, dtype=torch.float32)
         
-        logger.info("GPU Noise parameters and Norm Stats loaded successfully.")
+        logger.info(f"GPU Noise parameters loaded. Noise components: {self.data_noise_components}")
 
     def _process_batch_on_gpu(self, raw_signals, t1_values=None, z_values=None):
+        """
+        Process batch with CONFIGURABLE noise and DYNAMIC feature selection.
+        Noise components: ['thermal', 'physio', 'drift', 'spikes']
+        Active features: ['mean', 'std', 'ttp', 'com', 'peak', 't1_artery', 'z_coord']
+        """
         if self.noise_scale_vec_gpu is None:
             return raw_signals 
 
         batch_size = raw_signals.shape[0]
         n_plds = raw_signals.shape[1] // 2
         
-        # CRITICAL CHANGE: Harder Training Noise (1.5 - 10.0 SNR)
-        # Stops model from "cheating" on easy data
+        # ========== 1. MODULAR NOISE GENERATION ==========
         current_snr = torch.empty(batch_size, 1, device=self.device).uniform_(1.5, 10.0)
+        noise_sigma = (self.ref_signal_gpu / current_snr)
         
-        noise_sigma = (self.ref_signal_gpu / current_snr) * self.noise_scale_vec_gpu
+        # Start with thermal noise (always present as base)
+        total_noise = torch.zeros_like(raw_signals)
         
-        gaussian_noise = torch.randn_like(raw_signals) * noise_sigma
-        noisy_signals = raw_signals + gaussian_noise
+        if 'thermal' in self.data_noise_components:
+            thermal_noise = torch.randn_like(raw_signals) * noise_sigma * self.noise_scale_vec_gpu
+            total_noise += thermal_noise
         
-        eng_features = engineer_signal_features_torch(noisy_signals, n_plds)
+        if 'physio' in self.data_noise_components:
+            # Simulate cardiac/respiratory oscillation (low-frequency sinusoid)
+            # Amplitude ~5-15% of signal
+            physio_amp = torch.empty(batch_size, 1, device=self.device).uniform_(0.05, 0.15)
+            physio_freq = torch.empty(batch_size, 1, device=self.device).uniform_(0.5, 2.0)  # Hz
+            t = torch.arange(n_plds * 2, device=self.device).float().unsqueeze(0)
+            physio_noise = physio_amp * noise_sigma * torch.sin(2 * 3.14159 * physio_freq * t / (n_plds * 2))
+            total_noise += physio_noise
         
+        if 'drift' in self.data_noise_components:
+            # Baseline drift (linear trend)
+            drift_slope = torch.empty(batch_size, 1, device=self.device).uniform_(-0.02, 0.02)
+            t = torch.arange(n_plds * 2, device=self.device).float().unsqueeze(0) / (n_plds * 2)
+            drift_noise = drift_slope * noise_sigma * t
+            total_noise += drift_noise
+        
+        if 'spikes' in self.data_noise_components:
+            # Random motion spikes (affects ~5% of samples)
+            spike_mask = (torch.rand(batch_size, n_plds * 2, device=self.device) < 0.05).float()
+            spike_magnitude = torch.empty(batch_size, 1, device=self.device).uniform_(2.0, 5.0)
+            spike_noise = spike_mask * spike_magnitude * noise_sigma
+            total_noise += spike_noise
+        
+        noisy_signals = raw_signals + total_noise
+        
+        # ========== 2. COMPUTE ALL FEATURES ==========
         pcasl_raw = noisy_signals[:, :n_plds]
         vsasl_raw = noisy_signals[:, n_plds:]
         
+        # Basic stats (always computed)
         pcasl_mu = torch.mean(pcasl_raw, dim=1, keepdim=True)
         pcasl_sigma = torch.std(pcasl_raw, dim=1, keepdim=True) + 1e-6
         pcasl_shape = (pcasl_raw - pcasl_mu) / pcasl_sigma
@@ -149,22 +192,49 @@ class EnhancedASLTrainer:
         
         shape_vector = torch.cat([pcasl_shape, vsasl_shape], dim=1)
         
-        scalars = torch.cat([pcasl_mu, pcasl_sigma, vsasl_mu, vsasl_sigma, eng_features], dim=1)
+        # Compute all possible engineered features
+        eng_features = engineer_signal_features_torch(noisy_signals, n_plds)
+        # eng_features contains: [pcasl_ttp, vsasl_ttp, pcasl_com, vsasl_com, pcasl_peak, vsasl_peak]
         
-        s_mean = self.norm_stats_gpu['scalar_features_mean']
-        s_std = self.norm_stats_gpu['scalar_features_std'] + 1e-6
+        # ========== 3. DYNAMIC FEATURE SELECTION ==========
+        selected_scalars = []
         
-        scalars_norm = (scalars - s_mean) / s_std
+        if 'mean' in self.active_features:
+            selected_scalars.extend([pcasl_mu, vsasl_mu])
+        if 'std' in self.active_features:
+            selected_scalars.extend([pcasl_sigma, vsasl_sigma])
+        if 'ttp' in self.active_features:
+            selected_scalars.extend([eng_features[:, 0:1], eng_features[:, 1:2]])  # pcasl_ttp, vsasl_ttp
+        if 'com' in self.active_features:
+            selected_scalars.extend([eng_features[:, 2:3], eng_features[:, 3:4]])  # pcasl_com, vsasl_com
+        if 'peak' in self.active_features:
+            selected_scalars.extend([eng_features[:, 4:5], eng_features[:, 5:6]])  # pcasl_peak, vsasl_peak
         
-        # NEW: Handle T1 Injection
-        if t1_values is not None:
-            # Normalize T1
-            t1_norm = (t1_values - self.t1_mean_gpu) / (self.t1_std_gpu + 1e-6)
-            # Concatenate to scalars
-            scalars_norm = torch.cat([scalars_norm, t1_norm], dim=1)
+        if len(selected_scalars) > 0:
+            scalars = torch.cat(selected_scalars, dim=1)
             
-        if z_values is not None:
-            # Normalize Z
+            # Normalize scalars (using subset of norm_stats if available)
+            s_mean = self.norm_stats_gpu['scalar_features_mean']
+            s_std = self.norm_stats_gpu['scalar_features_std'] + 1e-6
+            
+            # Handle dimension mismatch: if we have fewer scalars than norm_stats expects
+            if scalars.shape[1] < s_mean.shape[0]:
+                s_mean = s_mean[:scalars.shape[1]]
+                s_std = s_std[:scalars.shape[1]]
+            elif scalars.shape[1] > s_mean.shape[0]:
+                scalars = scalars[:, :s_mean.shape[0]]
+            
+            scalars_norm = (scalars - s_mean) / s_std
+        else:
+            scalars_norm = torch.zeros(batch_size, 0, device=self.device)
+        
+        # Add T1 if in active_features
+        if 't1_artery' in self.active_features and t1_values is not None:
+            t1_norm = (t1_values - self.t1_mean_gpu) / (self.t1_std_gpu + 1e-6)
+            scalars_norm = torch.cat([scalars_norm, t1_norm], dim=1)
+        
+        # Add Z if in active_features  
+        if 'z_coord' in self.active_features and z_values is not None:
             z_norm = (z_values - self.z_mean_gpu) / (self.z_std_gpu + 1e-6)
             scalars_norm = torch.cat([scalars_norm, z_norm], dim=1)
         

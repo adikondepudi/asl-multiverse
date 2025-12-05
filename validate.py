@@ -199,7 +199,8 @@ class ASLValidator:
         hidden_sizes = self.config.get('hidden_sizes', [128, 64, 32])
         d_model = self.config.get('transformer_d_model_focused', 32)
         nhead = self.config.get('transformer_nhead_model', 4)
-        moe_config = self.config.get('moe', None) # <--- CRITICAL FIX
+        moe_config = self.config.get('moe', None)
+        encoder_type = self.config.get('encoder_type', 'physics_processor')  # <-- NEW
         
         input_size = len(self.plds) * 2 + 8 
 
@@ -209,7 +210,11 @@ class ASLValidator:
             first_state = torch.load(model_files[0], map_location='cpu')
             sd = first_state['model_state_dict'] if 'model_state_dict' in first_state else first_state
             # Shape is [out, in]. index 1 is input dimension.
-            self.detected_scalar_features = sd['encoder.pcasl_film.generator.0.weight'].shape[1]
+            # For MLP-only encoder, use a different key
+            if encoder_type.lower() == 'mlp_only':
+                self.detected_scalar_features = sd['encoder.encoder_mlp.0.weight'].shape[1] - (len(self.plds) * 2)
+            else:
+                self.detected_scalar_features = sd['encoder.pcasl_film.generator.0.weight'].shape[1]
             logger.info(f"Auto-detected scalar features from checkpoint: {self.detected_scalar_features}")
         except Exception as e:
             logger.warning(f"Could not auto-detect scalar features: {e}. Defaulting to norm_stats + 1.")
@@ -228,7 +233,8 @@ class ASLValidator:
                 transformer_d_model_focused=d_model,
                 transformer_nhead_model=nhead,
                 dropout_rate=0.0,
-                moe=moe_config  # <--- PASSING MOE CONFIG HERE
+                moe=moe_config,
+                encoder_type=encoder_type  # <-- NEW
             )
             
             try:
