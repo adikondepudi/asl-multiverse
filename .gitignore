@@ -27,3 +27,18 @@ __pycache__/
 /diagnostic*/
 /xu_figure*/
 /results*/
+# Ignore Model Weights (Heavy!)
+*.pt
+*.pth
+*.ckpt
+trained_models/
+
+# Ignore Logs
+*.out
+*.err
+slurm_logs/
+__pycache__/
+
+# Ignore Data files that aren't for the dashboard
+*.npy
+*.nii.gz
