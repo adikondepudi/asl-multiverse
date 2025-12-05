@@ -23,7 +23,7 @@ from enhanced_asl_network import DisentangledASLNet, PhysicsInformedASLProcessor
 from asl_simulation import ASLParameters
 from enhanced_simulation import RealisticASLSimulator
 from asl_trainer import EnhancedASLTrainer, FastTensorDataLoader
-from utils import ParallelStreamingStatsCalculator, engineer_signal_features, process_signals_cpu
+from utils import ParallelStreamingStatsCalculator, engineer_signal_features, process_signals_dynamic
 
 script_logger = logging.getLogger(__name__)
 
@@ -216,7 +216,9 @@ def run_comprehensive_asl_research(config: ResearchConfig, stage: int, output_di
     val_z_input_np = validation_data_dict['parameters'][:, 3:4].astype(np.float32)
     val_t1_input_np = np.array(val_t1_list_input).reshape(-1, 1).astype(np.float32)
 
-    val_signals_processed = process_signals_cpu(val_signals_concat, norm_stats, num_plds, t1_values=val_t1_input_np, z_values=val_z_input_np)
+    # Build config dict for dynamic processing
+    processing_config = {'pld_values': config.pld_values, 'active_features': config.active_features}
+    val_signals_processed = process_signals_dynamic(val_signals_concat, norm_stats, processing_config, t1_values=val_t1_input_np, z_values=val_z_input_np)
     
     val_signals_gpu = torch.from_numpy(val_signals_processed.astype(np.float32)).to(device)
 

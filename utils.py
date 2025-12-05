@@ -102,6 +102,9 @@ def calculate_all_features(raw_signal, num_plds):
 def process_signals_dynamic(raw_signals, norm_stats, config, t1_values=None, z_values=None):
     """
     Dynamically constructs input vectors based on config['active_features'].
+    Works with scalar_features_mean/std arrays from norm_stats.
+    
+    scalar_features layout: [mu_p, sig_p, mu_v, sig_v, ttp_p, ttp_v, com_p, com_v, peak_p, peak_v]
     """
     num_plds = len(config['pld_values'])
     
@@ -120,27 +123,49 @@ def process_signals_dynamic(raw_signals, norm_stats, config, t1_values=None, z_v
     input_parts = [pcasl_shape, vsasl_shape]
 
     # 2. Scalar Feature Selection via Config
-    all_feats = calculate_all_features(raw_signals, num_plds)
-    active_list = config.get('active_features', ['mean', 'std']) # Default
+    # Mapping from feature names to indices in scalar_features_mean/std
+    # Layout: [mu_p(0), sig_p(1), mu_v(2), sig_v(3), ttp_p(4), ttp_v(5), com_p(6), com_v(7), peak_p(8), peak_v(9)]
+    feature_indices = {
+        'mean': [0, 2],   # mu_p, mu_v
+        'std': [1, 3],    # sig_p, sig_v 
+        'ttp': [4, 5],    # ttp_p, ttp_v
+        'com': [6, 7],    # com_p, com_v
+        'peak': [8, 9],   # peak_p, peak_v
+    }
+    
+    s_mean = np.array(norm_stats['scalar_features_mean'])
+    s_std = np.array(norm_stats['scalar_features_std']) + 1e-6
+    
+    active_list = config.get('active_features', ['mean', 'std'])
     
     for feat_name in active_list:
-        if feat_name in all_feats:
-            # Normalize using stored stats
-            feat_val = all_feats[feat_name]
-            mu = np.array(norm_stats[f'feat_{feat_name}_mean'])
-            std = np.array(norm_stats[f'feat_{feat_name}_std']) + 1e-6
-            feat_norm = (feat_val - mu) / std
+        if feat_name in feature_indices:
+            indices = feature_indices[feat_name]
+            # Extract the raw feature values
+            if feat_name == 'mean':
+                feat_vals = np.stack([pcasl_mu.squeeze(), vsasl_mu.squeeze()], axis=1)
+            elif feat_name == 'std':
+                feat_vals = np.stack([pcasl_std.squeeze(), vsasl_std.squeeze()], axis=1)
+            else:
+                # For ttp, com, peak we need to calculate from raw signals
+                all_feats = calculate_all_features(raw_signals, num_plds)
+                feat_vals = all_feats[feat_name]
+            
+            # Normalize using the stored stats at correct indices
+            mu = s_mean[indices]
+            std = s_std[indices]
+            feat_norm = (feat_vals - mu) / std
             input_parts.append(feat_norm)
         
         elif feat_name == 't1_artery' and t1_values is not None:
             mu = norm_stats.get('y_mean_t1', 1850.0)
-            std = norm_stats.get('y_std_t1', 200.0)
+            std = norm_stats.get('y_std_t1', 200.0) + 1e-6
             input_parts.append((t1_values - mu) / std)
             
         elif feat_name == 'z_coord' and z_values is not None:
-             mu = norm_stats.get('y_mean_z', 15.0)
-             std = norm_stats.get('y_std_z', 8.0)
-             input_parts.append((z_values - mu) / std)
+            mu = norm_stats.get('y_mean_z', 15.0)
+            std = norm_stats.get('y_std_z', 8.0) + 1e-6
+            input_parts.append((z_values - mu) / std)
 
     return np.concatenate(input_parts, axis=1)
 

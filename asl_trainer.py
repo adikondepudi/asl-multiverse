@@ -197,34 +197,47 @@ class EnhancedASLTrainer:
         # eng_features contains: [pcasl_ttp, vsasl_ttp, pcasl_com, vsasl_com, pcasl_peak, vsasl_peak]
         
         # ========== 3. DYNAMIC FEATURE SELECTION ==========
+        # Mapping feature names to indices in scalar_features_mean/std
+        # Layout: [mu_p(0), sig_p(1), mu_v(2), sig_v(3), ttp_p(4), ttp_v(5), com_p(6), com_v(7), peak_p(8), peak_v(9)]
+        feature_indices = {
+            'mean': [0, 2],   # mu_p, mu_v
+            'std': [1, 3],    # sig_p, sig_v 
+            'ttp': [4, 5],    # ttp_p, ttp_v
+            'com': [6, 7],    # com_p, com_v
+            'peak': [8, 9],   # peak_p, peak_v
+        }
+        
+        s_mean = self.norm_stats_gpu['scalar_features_mean']
+        s_std = self.norm_stats_gpu['scalar_features_std'] + 1e-6
+        
         selected_scalars = []
         
-        if 'mean' in self.active_features:
-            selected_scalars.extend([pcasl_mu, vsasl_mu])
-        if 'std' in self.active_features:
-            selected_scalars.extend([pcasl_sigma, vsasl_sigma])
-        if 'ttp' in self.active_features:
-            selected_scalars.extend([eng_features[:, 0:1], eng_features[:, 1:2]])  # pcasl_ttp, vsasl_ttp
-        if 'com' in self.active_features:
-            selected_scalars.extend([eng_features[:, 2:3], eng_features[:, 3:4]])  # pcasl_com, vsasl_com
-        if 'peak' in self.active_features:
-            selected_scalars.extend([eng_features[:, 4:5], eng_features[:, 5:6]])  # pcasl_peak, vsasl_peak
+        for feat_name in self.active_features:
+            if feat_name in feature_indices:
+                indices = feature_indices[feat_name]
+                
+                # Get the unnormalized feature values
+                if feat_name == 'mean':
+                    feat_vals = torch.cat([pcasl_mu, vsasl_mu], dim=1)
+                elif feat_name == 'std':
+                    feat_vals = torch.cat([pcasl_sigma, vsasl_sigma], dim=1)
+                elif feat_name == 'ttp':
+                    feat_vals = eng_features[:, 0:2]  # pcasl_ttp, vsasl_ttp
+                elif feat_name == 'com':
+                    feat_vals = eng_features[:, 2:4]  # pcasl_com, vsasl_com
+                elif feat_name == 'peak':
+                    feat_vals = eng_features[:, 4:6]  # pcasl_peak, vsasl_peak
+                else:
+                    continue
+                
+                # Normalize using the correct indices from norm_stats
+                mu = s_mean[indices]
+                std = s_std[indices]
+                feat_norm = (feat_vals - mu) / std
+                selected_scalars.append(feat_norm)
         
         if len(selected_scalars) > 0:
-            scalars = torch.cat(selected_scalars, dim=1)
-            
-            # Normalize scalars (using subset of norm_stats if available)
-            s_mean = self.norm_stats_gpu['scalar_features_mean']
-            s_std = self.norm_stats_gpu['scalar_features_std'] + 1e-6
-            
-            # Handle dimension mismatch: if we have fewer scalars than norm_stats expects
-            if scalars.shape[1] < s_mean.shape[0]:
-                s_mean = s_mean[:scalars.shape[1]]
-                s_std = s_std[:scalars.shape[1]]
-            elif scalars.shape[1] > s_mean.shape[0]:
-                scalars = scalars[:, :s_mean.shape[0]]
-            
-            scalars_norm = (scalars - s_mean) / s_std
+            scalars_norm = torch.cat(selected_scalars, dim=1)
         else:
             scalars_norm = torch.zeros(batch_size, 0, device=self.device)
         
