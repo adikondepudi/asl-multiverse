@@ -43,3 +43,4 @@ __pycache__/
 # Ignore Data files that aren't for the dashboard
 *.npy
 *.nii.gz
+hpc_ablation_jobs/*/validation_results/*.md
