@@ -105,27 +105,72 @@ EXPERIMENTS = [
 ]
 
 # Base Config (shared across all experiments)
+# CRITICAL FIXES APPLIED: Match production hyperparameters for valid ablation comparisons
 BASE_CONFIG = {
     "training": {
         "model_class_name": "DisentangledASLNet",
         "dropout_rate": 0.1,
         "weight_decay": 0.0001,
-        "learning_rate": 0.0003,
+        
+        # --- FIX 1: LOWER LEARNING RATE ---
+        # Was 0.0003. Changed to 5e-5 to match production fine-tuning stability.
+        # High LR during fine-tuning causes catastrophic forgetting of Stage 1 encoder.
+        "learning_rate": 0.00005,
+        
+        # --- FIX 2: ADD MSE WEIGHT ---
+        # Crucial for convergence. Forces model to predict accurate means,
+        # not just "safely vague" predictions with high variance.
+        "mse_weight": 50.0,
+        
+        # --- FIX 3: ADD LOG-VAR REGULARIZATION ---
+        # Prevents uncertainty explosion/collapse during training.
+        "log_var_reg_lambda": 0.05,
+        
+        # --- FIX 4: ADD LOG-VAR BOUNDS (match production) ---
+        "log_var_cbf_min": -3.0,
+        "log_var_cbf_max": 7.0,
+        "log_var_att_min": -3.0,
+        "log_var_att_max": 14.0,
+        
         "batch_size": 4096,
-        "n_ensembles": 1,
-        "n_epochs": 50,
+        
+        # --- FIX 5: INCREASE ENSEMBLES (Statistical Significance) ---
+        # Was 1. Increased to 3 for statistically bulletproof comparisons.
+        # A single run might get lucky/unlucky with random seed.
+        "n_ensembles": 3,
+        
+        # --- FIX 6: INCREASE EPOCHS (Deep Convergence) ---
+        # Was 50. With lower LR, model learns slower but better.
+        "n_epochs": 100,
+        
         "validation_steps_per_epoch": 25,
-        "early_stopping_patience": 10,
+        
+        # --- FIX 7: INCREASE PATIENCE (Overcome Plateaus) ---
+        # Was 10. Give model time to overcome learning plateaus.
+        "early_stopping_patience": 20,
         "early_stopping_min_delta": 0.0,
+        
         "norm_type": "batch",
         "transformer_d_model_focused": 32,
         "transformer_nhead_model": 4,
         "transformer_nlayers_model": 2
     },
+    
+    # --- FIX 8: EXPLICIT FINE-TUNING CONFIG ---
+    "fine_tuning": {
+        "enabled": True,
+        "encoder_lr_factor": 20.0  # Encoder LR = learning_rate / 20
+    },
+    
     "data": {
         "use_offline_dataset": True,
         "offline_dataset_path": "asl_offline_dataset_10M_baseline_v1",
-        "num_samples_to_load": 2000000,
+        
+        # --- FIX 9: INCREASE DATA VOLUME (Generalization) ---
+        # Was 2M. "Robust" models with drift/physio noise need more examples.
+        # You have 10M generated, use more of it.
+        "num_samples_to_load": 5000000,
+        
         "pld_values": [500, 1000, 1500, 2000, 2500, 3000]
     },
     "simulation": {
@@ -137,9 +182,13 @@ BASE_CONFIG = {
         "alpha_VSASL": 0.56,
         "pld_values": [500, 1000, 1500, 2000, 2500, 3000]
     },
-    # NEW: Configurable noise parameters for ablation studies
+    # Configurable noise parameters for ablation studies
     "noise_config": {
-        "snr_range": [1.5, 10.0],
+        # --- FIX 10: WIDEN SNR RANGE (Stress Testing) ---
+        # Was [1.5, 10.0]. Clinical data has "hero" scans (SNR 20+) and disasters.
+        # Wider range helps model interpolate better.
+        "snr_range": [1.0, 15.0],
+        
         "physio_amp_range": [0.05, 0.15],
         "physio_freq_range": [0.5, 2.0],
         "drift_range": [-0.02, 0.02],
