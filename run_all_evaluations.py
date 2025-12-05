@@ -21,6 +21,7 @@ import warnings
 from enhanced_asl_network import DisentangledASLNet
 from predict_on_invivo import batch_predict_nn, fit_ls_robust
 from prepare_invivo_data import find_and_sort_files_by_pld
+from feature_registry import FeatureRegistry, validate_norm_stats
 
 # --- Helper Functions ---
 

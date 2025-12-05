@@ -14,6 +14,7 @@ from joblib import Parallel, delayed
 from enhanced_asl_network import DisentangledASLNet
 from multiverse_functions import fit_PCVSASL_misMatchPLD_vectInit_pep
 from utils import engineer_signal_features, get_grid_search_initial_guess, process_signals_dynamic
+from feature_registry import FeatureRegistry, validate_signals, validate_norm_stats
 
 def denormalize_predictions(cbf_norm, att_norm, cbf_log_var_norm, att_log_var_norm, norm_stats):
     """Applies de-normalization to all NN outputs, including uncertainty."""
@@ -61,7 +62,12 @@ def batch_predict_nn(signals_masked: np.ndarray, subject_plds: np.ndarray, model
         resampled_signals[:, target_indices + num_model_plds] = signals_masked[:, source_indices + num_subject_plds]
     
     # Build processing config for dynamic feature selection
-    active_features = config.get('active_features', ['mean', 'std', 'peak', 't1_artery'])
+    # DEFENSIVE: Require active_features from config - no silent defaults
+    active_features = config.get('active_features')
+    if active_features is None:
+        print("[WARNING] Config missing 'active_features'. Using detected scalar count for legacy compatibility.")
+        active_features = ['mean', 'std', 'peak', 't1_artery']  # Legacy fallback
+    
     processing_config = {
         'pld_values': model_plds_list,
         'active_features': active_features

@@ -137,6 +137,15 @@ BASE_CONFIG = {
         "alpha_VSASL": 0.56,
         "pld_values": [500, 1000, 1500, 2000, 2500, 3000]
     },
+    # NEW: Configurable noise parameters for ablation studies
+    "noise_config": {
+        "snr_range": [1.5, 10.0],
+        "physio_amp_range": [0.05, 0.15],
+        "physio_freq_range": [0.5, 2.0],
+        "drift_range": [-0.02, 0.02],
+        "spike_probability": 0.05,
+        "spike_magnitude_range": [2.0, 5.0]
+    },
     "wandb": {
         "wandb_project": "asl-ablation-study",
         "wandb_entity": "adikondepudi"

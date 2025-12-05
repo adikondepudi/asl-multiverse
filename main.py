@@ -24,6 +24,7 @@ from asl_simulation import ASLParameters
 from enhanced_simulation import RealisticASLSimulator
 from asl_trainer import EnhancedASLTrainer, FastTensorDataLoader
 from utils import ParallelStreamingStatsCalculator, process_signals_dynamic
+from feature_registry import FeatureRegistry, FeatureConfigError
 
 script_logger = logging.getLogger(__name__)
 
@@ -260,15 +261,9 @@ def run_comprehensive_asl_research(config: ResearchConfig, stage: int, output_di
 
     val_loader = FastTensorDataLoader(val_signals_gpu, val_targets_gpu, batch_size=config.batch_size, shuffle=False)
 
-    # Calculate dynamic number of scalar features based on active_features config
-    # Each feature adds 2 scalars (one per modality) except t1_artery and z_coord which add 1
+    # Use FeatureRegistry for dynamic scalar dimension calculation (SINGLE SOURCE OF TRUTH)
     active_feats = config.active_features
-    num_scalar_features_dynamic = 0
-    for feat in active_feats:
-        if feat in ['mean', 'std', 'ttp', 'com', 'peak']:
-            num_scalar_features_dynamic += 2  # One per modality
-        elif feat in ['t1_artery', 'z_coord']:
-            num_scalar_features_dynamic += 1
+    num_scalar_features_dynamic = FeatureRegistry.compute_scalar_dim(active_feats)
     
     script_logger.info(f"Active features: {active_feats} -> {num_scalar_features_dynamic} scalar dimensions")
     
@@ -354,6 +349,19 @@ if __name__ == "__main__":
                     apply_yaml_to_dataclass(value, config_object)
     
     apply_yaml_to_dataclass(config_from_yaml, config_obj)
+    
+    # DEFENSIVE: Validate config before any processing
+    try:
+        FeatureRegistry.validate_active_features(config_obj.active_features)
+        FeatureRegistry.validate_noise_components(config_obj.data_noise_components)
+        FeatureRegistry.validate_plds(config_obj.pld_values)
+        FeatureRegistry.validate_encoder_type(config_obj.encoder_type)
+        script_logger.info(f"Config validated: features={config_obj.active_features}, "
+                          f"noise={config_obj.data_noise_components}, "
+                          f"encoder={config_obj.encoder_type}")
+    except FeatureConfigError as e:
+        script_logger.error(f"CONFIG VALIDATION FAILED: {e}")
+        sys.exit(1)
     
     if args.output_dir: output_path = Path(args.output_dir)
     else: output_path = Path(f'comprehensive_results/{args.run_name if args.run_name else "run"}_{datetime.now().strftime("%Y%m%d_%H%M%S")}')

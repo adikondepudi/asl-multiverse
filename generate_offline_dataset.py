@@ -91,22 +91,32 @@ def generate_and_save_chunk(args):
     return len(signals_noisy_chunk)
 
 if __name__ == '__main__':
+    # Import FeatureRegistry for default values
+    from feature_registry import FeatureRegistry
+    
     parser = argparse.ArgumentParser(description="Generate a large offline dataset for ASL training.")
     parser.add_argument("output_dir", type=str, help="Directory to save the dataset chunks.")
     parser.add_argument("--total_samples", type=int, default=10_000_000, help="Total number of samples to generate.")
     parser.add_argument("--chunk_size", type=int, default=25_000, help="Number of samples per output file.")
+    parser.add_argument("--pld-values", type=int, nargs='+', default=None,
+                        help="PLD values in ms. Default: 500 1000 1500 2000 2500 3000")
     args = parser.parse_args()
 
     output_path = Path(args.output_dir)
     output_path.mkdir(parents=True, exist_ok=True)
     
     num_chunks = args.total_samples // args.chunk_size
-    plds_np = np.arange(500, 3001, 500)
     
-    sim_config = {
-        'T1_artery': 1850.0, 'T_tau': 1800.0, 'alpha_PCASL': 0.85, 'alpha_VSASL': 0.56,
-        'alpha_BS1': 1.0, 'T2_factor': 1.0
-    }
+    # Use CLI PLDs or FeatureRegistry default (no more hardcoding)
+    if args.pld_values is not None:
+        plds_np = np.array(args.pld_values)
+    else:
+        plds_np = np.array(FeatureRegistry.DEFAULT_PLDS)
+    
+    print(f"Using PLDs: {plds_np}")
+    
+    # Use FeatureRegistry default physics
+    sim_config = FeatureRegistry.DEFAULT_PHYSICS.copy()
     
     worker_args = [(i, args.chunk_size, plds_np, output_path, sim_config) for i in range(num_chunks)]
     

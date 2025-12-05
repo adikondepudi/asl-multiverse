@@ -29,6 +29,7 @@ try:
     from enhanced_asl_network import DisentangledASLNet
     from utils import engineer_signal_features, process_signals_dynamic, get_grid_search_initial_guess
     from multiverse_functions import fit_PCVSASL_misMatchPLD_vectInit_pep
+    from feature_registry import FeatureRegistry, validate_signals, validate_norm_stats
     print("--- [DEBUG] Custom ASL modules imported successfully. ---")
 except ImportError as e:
     print(f"!!! [CRITICAL ERROR] Could not import project files: {e}")
@@ -62,33 +63,53 @@ class ASLValidator:
         else:
             self.device = torch.device('cpu')
         
-        # 1. Load Params
-        self.plds = np.array([500, 1000, 1500, 2000, 2500, 3000], dtype=np.float64)
+        # 1. Load Research Config FIRST (needed for PLDs and features)
+        config_path = self.run_dir / 'research_config.json'
+        if config_path.exists():
+            with open(config_path, 'r') as f:
+                self.config = json.load(f)
+            logger.info(f"Loaded research_config.json")
+        else:
+            logger.error(f"CRITICAL: research_config.json not found in {self.run_dir}. Cannot proceed.")
+            sys.exit(1)
+        
+        # 2. Extract PLDs from config (NO HARDCODING)
+        pld_values = self.config.get('pld_values')
+        if pld_values is None:
+            logger.error("Config missing 'pld_values'. Cannot proceed.")
+            sys.exit(1)
+        self.plds = np.array(pld_values, dtype=np.float64)
+        logger.info(f"Using PLDs from config: {self.plds}")
+        
+        # 3. Validate active_features exists (NO DEFAULTS - must match training)
+        self.active_features = self.config.get('active_features')
+        if self.active_features is None:
+            logger.error("Config missing 'active_features'. Cannot proceed.")
+            sys.exit(1)
+        FeatureRegistry.validate_active_features(self.active_features)
+        logger.info(f"Using active_features from config: {self.active_features}")
+        
+        # 4. Load physics params from config with defaults
         self.params = ASLParameters(
-            T1_artery=1850.0, T_tau=1800.0, 
-            alpha_PCASL=0.85, alpha_VSASL=0.56,
+            T1_artery=self.config.get('T1_artery', 1850.0),
+            T_tau=self.config.get('T_tau', 1800.0), 
+            alpha_PCASL=self.config.get('alpha_PCASL', 0.85),
+            alpha_VSASL=self.config.get('alpha_VSASL', 0.56),
             TR_PCASL=4000.0, TR_VSASL=3936.0
         )
         self.simulator = RealisticASLSimulator(params=self.params)
         
-        # 2. Load Normalization Stats
+        # 5. Load Normalization Stats
         norm_stats_path = self.run_dir / 'norm_stats.json'
         if norm_stats_path.exists():
             logger.info(f"Loading normalization stats from {norm_stats_path.name}")
             with open(norm_stats_path, 'r') as f:
                 self.norm_stats = json.load(f)
+            # Validate norm_stats
+            validate_norm_stats(self.norm_stats, context="ASLValidator init")
         else:
             logger.error(f"Could not find norm_stats.json in {self.run_dir}")
             sys.exit(1)
-
-        # 3. Load Research Config (CRITICAL for MoE)
-        config_path = self.run_dir / 'research_config.json'
-        if config_path.exists():
-            with open(config_path, 'r') as f:
-                self.config = json.load(f)
-        else:
-            logger.warning("research_config.json not found. Using default architecture.")
-            self.config = {}
 
         # 4. Load Ensemble Models
         self.models = self._load_ensemble()
@@ -202,9 +223,6 @@ class ASLValidator:
         moe_config = self.config.get('moe', None)
         encoder_type = self.config.get('encoder_type', 'physics_processor')  # <-- NEW
         
-        # Input size is dynamically determined from checkpoint - scalars are auto-detected
-        input_size = len(self.plds) * 2 + self.detected_scalar_features
-
         # --- AUTO-DETECT NUM_SCALAR_FEATURES ---
         # Peek at the first model to find the input dimension of the FiLM layer
         try:
@@ -220,6 +238,9 @@ class ASLValidator:
         except Exception as e:
             logger.warning(f"Could not auto-detect scalar features: {e}. Defaulting to norm_stats + 1.")
             self.detected_scalar_features = len(self.norm_stats['scalar_features_mean']) + 1
+
+        # Input size is dynamically determined from checkpoint - scalars are auto-detected
+        input_size = len(self.plds) * 2 + self.detected_scalar_features
 
         for mp in model_files:
             print(f"   ... Loading {mp.name}")
@@ -269,11 +290,10 @@ class ASLValidator:
     def run_nn_inference(self, signals, t1_values):
         n_plds = len(self.plds)
         
-        # Build processing config from loaded research config
-        active_features = self.config.get('active_features', ['mean', 'std', 'peak', 't1_artery'])
+        # Use active_features from config (validated in __init__)
         processing_config = {
             'pld_values': list(self.plds.astype(int)),
-            'active_features': active_features
+            'active_features': self.active_features  # Use validated config, no defaults
         }
         
         t1_input = t1_values.reshape(-1, 1).astype(np.float32)

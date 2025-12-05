@@ -13,6 +13,7 @@ from pathlib import Path
 
 from enhanced_asl_network import CustomLoss, DisentangledASLNet
 from utils import engineer_signal_features_torch
+from feature_registry import FeatureRegistry
 
 import logging
 logger = logging.getLogger(__name__)
@@ -65,8 +66,19 @@ class EnhancedASLTrainer:
         # NEW: Ablation Study Configs
         self.active_features = model_config.get('active_features', ['mean', 'std', 'peak', 't1_artery'])
         self.data_noise_components = model_config.get('data_noise_components', ['thermal'])
+        
+        # NEW: Configurable noise parameters (no more magic numbers)
+        noise_config = model_config.get('noise_config', {})
+        self.noise_snr_range = noise_config.get('snr_range', [1.5, 10.0])
+        self.noise_physio_amp_range = noise_config.get('physio_amp_range', [0.05, 0.15])
+        self.noise_physio_freq_range = noise_config.get('physio_freq_range', [0.5, 2.0])
+        self.noise_drift_range = noise_config.get('drift_range', [-0.02, 0.02])
+        self.noise_spike_prob = noise_config.get('spike_probability', 0.05)
+        self.noise_spike_magnitude_range = noise_config.get('spike_magnitude_range', [2.0, 5.0])
+        
         logger.info(f"Ablation Config - Active Features: {self.active_features}")
         logger.info(f"Ablation Config - Noise Components: {self.data_noise_components}")
+        logger.info(f"Ablation Config - SNR Range: {self.noise_snr_range}")
         
         logger.info("Initializing models (Float32)...")
         self.models = [model_class(**model_config).to(self.device) for _ in range(n_ensembles)]
@@ -141,8 +153,9 @@ class EnhancedASLTrainer:
         batch_size = raw_signals.shape[0]
         n_plds = raw_signals.shape[1] // 2
         
-        # ========== 1. MODULAR NOISE GENERATION ==========
-        current_snr = torch.empty(batch_size, 1, device=self.device).uniform_(1.5, 10.0)
+        # ========== 1. MODULAR NOISE GENERATION (Configurable parameters) ==========
+        snr_min, snr_max = self.noise_snr_range
+        current_snr = torch.empty(batch_size, 1, device=self.device).uniform_(snr_min, snr_max)
         noise_sigma = (self.ref_signal_gpu / current_snr)
         
         # Start with thermal noise (always present as base)
@@ -154,24 +167,27 @@ class EnhancedASLTrainer:
         
         if 'physio' in self.data_noise_components:
             # Simulate cardiac/respiratory oscillation (low-frequency sinusoid)
-            # Amplitude ~5-15% of signal
-            physio_amp = torch.empty(batch_size, 1, device=self.device).uniform_(0.05, 0.15)
-            physio_freq = torch.empty(batch_size, 1, device=self.device).uniform_(0.5, 2.0)  # Hz
+            amp_min, amp_max = self.noise_physio_amp_range
+            freq_min, freq_max = self.noise_physio_freq_range
+            physio_amp = torch.empty(batch_size, 1, device=self.device).uniform_(amp_min, amp_max)
+            physio_freq = torch.empty(batch_size, 1, device=self.device).uniform_(freq_min, freq_max)
             t = torch.arange(n_plds * 2, device=self.device).float().unsqueeze(0)
             physio_noise = physio_amp * noise_sigma * torch.sin(2 * 3.14159 * physio_freq * t / (n_plds * 2))
             total_noise += physio_noise
         
         if 'drift' in self.data_noise_components:
             # Baseline drift (linear trend)
-            drift_slope = torch.empty(batch_size, 1, device=self.device).uniform_(-0.02, 0.02)
+            drift_min, drift_max = self.noise_drift_range
+            drift_slope = torch.empty(batch_size, 1, device=self.device).uniform_(drift_min, drift_max)
             t = torch.arange(n_plds * 2, device=self.device).float().unsqueeze(0) / (n_plds * 2)
             drift_noise = drift_slope * noise_sigma * t
             total_noise += drift_noise
         
         if 'spikes' in self.data_noise_components:
-            # Random motion spikes (affects ~5% of samples)
-            spike_mask = (torch.rand(batch_size, n_plds * 2, device=self.device) < 0.05).float()
-            spike_magnitude = torch.empty(batch_size, 1, device=self.device).uniform_(2.0, 5.0)
+            # Random motion spikes
+            spike_mask = (torch.rand(batch_size, n_plds * 2, device=self.device) < self.noise_spike_prob).float()
+            mag_min, mag_max = self.noise_spike_magnitude_range
+            spike_magnitude = torch.empty(batch_size, 1, device=self.device).uniform_(mag_min, mag_max)
             spike_noise = spike_mask * spike_magnitude * noise_sigma
             total_noise += spike_noise
         
