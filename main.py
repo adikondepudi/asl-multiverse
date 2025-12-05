@@ -23,7 +23,7 @@ from enhanced_asl_network import DisentangledASLNet, PhysicsInformedASLProcessor
 from asl_simulation import ASLParameters
 from enhanced_simulation import RealisticASLSimulator
 from asl_trainer import EnhancedASLTrainer, FastTensorDataLoader
-from utils import ParallelStreamingStatsCalculator, engineer_signal_features, process_signals_dynamic
+from utils import ParallelStreamingStatsCalculator, process_signals_dynamic
 
 script_logger = logging.getLogger(__name__)
 
@@ -204,21 +204,18 @@ def run_comprehensive_asl_research(config: ResearchConfig, stage: int, output_di
     )
     
     val_signals_noisy_raw = validation_data_dict['signals']
-    val_features_eng = engineer_signal_features(val_signals_noisy_raw, num_plds)
-    val_signals_concat = np.concatenate([val_signals_noisy_raw, val_features_eng], axis=1)
     
     # Extract T1 for validation
     val_t1_list_input = []
-    val_z_list_input = []
     for params in validation_data_dict['perturbed_params']:
         val_t1_list_input.append(params['t1_artery'])
-        # Validation dataset 'parameters' stores slice idx at index 3
     val_z_input_np = validation_data_dict['parameters'][:, 3:4].astype(np.float32)
     val_t1_input_np = np.array(val_t1_list_input).reshape(-1, 1).astype(np.float32)
 
-    # Build config dict for dynamic processing
+    # Build config dict for dynamic processing - pass RAW signals, not pre-concatenated
+    # process_signals_dynamic internally calculates features based on active_features config
     processing_config = {'pld_values': config.pld_values, 'active_features': config.active_features}
-    val_signals_processed = process_signals_dynamic(val_signals_concat, norm_stats, processing_config, t1_values=val_t1_input_np, z_values=val_z_input_np)
+    val_signals_processed = process_signals_dynamic(val_signals_noisy_raw, norm_stats, processing_config, t1_values=val_t1_input_np, z_values=val_z_input_np)
     
     val_signals_gpu = torch.from_numpy(val_signals_processed.astype(np.float32)).to(device)
 
@@ -263,10 +260,6 @@ def run_comprehensive_asl_research(config: ResearchConfig, stage: int, output_di
 
     val_loader = FastTensorDataLoader(val_signals_gpu, val_targets_gpu, batch_size=config.batch_size, shuffle=False)
 
-    base_input_size_nn = num_plds * 2 + 8
-    model_creation_config = asdict(config)
-    model_mode = 'denoising' if stage == 1 else 'regression'
-    
     # Calculate dynamic number of scalar features based on active_features config
     # Each feature adds 2 scalars (one per modality) except t1_artery and z_coord which add 1
     active_feats = config.active_features
@@ -278,6 +271,11 @@ def run_comprehensive_asl_research(config: ResearchConfig, stage: int, output_di
             num_scalar_features_dynamic += 1
     
     script_logger.info(f"Active features: {active_feats} -> {num_scalar_features_dynamic} scalar dimensions")
+    
+    # Use dynamic scalar count instead of hardcoded value
+    base_input_size_nn = num_plds * 2 + num_scalar_features_dynamic
+    model_creation_config = asdict(config)
+    model_mode = 'denoising' if stage == 1 else 'regression'
     
     def create_model_closure(**kwargs): 
         return DisentangledASLNet(

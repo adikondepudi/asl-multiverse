@@ -27,7 +27,7 @@ try:
     from asl_simulation import ASLParameters
     from enhanced_simulation import RealisticASLSimulator
     from enhanced_asl_network import DisentangledASLNet
-    from utils import engineer_signal_features, process_signals_cpu, get_grid_search_initial_guess
+    from utils import engineer_signal_features, process_signals_dynamic, get_grid_search_initial_guess
     from multiverse_functions import fit_PCVSASL_misMatchPLD_vectInit_pep
     print("--- [DEBUG] Custom ASL modules imported successfully. ---")
 except ImportError as e:
@@ -202,7 +202,8 @@ class ASLValidator:
         moe_config = self.config.get('moe', None)
         encoder_type = self.config.get('encoder_type', 'physics_processor')  # <-- NEW
         
-        input_size = len(self.plds) * 2 + 8 
+        # Input size is dynamically determined from checkpoint - scalars are auto-detected
+        input_size = len(self.plds) * 2 + self.detected_scalar_features
 
         # --- AUTO-DETECT NUM_SCALAR_FEATURES ---
         # Peek at the first model to find the input dimension of the FiLM layer
@@ -267,27 +268,18 @@ class ASLValidator:
 
     def run_nn_inference(self, signals, t1_values):
         n_plds = len(self.plds)
-        eng_features = engineer_signal_features(signals, n_plds)
         
-        # --- FIX: Truncate extra features (e.g. Peak Height) if norm_stats is from older run ---
-        # norm_stats includes 4 basic stats (mu/sig per modality) + N engineered features.
-        expected_total = len(self.norm_stats['scalar_features_mean'])
-        expected_eng = expected_total - 4
-        
-        if eng_features.shape[1] > expected_eng:
-            eng_features = eng_features[:, :expected_eng]
-            
-        signals_concat = np.concatenate([signals, eng_features], axis=1)
+        # Build processing config from loaded research config
+        active_features = self.config.get('active_features', ['mean', 'std', 'peak', 't1_artery'])
+        processing_config = {
+            'pld_values': list(self.plds.astype(int)),
+            'active_features': active_features
+        }
         
         t1_input = t1_values.reshape(-1, 1).astype(np.float32)
         
-        # Logic to match inputs to detected model size
-        base_feats = len(self.norm_stats['scalar_features_mean'])
-        
-        # If model expects base features only, don't pass T1
-        pass_t1 = t1_input if (self.detected_scalar_features > base_feats) else None
-        
-        processed = process_signals_cpu(signals_concat, self.norm_stats, n_plds, t1_values=pass_t1)
+        # Use dynamic feature processing - pass raw signals only
+        processed = process_signals_dynamic(signals, self.norm_stats, processing_config, t1_values=t1_input)
         
         inputs_tensor = torch.from_numpy(processed.astype(np.float32)).to(self.device)
         

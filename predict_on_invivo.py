@@ -13,7 +13,7 @@ from joblib import Parallel, delayed
 
 from enhanced_asl_network import DisentangledASLNet
 from multiverse_functions import fit_PCVSASL_misMatchPLD_vectInit_pep
-from utils import engineer_signal_features, get_grid_search_initial_guess, process_signals_cpu
+from utils import engineer_signal_features, get_grid_search_initial_guess, process_signals_dynamic
 
 def denormalize_predictions(cbf_norm, att_norm, cbf_log_var_norm, att_log_var_norm, norm_stats):
     """Applies de-normalization to all NN outputs, including uncertainty."""
@@ -37,7 +37,7 @@ def denormalize_predictions(cbf_norm, att_norm, cbf_log_var_norm, att_log_var_no
 
 def batch_predict_nn(signals_masked: np.ndarray, subject_plds: np.ndarray, models: List, config: Dict, norm_stats: Dict, device: torch.device, is_disentangled: bool, expected_scalars: int) -> Tuple:
     """
-    Runs batched inference, handling PLD resampling, feature engineering, and legacy feature truncation.
+    Runs batched inference with dynamic feature processing based on active_features config.
     """
     model_plds_list = config['pld_values']
     num_model_plds = len(model_plds_list)
@@ -60,23 +60,25 @@ def batch_predict_nn(signals_masked: np.ndarray, subject_plds: np.ndarray, model
         resampled_signals[:, target_indices] = signals_masked[:, source_indices]
         resampled_signals[:, target_indices + num_model_plds] = signals_masked[:, source_indices + num_subject_plds]
     
-    # Feature Engineering
-    eng_feats = engineer_signal_features(resampled_signals, num_model_plds)
-    unnormalized_input = np.concatenate([resampled_signals, eng_feats], axis=1)
-
+    # Build processing config for dynamic feature selection
+    active_features = config.get('active_features', ['mean', 'std', 'peak', 't1_artery'])
+    processing_config = {
+        'pld_values': model_plds_list,
+        'active_features': active_features
+    }
+    
     # T1 Injection
     t1_val = config.get('T1_artery', 1850.0)
-    t1_values = np.full((unnormalized_input.shape[0], 1), t1_val, dtype=np.float32)
+    t1_values = np.full((resampled_signals.shape[0], 1), t1_val, dtype=np.float32)
 
-    # Normalize
-    norm_input = process_signals_cpu(unnormalized_input, norm_stats, num_model_plds, t1_values=t1_values)
+    # Use dynamic feature processing - pass raw resampled signals
+    norm_input = process_signals_dynamic(resampled_signals, norm_stats, processing_config, t1_values=t1_values)
     
-    # Feature Compatibility Check (Legacy Mode)
+    # Feature Compatibility Check (Legacy Mode) - truncate if model expects fewer features
     shape_dim = num_model_plds * 2
     current_scalar_dim = norm_input.shape[1] - shape_dim
     
     if current_scalar_dim > expected_scalars:
-        # Truncate features if the current code generates more than the loaded model expects
         scalars_only = norm_input[:, shape_dim:]
         scalars_truncated = scalars_only[:, :expected_scalars]
         norm_input = np.concatenate([norm_input[:, :shape_dim], scalars_truncated], axis=1)
@@ -180,7 +182,9 @@ def load_artifacts(model_root: Path) -> tuple:
     
     is_disentangled = 'Disentangled' in config.get('model_class_name', '')
     model_class = DisentangledASLNet if is_disentangled else EnhancedASLNet
-    base_input_size = num_plds * 2 + 4 + (1 if is_disentangled else 0)
+    
+    # Input size is dynamically determined from checkpoint - scalars are auto-detected
+    # Note: base_input_size is only used for model construction, not data processing
 
     # Automatically detect expected input size from the checkpoint
     sample_checkpoint = list(models_dir.glob('ensemble_model_*.pt'))[0]
@@ -196,6 +200,8 @@ def load_artifacts(model_root: Path) -> tuple:
     print(f"  --> Detected model expectation: {expected_scalars} scalar features.")
 
     for model_path in models_dir.glob('ensemble_model_*.pt'):
+        # Calculate input_size dynamically from detected scalars
+        base_input_size = num_plds * 2 + expected_scalars
         model = model_class(mode='regression', input_size=base_input_size, num_scalar_features=expected_scalars, **config)
         try:
             model.load_state_dict(torch.load(model_path, map_location=torch.device('cpu')), strict=False)

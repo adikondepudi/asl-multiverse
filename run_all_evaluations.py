@@ -50,7 +50,8 @@ def load_artifacts_for_eval(model_root: Path) -> tuple:
     
     is_disentangled = 'Disentangled' in config.get('model_class_name', '')
     model_class = DisentangledASLNet if is_disentangled else EnhancedASLNet
-    base_input_size = num_plds * 2 + 4 + (1 if is_disentangled else 0)
+    
+    # Input size is dynamically determined from checkpoint - scalars are auto-detected
     
     # --- ROBUST LOADING LOGIC (Copied from predict_on_invivo.py) ---
     sample_checkpoint = list(models_dir.glob('ensemble_model_*.pt'))[0]
@@ -66,6 +67,8 @@ def load_artifacts_for_eval(model_root: Path) -> tuple:
     print(f"  --> Detected model expectation: {expected_scalars} scalar features.")
 
     for model_path in models_dir.glob('ensemble_model_*.pt'):
+        # Calculate input_size dynamically from detected scalars
+        base_input_size = num_plds * 2 + expected_scalars
         model = model_class(mode='regression', input_size=base_input_size, num_scalar_features=expected_scalars, **config)
         # strict=False is important for potential backward compatibility experiments
         try:
