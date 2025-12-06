@@ -106,6 +106,12 @@ def preprocess_subject(subject_dir: Path, output_root: Path):
         low_snr_signals = np.concatenate([pcasl_low_flat, vsasl_low_flat], axis=1)
         high_snr_signals = np.concatenate([pcasl_high_flat, vsasl_high_flat], axis=1)
 
+        # Create Z-coordinate map (Enhancement C)
+        # Shape matches flattened brain mask. Contains slice index (0..Z-1)
+        zs = np.indices(brain_mask.shape)[2]
+        z_coords_masked = zs[brain_mask].astype(np.float32).reshape(-1, 1)
+        np.save(subject_output_dir / 'z_coords.npy', z_coords_masked)
+
         first_img = nib.load(pcasl_files[0])
         subject_plds = [int(re.search(r'_(\d+)', p.name).group(1)) for p in pcasl_files]
 

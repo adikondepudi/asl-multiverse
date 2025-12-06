@@ -1,50 +1,55 @@
 # FILE: config/v5_stage2_8hr_prod.yaml
-# TUNED 8-hour configuration for Stage 2.
-# Implements discriminative fine-tuning and stronger regularization to prevent overfitting.
-
 training:
   model_class_name: "DisentangledASLNet"
   encoder_type: "physics_processor"
   
-  hidden_sizes: [512, 256, 128]
-  dropout_rate: 0.15          # INCREASED: More regularization for the head.
-  weight_decay: 0.0001        # INCREASED: More regularization for the head.
+  hidden_sizes: [128, 64, 32]
+  dropout_rate: 0.2
+  weight_decay: 0.0001
   log_var_reg_lambda: 0.05
+  
+  # CRITICAL: Force accuracy over uncertainty
+  mse_weight: 50.0
 
-  learning_rate: 0.00005      # This is now the LR for the HEAD only.
-  batch_size: 8192
-  n_ensembles: 5
+  learning_rate: 0.00005      
+  batch_size: 4096
+  n_ensembles: 3
 
-  # STRATEGY: Fine-tune on a much larger dataset to prevent memorization.
-  n_epochs: 10
-  steps_per_epoch: 488 # 488 steps * 8192 batch_size = ~4M samples per epoch
-
-  validation_steps_per_epoch: 25
-  early_stopping_patience: 5
-  early_stopping_min_delta: 0.0005
+  # Force long training to learn hard noise distribution
+  n_epochs: 100
+  
+  validation_steps_per_epoch: 50
+  early_stopping_patience: 100 
+  early_stopping_min_delta: 0.0
 
   norm_type: "batch"
-  log_var_cbf_min: -5.0
+  
+  log_var_cbf_min: -3.0
   log_var_cbf_max: 7.0
-  log_var_att_min: -5.0
+  log_var_att_min: -3.0
   log_var_att_max: 14.0
+  
   transformer_d_model_focused: 32
   transformer_nhead_model: 4
   transformer_nlayers_model: 2
 
-# NEW SECTION: Controls the discriminative fine-tuning behavior
 fine_tuning:
   enabled: true
-  encoder_lr_factor: 20.0 # Encoder LR will be learning_rate / this factor
+  encoder_lr_factor: 20.0 
 
 moe:
   num_experts: 4
   gating_dropout_rate: 0.1
 
+ohem:
+  ohem_start_epoch: 999        
+  ohem_fraction: 1.0           
+  loss_clip_percentile: 1.0     
+
 data:
   use_offline_dataset: true
-  offline_dataset_path: "asl_offline_dataset_10M_v3"
-  num_samples_to_load: 4000000 # KEY CHANGE: Load 4M samples
+  offline_dataset_path: "asl_offline_dataset_10M_baseline_v1"
+  num_samples_to_load: 2000000 
   pld_values: [500, 1000, 1500, 2000, 2500, 3000]
 
 simulation:
@@ -56,5 +61,5 @@ simulation:
   alpha_VSASL: 0.56
 
 wandb:
-  wandb_project: "asl-multiverse-prod-v5"
+  wandb_project: "asl-multiverse-baseline-v1"
   wandb_entity: "adikondepudi"

@@ -9,36 +9,44 @@ import numba
 
 @numba.jit(nopython=True, cache=True)
 def _generate_vsasl_signal_jit(plds, att, cbf_ml_g_s, t1_artery, alpha2, T2_factor, t_sat_vs):
-    """JIT-compiled worker for VSASL signal generation, corrected with SIB model."""
+    """JIT-compiled worker for VSASL signal generation (SIMPLE MODEL)."""
     M0_b = 1.0
     lambda_blood = 0.90
     signal = np.zeros_like(plds, dtype=np.float64)
 
-    # Determine the initial magnetization of blood (SIB) based on the T_sat effect,
-    SIB = 1.0
-    if att > t_sat_vs:
-        # If ATT > T_sat, fresh blood has not arrived. The blood at the labeling
-        # location is still recovering from the initial saturation pulse.
-        # Its magnetization has recovered for a duration of t_sat_vs.
-        SIB = 1.0 - np.exp(-t_sat_vs / t1_artery)
-
     # Calculate the base signal assuming full initial magnetization (SIB=1.0)
-    # Condition 1: PLD <= ATT
+    # This loop directly implements Equations 4 & 5 from the main paper.
     for i in range(plds.shape[0]):
+        # Condition 1: PLD <= ATT (Equation 4, simplified)
         if plds[i] <= att:
             signal[i] = (2 * M0_b * cbf_ml_g_s * alpha2 / lambda_blood *
                          (plds[i] / 1000.0) *
                          np.exp(-plds[i] / t1_artery) *
                          T2_factor)
-        # Condition 2: PLD > ATT
+        # Condition 2: PLD > ATT (Equation 5, simplified)
         else:
             signal[i] = (2 * M0_b * cbf_ml_g_s * alpha2 / lambda_blood *
                          (att / 1000.0) *
                          np.exp(-plds[i] / t1_artery) *
                          T2_factor)
             
-    # Apply the SIB scaling factor to the entire calculated signal.
-    return signal * SIB
+    return signal
+
+@numba.jit(nopython=True, cache=True)
+def _generate_arterial_signal_jit(plds, att, aBV, t1_artery, alpha_bs_combined):
+    """JIT-compiled worker for Macrovascular (Arterial) signal."""
+    M0_b = 1.0
+    signal = np.zeros_like(plds, dtype=np.float64)
+    
+    # Arterial signal exists primarily when bolus is still in transit (PLD < ATT)
+    # Simplified macroscopic model: signal proportional to blood volume
+    for i in range(plds.shape[0]):
+        if plds[i] < att:
+            # Decay based on T1 of blood
+            signal[i] = (2 * M0_b * aBV * alpha_bs_combined * 
+                         np.exp(-plds[i] / t1_artery))
+            
+    return signal
 
 @numba.jit(nopython=True, cache=True)
 def _generate_pcasl_signal_jit(plds, att, cbf_ml_g_s, t1_artery, t_tau, alpha1, T2_factor):
@@ -124,6 +132,9 @@ class ASLSimulator:
                               att_values: np.ndarray, # Array of ATT values to simulate for
                               n_noise: int = 1000, # Number of noise realizations per ATT
                               tsnr: float = 5.0,
+                              # New optional physics parameters
+                              arterial_blood_volume: Optional[float] = 0.0,
+                              slice_index: Optional[int] = 0,
                               # Optional parameters to override self.params for this specific generation run
                               # This is useful if RealisticASLSimulator wants to pass perturbed params
                               cbf_val: Optional[float] = None,
@@ -131,7 +142,7 @@ class ASLSimulator:
                               t_tau_val: Optional[float] = None,
                               alpha_pcasl_val: Optional[float] = None,
                               alpha_vsasl_val: Optional[float] = None) -> Dict[str, np.ndarray]:
-        """Generate synthetic ASL data with realistic noise"""
+        """Generate synthetic ASL data with simple Gaussian noise."""
 
         # Use provided parameters or fall back to instance parameters
         current_cbf = cbf_val if cbf_val is not None else self.params.CBF
@@ -139,6 +150,16 @@ class ASLSimulator:
         current_t_tau = t_tau_val if t_tau_val is not None else self.params.T_tau
         current_alpha_pcasl = alpha_pcasl_val if alpha_pcasl_val is not None else self.params.alpha_PCASL
         current_alpha_vsasl = alpha_vsasl_val if alpha_vsasl_val is not None else self.params.alpha_VSASL
+
+        # Enhancement B: Slice-Dependent Background Suppression
+        # Assume ~45ms per slice readout delay. This relaxes the inversion recovery.
+        # Effective efficiency drops as we wait longer for the slice.
+        slice_time_offset = float(slice_index) * 45.0
+        bs_decay = np.exp(-slice_time_offset / 1000.0) # Simple T1 decay approx for the suppression
+        
+        # Modulate alphas
+        current_alpha_pcasl = current_alpha_pcasl * bs_decay
+        current_alpha_vsasl = current_alpha_vsasl * bs_decay
 
         # Reference signal level for noise calculation.
         # MUST be calculated using the FIXED, base parameters from self.params
@@ -161,8 +182,14 @@ class ASLSimulator:
         # Generate base signals and add noise
         for i, att in enumerate(att_values):
             # Generate clean signals using potentially overridden parameters
-            vsasl_sig = self._generate_vsasl_signal(plds, att, cbf_ml_100g_min=current_cbf, t1_artery=current_t1_artery, alpha_vsasl=current_alpha_vsasl)
-            pcasl_sig = self._generate_pcasl_signal(plds, att, cbf_ml_100g_min=current_cbf, t1_artery=current_t1_artery, t_tau=current_t_tau, alpha_pcasl=current_alpha_pcasl)
+            # Enhancement A: Add Arterial Component
+            art_sig = self._generate_arterial_signal(plds, att, arterial_blood_volume, current_t1_artery, current_alpha_pcasl)
+            
+            vsasl_tissue = self._generate_vsasl_signal(plds, att, cbf_ml_100g_min=current_cbf, t1_artery=current_t1_artery, alpha_vsasl=current_alpha_vsasl)
+            pcasl_tissue = self._generate_pcasl_signal(plds, att, cbf_ml_100g_min=current_cbf, t1_artery=current_t1_artery, t_tau=current_t_tau, alpha_pcasl=current_alpha_pcasl)
+            
+            vsasl_sig = vsasl_tissue # VSASL usually crushes arterial signal effectively
+            pcasl_sig = pcasl_tissue + art_sig
 
             # Add scaled noise
             for n in range(n_noise):
@@ -186,6 +213,11 @@ class ASLSimulator:
             cbf_ml_100g_min=ref_cbf, t1_artery=ref_t1_artery,
             t_tau=ref_t_tau, alpha_pcasl=ref_alpha_pcasl
         )[0]
+
+    def _generate_arterial_signal(self, plds: np.ndarray, att: float, aBV: float, t1_artery: float, alpha_pcasl: float) -> np.ndarray:
+        """Wrapper for JIT arterial signal."""
+        alpha_bs_combined = alpha_pcasl * (self.params.alpha_BS1**4)
+        return _generate_arterial_signal_jit(plds, att, aBV, t1_artery, alpha_bs_combined)
 
     def _generate_vsasl_signal(self, plds: np.ndarray, att: float,
                                cbf_ml_100g_min: float, t1_artery: float, alpha_vsasl: float) -> np.ndarray:

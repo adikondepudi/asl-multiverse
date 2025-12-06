@@ -1,6 +1,4 @@
 # predict_on_invivo.py
-# FINAL CORRECTED VERSION
-
 import torch
 import numpy as np
 import nibabel as nib
@@ -12,33 +10,11 @@ import sys
 from tqdm import tqdm
 from typing import Dict, List, Tuple
 from joblib import Parallel, delayed
-import multiprocessing
 
-# Import both model classes
 from enhanced_asl_network import DisentangledASLNet
 from multiverse_functions import fit_PCVSASL_misMatchPLD_vectInit_pep
-from utils import engineer_signal_features, get_grid_search_initial_guess
-
-def apply_normalization_vectorized(batch: np.ndarray, norm_stats: Dict, num_plds: int) -> np.ndarray:
-    """Applies normalization for the original EnhancedASLNet input format."""
-    raw_signal, features = batch[:, :num_plds*2], batch[:, num_plds*2:]
-    pcasl_raw, vsasl_raw = raw_signal[:, :num_plds], raw_signal[:, num_plds:]
-    
-    pcasl_norm = (pcasl_raw - norm_stats['pcasl_mean']) / (np.array(norm_stats['pcasl_std']) + 1e-6)
-    vsasl_norm = (vsasl_raw - norm_stats['vsasl_mean']) / (np.array(norm_stats['vsasl_std']) + 1e-6)
-    
-    return np.concatenate([pcasl_norm, vsasl_norm, features], axis=1)
-
-def apply_normalization_disentangled(batch: np.ndarray, norm_stats: Dict, num_plds: int) -> np.ndarray:
-    """Applies normalization for the new DisentangledASLNet input format."""
-    raw_signal, eng_features = batch[:, :num_plds*2], batch[:, num_plds*2:]
-    
-    amplitude = np.linalg.norm(raw_signal, axis=1, keepdims=True) + 1e-6
-    shape_vector = raw_signal / amplitude
-    
-    amplitude_norm = (amplitude - norm_stats['amplitude_mean']) / (norm_stats['amplitude_std'] + 1e-6)
-    
-    return np.concatenate([shape_vector, eng_features, amplitude_norm], axis=1)
+from utils import engineer_signal_features, get_grid_search_initial_guess, process_signals_dynamic
+from feature_registry import FeatureRegistry, validate_signals, validate_norm_stats
 
 def denormalize_predictions(cbf_norm, att_norm, cbf_log_var_norm, att_log_var_norm, norm_stats):
     """Applies de-normalization to all NN outputs, including uncertainty."""
@@ -50,7 +26,6 @@ def denormalize_predictions(cbf_norm, att_norm, cbf_log_var_norm, att_log_var_no
     
     cbf_std_denorm = None
     if cbf_log_var_norm is not None:
-        # Clamp log_var to prevent numerical overflow from exp()
         cbf_log_var_norm_clamped = np.clip(cbf_log_var_norm, -20, 20)
         cbf_std_denorm = np.exp(cbf_log_var_norm_clamped / 2.0) * y_std_cbf
 
@@ -61,9 +36,9 @@ def denormalize_predictions(cbf_norm, att_norm, cbf_log_var_norm, att_log_var_no
 
     return cbf_denorm, att_denorm, cbf_std_denorm, att_std_denorm
 
-def batch_predict_nn(signals_masked: np.ndarray, subject_plds: np.ndarray, models: List, config: Dict, norm_stats: Dict, device: torch.device, is_disentangled: bool) -> Tuple:
+def batch_predict_nn(signals_masked: np.ndarray, subject_plds: np.ndarray, models: List, config: Dict, norm_stats: Dict, device: torch.device, is_disentangled: bool, expected_scalars: int) -> Tuple:
     """
-    Runs batched inference, handling PLD resampling and feature engineering correctly.
+    Runs batched inference with dynamic feature processing based on active_features config.
     """
     model_plds_list = config['pld_values']
     num_model_plds = len(model_plds_list)
@@ -86,21 +61,40 @@ def batch_predict_nn(signals_masked: np.ndarray, subject_plds: np.ndarray, model
         resampled_signals[:, target_indices] = signals_masked[:, source_indices]
         resampled_signals[:, target_indices + num_model_plds] = signals_masked[:, source_indices + num_subject_plds]
     
-    eng_feats = engineer_signal_features(resampled_signals, num_model_plds)
+    # Build processing config for dynamic feature selection
+    # DEFENSIVE: Require active_features from config - no silent defaults
+    active_features = config.get('active_features')
+    if active_features is None:
+        print("[WARNING] Config missing 'active_features'. Using detected scalar count for legacy compatibility.")
+        active_features = ['mean', 'std', 'peak', 't1_artery']  # Legacy fallback
     
-    unnormalized_input = np.concatenate([resampled_signals, eng_feats], axis=1)
+    processing_config = {
+        'pld_values': model_plds_list,
+        'active_features': active_features
+    }
+    
+    # T1 Injection
+    t1_val = config.get('T1_artery', 1850.0)
+    t1_values = np.full((resampled_signals.shape[0], 1), t1_val, dtype=np.float32)
 
-    if is_disentangled:
-        norm_input = apply_normalization_disentangled(unnormalized_input, norm_stats, num_model_plds)
-    else:
-        norm_input = apply_normalization_vectorized(unnormalized_input, norm_stats, num_model_plds)
+    # Use dynamic feature processing - pass raw resampled signals
+    norm_input = process_signals_dynamic(resampled_signals, norm_stats, processing_config, t1_values=t1_values)
     
+    # Feature Compatibility Check (Legacy Mode) - truncate if model expects fewer features
+    shape_dim = num_model_plds * 2
+    current_scalar_dim = norm_input.shape[1] - shape_dim
+    
+    if current_scalar_dim > expected_scalars:
+        scalars_only = norm_input[:, shape_dim:]
+        scalars_truncated = scalars_only[:, :expected_scalars]
+        norm_input = np.concatenate([norm_input[:, :shape_dim], scalars_truncated], axis=1)
+            
     input_tensor = torch.FloatTensor(norm_input).to(device)
     
     with torch.no_grad():
         cbf_means, att_means, cbf_log_vars, att_log_vars = [], [], [], []
         batch_size = 8192
-        for i in tqdm(range(0, len(input_tensor), batch_size), desc="  NN Inference", leave=False, ncols=100):
+        for i in range(0, len(input_tensor), batch_size):
             batch_tensor = input_tensor[i:i+batch_size]
             
             with torch.amp.autocast(device_type=device.type, dtype=torch.bfloat16):
@@ -121,10 +115,16 @@ def batch_predict_nn(signals_masked: np.ndarray, subject_plds: np.ndarray, model
     cbf_log_var_ens = np.concatenate(cbf_log_vars, axis=0)
     att_log_var_ens = np.concatenate(att_log_vars, axis=0)
     
-    return denormalize_predictions(
+    # Denormalize and Clamp
+    cbf_denorm, att_denorm, cbf_std, att_std = denormalize_predictions(
         cbf_norm_ens.squeeze(), att_norm_ens.squeeze(),
         cbf_log_var_ens.squeeze(), att_log_var_ens.squeeze(), norm_stats
     )
+    
+    cbf_denorm = np.maximum(cbf_denorm, 0)
+    att_denorm = np.maximum(att_denorm, 0)
+    
+    return cbf_denorm, att_denorm, cbf_std, att_std
 
 def _fit_single_voxel_ls(signal_flat: np.ndarray, plds: np.ndarray, pldti: np.ndarray, ls_params: dict):
     try:
@@ -145,7 +145,7 @@ def fit_ls_robust(signals_masked: np.ndarray, plds: np.ndarray, config: Dict) ->
     results_arr = np.array(results)
     return results_arr[:, 0], results_arr[:, 1]
 
-def predict_subject(subject_dir: Path, models: List, config: Dict, norm_stats: Dict, device: torch.device, output_root: Path, is_disentangled: bool):
+def predict_subject(subject_dir: Path, models: List, config: Dict, norm_stats: Dict, device: torch.device, output_root: Path, is_disentangled: bool, expected_scalars: int):
     subject_id = subject_dir.name
     subject_output_dir = output_root / subject_id
     subject_output_dir.mkdir(parents=True, exist_ok=True)
@@ -159,7 +159,7 @@ def predict_subject(subject_dir: Path, models: List, config: Dict, norm_stats: D
     timings = {}
     
     start_time_nn = time.time()
-    nn_results = batch_predict_nn(low_snr_masked, plds, models, config, norm_stats, device, is_disentangled)
+    nn_results = batch_predict_nn(low_snr_masked, plds, models, config, norm_stats, device, is_disentangled, expected_scalars)
     timings['nn_total_s'] = time.time() - start_time_nn
     
     start_time_ls = time.time()
@@ -177,7 +177,6 @@ def predict_subject(subject_dir: Path, models: List, config: Dict, norm_stats: D
         full_map = np.zeros(brain_mask_flat.shape, dtype=np.float32)
         full_map[brain_mask_flat] = data_masked
         nib.save(nib.Nifti1Image(full_map.reshape(dims), affine, header), subject_output_dir / f'{name}.nii.gz')
-    tqdm.write(f"  --> Saved maps & timings for {subject_id}")
 
 def load_artifacts(model_root: Path) -> tuple:
     print(f"--> Loading artifacts from: {model_root}")
@@ -188,23 +187,38 @@ def load_artifacts(model_root: Path) -> tuple:
     num_plds = len(config['pld_values'])
     
     is_disentangled = 'Disentangled' in config.get('model_class_name', '')
-    if is_disentangled:
-        print("  --> Detected DisentangledASLNet model type.")
-        model_class = DisentangledASLNet
-        base_input_size = num_plds * 2 + 4 + 1
+    model_class = DisentangledASLNet if is_disentangled else EnhancedASLNet
+    
+    # Input size is dynamically determined from checkpoint - scalars are auto-detected
+    # Note: base_input_size is only used for model construction, not data processing
+
+    # Automatically detect expected input size from the checkpoint
+    sample_checkpoint = list(models_dir.glob('ensemble_model_*.pt'))[0]
+    state_dict = torch.load(sample_checkpoint, map_location='cpu')
+    
+    expected_scalars = 0
+    if 'encoder.pcasl_film.generator.0.weight' in state_dict:
+        expected_scalars = state_dict['encoder.pcasl_film.generator.0.weight'].shape[1]
     else:
-        print("  --> Detected original EnhancedASLNet model type.")
-        model_class = EnhancedASLNet
-        base_input_size = num_plds * 2 + 4
+        # Fallback if specific layer not found (e.g. older architecture)
+        expected_scalars = len(norm_stats['scalar_features_mean']) + 1
+    
+    print(f"  --> Detected model expectation: {expected_scalars} scalar features.")
 
     for model_path in models_dir.glob('ensemble_model_*.pt'):
-        model = model_class(mode='regression', input_size=base_input_size, **config)
-        model.load_state_dict(torch.load(model_path, map_location=torch.device('cpu')), strict=False)
+        # Calculate input_size dynamically from detected scalars
+        base_input_size = num_plds * 2 + expected_scalars
+        model = model_class(mode='regression', input_size=base_input_size, num_scalar_features=expected_scalars, **config)
+        try:
+            model.load_state_dict(torch.load(model_path, map_location=torch.device('cpu')), strict=False)
+        except RuntimeError as e:
+            print(f"[WARN] Partial load for {model_path.name}: {e}")
+        
         model.eval()
         models.append(model)
     
     if not models: raise FileNotFoundError("No models found.")
-    return models, config, norm_stats, is_disentangled
+    return models, config, norm_stats, is_disentangled, expected_scalars
 
 if __name__ == '__main__':
     parser = argparse.ArgumentParser(description="Run inference on preprocessed in-vivo ASL data.")
@@ -217,7 +231,7 @@ if __name__ == '__main__':
     output_root.mkdir(parents=True, exist_ok=True)
 
     try:
-        models, config, norm_stats, is_disentangled = load_artifacts(model_root)
+        models, config, norm_stats, is_disentangled, expected_scalars = load_artifacts(model_root)
     except Exception as e:
         print(f"[FATAL ERROR] Could not load artifacts: {e}. Exiting.")
         sys.exit(1)
@@ -228,6 +242,6 @@ if __name__ == '__main__':
 
     subject_dirs = sorted([d for d in preprocessed_root.iterdir() if d.is_dir()])
     for subject_dir in tqdm(subject_dirs, desc="Processing All Subjects"):
-        predict_subject(subject_dir, models, config, norm_stats, device, output_root, is_disentangled)
+        predict_subject(subject_dir, models, config, norm_stats, device, output_root, is_disentangled, expected_scalars)
 
     print("\n--- All subjects predicted successfully! ---")

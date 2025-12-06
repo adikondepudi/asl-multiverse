@@ -25,3 +25,22 @@ __pycache__/
 /disentangled*/
 /prod_*/
 /diagnostic*/
+/xu_figure*/
+/results*/
+# Ignore Model Weights (Heavy!)
+*.pt
+*.pth
+*.ckpt
+trained_models/
+
+# Ignore Logs
+*.out
+*.err
+*.png
+slurm_logs/
+__pycache__/
+
+# Ignore Data files that aren't for the dashboard
+*.npy
+*.nii.gz
+hpc_ablation_jobs/*/validation_results/*.md

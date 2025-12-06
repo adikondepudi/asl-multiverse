@@ -30,26 +30,57 @@ def generate_and_save_chunk(args):
         true_cbf = np.random.uniform(*physio_var.cbf_range)
         true_att = np.random.uniform(*physio_var.att_range)
         true_t1_artery = np.random.uniform(*physio_var.t1_artery_range)
+        true_abv = np.random.uniform(*physio_var.arterial_blood_volume_range) if np.random.rand() > 0.6 else 0.0
+        true_slice_idx = np.random.randint(0, 30) # Random Z-position
+        
+        # Enhancement B: Slice timing effect
+        slice_delay_factor = np.exp(-(true_slice_idx * 45.0)/1000.0)
+        
         current_snr = np.random.choice([3.0, 5.0, 10.0, 15.0, 20.0])
 
         perturbed_t_tau = simulator.params.T_tau * (1 + np.random.uniform(*physio_var.t_tau_perturb_range))
         perturbed_alpha_pcasl = np.clip(simulator.params.alpha_PCASL * (1 + np.random.uniform(*physio_var.alpha_perturb_range)), 0.1, 1.1)
         perturbed_alpha_vsasl = np.clip(simulator.params.alpha_VSASL * (1 + np.random.uniform(*physio_var.alpha_perturb_range)), 0.1, 1.0)
 
-        vsasl_clean = simulator._generate_vsasl_signal(plds, true_att, true_cbf, true_t1_artery, perturbed_alpha_vsasl)
-        pcasl_clean = simulator._generate_pcasl_signal(plds, true_att, true_cbf, true_t1_artery, perturbed_t_tau, perturbed_alpha_pcasl)
+        eff_alpha_p = perturbed_alpha_pcasl * slice_delay_factor
+        eff_alpha_v = perturbed_alpha_vsasl * slice_delay_factor
+
+        vsasl_clean = simulator._generate_vsasl_signal(plds, true_att, true_cbf, true_t1_artery, eff_alpha_v)
+        pcasl_clean = simulator._generate_pcasl_signal(plds, true_att, true_cbf, true_t1_artery, perturbed_t_tau, eff_alpha_p)
+        art_sig = simulator._generate_arterial_signal(plds, true_att, true_abv, true_t1_artery, eff_alpha_p)
+        
+        pcasl_clean += art_sig # Enhancement A: Macrovascular
         clean_signal_vector = np.concatenate([pcasl_clean, vsasl_clean])
 
-        pcasl_noisy = simulator.add_realistic_noise(pcasl_clean, snr=current_snr)
-        vsasl_noisy = simulator.add_realistic_noise(vsasl_clean, snr=current_snr)
+        # --- CHANGED FOR BASELINE EXPERIMENT ---
+        # The call to the complex `add_realistic_noise` has been replaced with a simple,
+        # pure Gaussian noise model. This implementation correctly scales the noise based on
+        # a reference signal, the target SNR, and the multi-PLD acquisition timing.
+        
+        # 1. Calculate the noise standard deviation based on a reference signal and SNR
+        ref_signal_level = simulator._compute_reference_signal()
+        noise_sd = ref_signal_level / current_snr
+
+        # 2. Get the correct scaling factor for the multi-PLD scan duration
+        noise_scaling = simulator.compute_tr_noise_scaling(plds)
+        
+        # 3. Generate and add pure Gaussian noise to the clean signals
+        pcasl_noise = noise_sd * noise_scaling['PCASL'] * np.random.randn(num_plds)
+        vsasl_noise = noise_sd * noise_scaling['VSASL'] * np.random.randn(num_plds)
+        
+        pcasl_noisy = pcasl_clean + pcasl_noise
+        vsasl_noisy = vsasl_clean + vsasl_noise
+        
         noisy_signal_vector = np.concatenate([pcasl_noisy, vsasl_noisy])
+        # --- END OF CHANGE ---
         
         eng_features = engineer_signal_features(noisy_signal_vector.reshape(1, -1), num_plds)
         final_noisy_input = np.concatenate([noisy_signal_vector, eng_features.flatten()])
         
         signals_noisy_chunk.append(final_noisy_input.astype(np.float32))
         signals_clean_chunk.append(clean_signal_vector.astype(np.float32))
-        params_chunk.append(np.array([true_cbf, true_att]).astype(np.float32))
+        # Save Slice Index as param 3 (0-indexed)
+        params_chunk.append(np.array([true_cbf, true_att, true_t1_artery, float(true_slice_idx)]).astype(np.float32))
         
     np.savez_compressed(
         output_dir / f'dataset_chunk_{chunk_id:04d}.npz',
@@ -60,22 +91,32 @@ def generate_and_save_chunk(args):
     return len(signals_noisy_chunk)
 
 if __name__ == '__main__':
+    # Import FeatureRegistry for default values
+    from feature_registry import FeatureRegistry
+    
     parser = argparse.ArgumentParser(description="Generate a large offline dataset for ASL training.")
     parser.add_argument("output_dir", type=str, help="Directory to save the dataset chunks.")
     parser.add_argument("--total_samples", type=int, default=10_000_000, help="Total number of samples to generate.")
     parser.add_argument("--chunk_size", type=int, default=25_000, help="Number of samples per output file.")
+    parser.add_argument("--pld-values", type=int, nargs='+', default=None,
+                        help="PLD values in ms. Default: 500 1000 1500 2000 2500 3000")
     args = parser.parse_args()
 
     output_path = Path(args.output_dir)
     output_path.mkdir(parents=True, exist_ok=True)
     
     num_chunks = args.total_samples // args.chunk_size
-    plds_np = np.arange(500, 3001, 500)
     
-    sim_config = {
-        'T1_artery': 1850.0, 'T_tau': 1800.0, 'alpha_PCASL': 0.85, 'alpha_VSASL': 0.56,
-        'alpha_BS1': 1.0, 'T2_factor': 1.0
-    }
+    # Use CLI PLDs or FeatureRegistry default (no more hardcoding)
+    if args.pld_values is not None:
+        plds_np = np.array(args.pld_values)
+    else:
+        plds_np = np.array(FeatureRegistry.DEFAULT_PLDS)
+    
+    print(f"Using PLDs: {plds_np}")
+    
+    # Use FeatureRegistry default physics
+    sim_config = FeatureRegistry.DEFAULT_PHYSICS.copy()
     
     worker_args = [(i, args.chunk_size, plds_np, output_path, sim_config) for i in range(num_chunks)]
     

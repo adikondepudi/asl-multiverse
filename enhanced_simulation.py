@@ -26,11 +26,51 @@ class PhysiologicalVariation:
     elderly_att_range: Tuple[float, float] = (1500.0, 3500.0)
     t_tau_perturb_range: Tuple[float, float] = (-0.05, 0.05)
     alpha_perturb_range: Tuple[float, float] = (-0.10, 0.10)
+    arterial_blood_volume_range: Tuple[float, float] = (0.00, 0.015) # 0 to 1.5%
 
 class RealisticASLSimulator(ASLSimulator):
     def __init__(self, params: ASLParameters = ASLParameters()):
         super().__init__(params)
         self.physio_var = PhysiologicalVariation()
+
+    def add_modular_noise(self, signal, snr, noise_components=['thermal']):
+        """
+        Applies noise components based on a list string.
+        options: 'thermal', 'physio', 'drift', 'spikes'
+        """
+        noisy_signal = signal.copy()
+        sig_len = signal.shape[-1]
+        t = np.arange(sig_len)
+        
+        # 1. Base Thermal Level
+        mean_sig = np.mean(np.abs(signal))
+        noise_sd = (mean_sig / snr) if snr > 0 else 0
+        
+        # 2. Additive Layers
+        if 'physio' in noise_components:
+            # Cardiac (Fast) + Respiratory (Slow)
+            cardiac = (noise_sd * 0.5) * np.sin(2 * np.pi * 1.0 * t / sig_len * 5 + np.random.rand())
+            resp = (noise_sd * 0.3) * np.sin(2 * np.pi * 0.3 * t / sig_len * 5 + np.random.rand())
+            noisy_signal += (cardiac + resp)
+
+        if 'drift' in noise_components:
+            # Low freq baseline shift
+            drift = (noise_sd * 0.4) * np.linspace(-1, 1, sig_len)
+            noisy_signal += drift
+
+        if 'spikes' in noise_components:
+            # Random outliers
+            if np.random.rand() < 0.2: # 20% of samples get a spike
+                idx = np.random.randint(0, sig_len)
+                noisy_signal[idx] += 5 * noise_sd * np.random.choice([-1, 1])
+
+        # 3. Final Rician/Thermal Noise (Correct MRI Physics)
+        if 'thermal' in noise_components:
+            n_real = np.random.normal(0, noise_sd, signal.shape)
+            n_imag = np.random.normal(0, noise_sd, signal.shape)
+            noisy_signal = np.sqrt((noisy_signal + n_real)**2 + n_imag**2)
+            
+        return noisy_signal
 
     def add_realistic_noise(self, signal: np.ndarray, snr: float = 5.0,
                             temporal_correlation: float = 0.3, include_spike_artifacts: bool = True,
@@ -102,13 +142,23 @@ class RealisticASLSimulator(ASLSimulator):
             cbf = np.random.uniform(*cbf_range)
             att = np.random.uniform(*att_range)
             t1_a = np.random.uniform(*t1_range)
+            abv = np.random.uniform(*self.physio_var.arterial_blood_volume_range) if np.random.rand() > 0.5 else 0.0
+            slice_idx = np.random.randint(0, 20) # Simulating 20 slices
+            slice_delay_factor = np.exp(-(slice_idx * 45.0)/1000.0)
             
             perturbed_t_tau = base_params.T_tau * (1 + np.random.uniform(*self.physio_var.t_tau_perturb_range))
             perturbed_alpha_pcasl = np.clip(base_params.alpha_PCASL * (1 + np.random.uniform(*self.physio_var.alpha_perturb_range)), 0.1, 1.1)
             perturbed_alpha_vsasl = np.clip(base_params.alpha_VSASL * (1 + np.random.uniform(*self.physio_var.alpha_perturb_range)), 0.1, 1.0)
             
-            vsasl_clean = self._generate_vsasl_signal(plds, att, cbf, t1_a, perturbed_alpha_vsasl)
-            pcasl_clean = self._generate_pcasl_signal(plds, att, cbf, t1_a, perturbed_t_tau, perturbed_alpha_pcasl)
+            # Apply slice timing to alphas
+            eff_alpha_pcasl = perturbed_alpha_pcasl * slice_delay_factor
+            eff_alpha_vsasl = perturbed_alpha_vsasl * slice_delay_factor
+
+            vsasl_clean = self._generate_vsasl_signal(plds, att, cbf, t1_a, eff_alpha_vsasl)
+            pcasl_clean = self._generate_pcasl_signal(plds, att, cbf, t1_a, perturbed_t_tau, eff_alpha_pcasl)
+            art_sig = self._generate_arterial_signal(plds, att, abv, t1_a, eff_alpha_pcasl)
+            
+            pcasl_clean += art_sig # Add macrovascular component
             
             for snr in noise_levels:
                 vsasl_noisy = self.add_realistic_noise(vsasl_clean, snr=snr)
@@ -117,7 +167,7 @@ class RealisticASLSimulator(ASLSimulator):
                 multiverse_signal_flat = np.concatenate([pcasl_noisy, vsasl_noisy])
                 
                 dataset['signals'].append(multiverse_signal_flat)
-                dataset['parameters'].append([cbf, att])
+                dataset['parameters'].append([cbf, att, t1_a, float(slice_idx)]) # Store slice index
                 dataset['conditions'].append(condition)
                 dataset['noise_levels'].append(snr)
                 dataset['perturbed_params'].append({

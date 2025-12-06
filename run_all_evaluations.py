@@ -21,6 +21,7 @@ import warnings
 from enhanced_asl_network import DisentangledASLNet
 from predict_on_invivo import batch_predict_nn, fit_ls_robust
 from prepare_invivo_data import find_and_sort_files_by_pld
+from feature_registry import FeatureRegistry, validate_norm_stats
 
 # --- Helper Functions ---
 
@@ -37,7 +38,10 @@ def load_nifti_data(file_path: Path) -> np.ndarray:
         return None
 
 def load_artifacts_for_eval(model_root: Path) -> tuple:
-    """Loads artifacts and determines model type for evaluation scripts."""
+    """
+    Loads artifacts and determines model type for evaluation scripts.
+    Includes robust feature dimension detection.
+    """
     print(f"--> Loading artifacts from: {model_root}")
     with open(model_root / 'research_config.json', 'r') as f: config = json.load(f)
     with open(model_root / 'norm_stats.json', 'r') as f: norm_stats = json.load(f)
@@ -46,24 +50,38 @@ def load_artifacts_for_eval(model_root: Path) -> tuple:
     num_plds = len(config['pld_values'])
     
     is_disentangled = 'Disentangled' in config.get('model_class_name', '')
-    if is_disentangled:
-        print("  --> Detected DisentangledASLNet model type.")
-        model_class = DisentangledASLNet
-        base_input_size = num_plds * 2 + 4 + 1
-    else:
-        print("  --> Detected original EnhancedASLNet model type.")
-        model_class = EnhancedASLNet
-        base_input_size = num_plds * 2 + 4
+    model_class = DisentangledASLNet if is_disentangled else EnhancedASLNet
     
+    # Input size is dynamically determined from checkpoint - scalars are auto-detected
+    
+    # --- ROBUST LOADING LOGIC (Copied from predict_on_invivo.py) ---
+    sample_checkpoint = list(models_dir.glob('ensemble_model_*.pt'))[0]
+    state_dict = torch.load(sample_checkpoint, map_location='cpu')
+    
+    expected_scalars = 0
+    if 'encoder.pcasl_film.generator.0.weight' in state_dict:
+        expected_scalars = state_dict['encoder.pcasl_film.generator.0.weight'].shape[1]
+    else:
+        # Fallback
+        expected_scalars = len(norm_stats['scalar_features_mean']) + 1
+        
+    print(f"  --> Detected model expectation: {expected_scalars} scalar features.")
+
     for model_path in models_dir.glob('ensemble_model_*.pt'):
-        model = model_class(mode='regression', input_size=base_input_size, **config)
+        # Calculate input_size dynamically from detected scalars
+        base_input_size = num_plds * 2 + expected_scalars
+        model = model_class(mode='regression', input_size=base_input_size, num_scalar_features=expected_scalars, **config)
         # strict=False is important for potential backward compatibility experiments
-        model.load_state_dict(torch.load(model_path, map_location=torch.device('cpu')), strict=False)
+        try:
+            model.load_state_dict(torch.load(model_path, map_location=torch.device('cpu')), strict=False)
+        except RuntimeError as e:
+             print(f"[WARN] Partial load for {model_path.name}: {e}")
+             
         model.eval()
         models.append(model)
         
     if not models: raise FileNotFoundError(f"No models found in {models_dir}")
-    return models, config, norm_stats, is_disentangled
+    return models, config, norm_stats, is_disentangled, expected_scalars
 
 def analyze_computational_performance(final_maps_dir: Path) -> pd.DataFrame:
     """Analyzes the timing information from prediction runs."""
@@ -110,7 +128,7 @@ def evaluate_robustness(ls_1r_map: np.ndarray, nn_1r_map: np.ndarray, brain_mask
     }
 
 def calculate_test_retest_cov(raw_subject_dir: Path, brain_mask: np.ndarray, gm_mask: np.ndarray, config: Dict,
-                                method: str, is_disentangled: bool, models: List = None, norm_stats: Dict = None, device: torch.device = None) -> Tuple[float, float, np.ndarray, np.ndarray]:
+                                method: str, is_disentangled: bool, models: List = None, norm_stats: Dict = None, device: torch.device = None, expected_scalars: int = 0) -> Tuple[float, float, np.ndarray, np.ndarray]:
     """Calculates the test-retest CoV by processing each available repeat dynamically."""
     pcasl_files = find_and_sort_files_by_pld(raw_subject_dir, ['r_normdiff_alldyn_PCASL_*.nii*'])
     vsasl_files = find_and_sort_files_by_pld(raw_subject_dir, ['r_normdiff_alldyn_VSASL_*.nii*'])
@@ -144,7 +162,7 @@ def calculate_test_retest_cov(raw_subject_dir: Path, brain_mask: np.ndarray, gm_
         
         cbf_masked, att_masked = np.array([np.nan]), np.array([np.nan])
         if method == 'nn':
-            results = batch_predict_nn(signal_i_flat[brain_mask.flatten()], plds, models, config, norm_stats, device, is_disentangled)
+            results = batch_predict_nn(signal_i_flat[brain_mask.flatten()], plds, models, config, norm_stats, device, is_disentangled, expected_scalars)
             cbf_masked, att_masked = results[0], results[1]
         elif method == 'ls':
             cbf_masked, att_masked = fit_ls_robust(signal_i_flat[brain_mask.flatten()], plds, config)
@@ -216,7 +234,7 @@ def main():
     
     output_path = Path(args.output_dir); output_path.mkdir(parents=True, exist_ok=True)
 
-    try: models, config, norm_stats, is_disentangled = load_artifacts_for_eval(Path(args.model_results_dir))
+    try: models, config, norm_stats, is_disentangled, expected_scalars = load_artifacts_for_eval(Path(args.model_results_dir))
     except Exception as e: print(f"[FATAL] Could not load artifacts: {e}"); sys.exit(1)
         
     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
@@ -241,7 +259,7 @@ def main():
             
             tqdm.write(f"  Calculating Test-Retest Metrics for {subject_id}...")
             # For NN, pass the full config. For LS, create a smaller dict of only physical params.
-            nn_cbf_cov, nn_att_cov, _, _ = calculate_test_retest_cov(raw_subject_dir, brain_mask, gm_mask, config, 'nn', is_disentangled, models, norm_stats, device)
+            nn_cbf_cov, nn_att_cov, _, _ = calculate_test_retest_cov(raw_subject_dir, brain_mask, gm_mask, config, 'nn', is_disentangled, models, norm_stats, device, expected_scalars)
             ls_params = {k:v for k,v in config.items() if k in ['T1_artery','T_tau','T2_factor','alpha_BS1','alpha_PCASL','alpha_VSASL']}
             ls_cbf_cov, ls_att_cov, meas_std_cbf, meas_std_att = calculate_test_retest_cov(raw_subject_dir, brain_mask, gm_mask, ls_params, 'ls', is_disentangled)
             results.update({'cbf_precision_cov_nn': nn_cbf_cov, 'att_precision_cov_nn': nn_att_cov, 'cbf_precision_cov_ls': ls_cbf_cov, 'att_precision_cov_ls': ls_att_cov})
