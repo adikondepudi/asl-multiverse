@@ -13,7 +13,7 @@ from joblib import Parallel, delayed
 
 from enhanced_asl_network import DisentangledASLNet
 from multiverse_functions import fit_PCVSASL_misMatchPLD_vectInit_pep
-from utils import engineer_signal_features, get_grid_search_initial_guess, process_signals_dynamic
+from utils import get_grid_search_initial_guess, process_signals_dynamic
 from feature_registry import FeatureRegistry, validate_signals, validate_norm_stats
 
 def denormalize_predictions(cbf_norm, att_norm, cbf_log_var_norm, att_log_var_norm, norm_stats):

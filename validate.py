@@ -27,7 +27,7 @@ try:
     from asl_simulation import ASLParameters
     from enhanced_simulation import RealisticASLSimulator
     from enhanced_asl_network import DisentangledASLNet
-    from utils import engineer_signal_features, process_signals_dynamic, get_grid_search_initial_guess
+    from utils import process_signals_dynamic, get_grid_search_initial_guess
     from multiverse_functions import fit_PCVSASL_misMatchPLD_vectInit_pep
     from feature_registry import FeatureRegistry, validate_signals, validate_norm_stats
     print("--- [DEBUG] Custom ASL modules imported successfully. ---")
