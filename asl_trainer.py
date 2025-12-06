@@ -12,8 +12,8 @@ import traceback
 from pathlib import Path
 
 from enhanced_asl_network import CustomLoss, DisentangledASLNet
-from utils import engineer_signal_features_torch
 from feature_registry import FeatureRegistry
+from noise_engine import NoiseInjector
 
 import logging
 logger = logging.getLogger(__name__)
@@ -67,18 +67,11 @@ class EnhancedASLTrainer:
         self.active_features = model_config.get('active_features', ['mean', 'std', 'peak', 't1_artery'])
         self.data_noise_components = model_config.get('data_noise_components', ['thermal'])
         
-        # NEW: Configurable noise parameters (no more magic numbers)
-        noise_config = model_config.get('noise_config', {})
-        self.noise_snr_range = noise_config.get('snr_range', [1.5, 10.0])
-        self.noise_physio_amp_range = noise_config.get('physio_amp_range', [0.05, 0.15])
-        self.noise_physio_freq_range = noise_config.get('physio_freq_range', [0.5, 2.0])
-        self.noise_drift_range = noise_config.get('drift_range', [-0.02, 0.02])
-        self.noise_spike_prob = noise_config.get('spike_probability', 0.05)
-        self.noise_spike_magnitude_range = noise_config.get('spike_magnitude_range', [2.0, 5.0])
+        # Initialize Noise Engine
+        self.noise_injector = NoiseInjector(model_config)
         
         logger.info(f"Ablation Config - Active Features: {self.active_features}")
         logger.info(f"Ablation Config - Noise Components: {self.data_noise_components}")
-        logger.info(f"Ablation Config - SNR Range: {self.noise_snr_range}")
         
         logger.info("Initializing models (Float32)...")
         self.models = [model_class(**model_config).to(self.device) for _ in range(n_ensembles)]
@@ -123,6 +116,7 @@ class EnhancedASLTrainer:
             np.full(self.n_plds, scalings['VSASL'])
         ])
         self.noise_scale_vec_gpu = torch.tensor(scale_vec, device=self.device, dtype=torch.float32)
+        self.pld_scaling = {'PCASL': scalings['PCASL'], 'VSASL': scalings['VSASL']}
         
         self.norm_stats_gpu = {}
         for k, v in norm_stats.items():
@@ -153,45 +147,8 @@ class EnhancedASLTrainer:
         batch_size = raw_signals.shape[0]
         n_plds = raw_signals.shape[1] // 2
         
-        # ========== 1. MODULAR NOISE GENERATION (Configurable parameters) ==========
-        snr_min, snr_max = self.noise_snr_range
-        current_snr = torch.empty(batch_size, 1, device=self.device).uniform_(snr_min, snr_max)
-        noise_sigma = (self.ref_signal_gpu / current_snr)
-        
-        # Start with thermal noise (always present as base)
-        total_noise = torch.zeros_like(raw_signals)
-        
-        if 'thermal' in self.data_noise_components:
-            thermal_noise = torch.randn_like(raw_signals) * noise_sigma * self.noise_scale_vec_gpu
-            total_noise += thermal_noise
-        
-        if 'physio' in self.data_noise_components:
-            # Simulate cardiac/respiratory oscillation (low-frequency sinusoid)
-            amp_min, amp_max = self.noise_physio_amp_range
-            freq_min, freq_max = self.noise_physio_freq_range
-            physio_amp = torch.empty(batch_size, 1, device=self.device).uniform_(amp_min, amp_max)
-            physio_freq = torch.empty(batch_size, 1, device=self.device).uniform_(freq_min, freq_max)
-            t = torch.arange(n_plds * 2, device=self.device).float().unsqueeze(0)
-            physio_noise = physio_amp * noise_sigma * torch.sin(2 * 3.14159 * physio_freq * t / (n_plds * 2))
-            total_noise += physio_noise
-        
-        if 'drift' in self.data_noise_components:
-            # Baseline drift (linear trend)
-            drift_min, drift_max = self.noise_drift_range
-            drift_slope = torch.empty(batch_size, 1, device=self.device).uniform_(drift_min, drift_max)
-            t = torch.arange(n_plds * 2, device=self.device).float().unsqueeze(0) / (n_plds * 2)
-            drift_noise = drift_slope * noise_sigma * t
-            total_noise += drift_noise
-        
-        if 'spikes' in self.data_noise_components:
-            # Random motion spikes
-            spike_mask = (torch.rand(batch_size, n_plds * 2, device=self.device) < self.noise_spike_prob).float()
-            mag_min, mag_max = self.noise_spike_magnitude_range
-            spike_magnitude = torch.empty(batch_size, 1, device=self.device).uniform_(mag_min, mag_max)
-            spike_noise = spike_mask * spike_magnitude * noise_sigma
-            total_noise += spike_noise
-        
-        noisy_signals = raw_signals + total_noise
+        # ========== 1. MODULAR NOISE GENERATION (Via Engine) ==========
+        noisy_signals = self.noise_injector.apply_noise(raw_signals, self.ref_signal_gpu, self.pld_scaling)
         
         # ========== 2. COMPUTE ALL FEATURES ==========
         pcasl_raw = noisy_signals[:, :n_plds]
@@ -208,43 +165,23 @@ class EnhancedASLTrainer:
         
         shape_vector = torch.cat([pcasl_shape, vsasl_shape], dim=1)
         
-        # Compute all possible engineered features
-        eng_features = engineer_signal_features_torch(noisy_signals, n_plds)
-        # eng_features contains: [pcasl_ttp, vsasl_ttp, pcasl_com, vsasl_com, pcasl_peak, vsasl_peak]
-        
-        # ========== 3. DYNAMIC FEATURE SELECTION ==========
-        # Mapping feature names to indices in scalar_features_mean/std
-        # Layout: [mu_p(0), sig_p(1), mu_v(2), sig_v(3), ttp_p(4), ttp_v(5), com_p(6), com_v(7), peak_p(8), peak_v(9)]
-        feature_indices = {
-            'mean': [0, 2],   # mu_p, mu_v
-            'std': [1, 3],    # sig_p, sig_v 
-            'ttp': [4, 5],    # ttp_p, ttp_v
-            'com': [6, 7],    # com_p, com_v
-            'peak': [8, 9],   # peak_p, peak_v
-        }
+        # ========== 3. DYNAMIC FEATURE SELECTION (Via Engine) ==========
+        raw_features = FeatureRegistry.compute_feature_vector(noisy_signals, n_plds, self.active_features)
         
         s_mean = self.norm_stats_gpu['scalar_features_mean']
         s_std = self.norm_stats_gpu['scalar_features_std'] + 1e-6
         
         selected_scalars = []
+        current_idx = 0
         
         for feat_name in self.active_features:
-            if feat_name in feature_indices:
-                indices = feature_indices[feat_name]
+            if feat_name in FeatureRegistry.NORM_STATS_INDICES:
+                indices = FeatureRegistry.NORM_STATS_INDICES[feat_name]
+                width = len(indices)
                 
-                # Get the unnormalized feature values
-                if feat_name == 'mean':
-                    feat_vals = torch.cat([pcasl_mu, vsasl_mu], dim=1)
-                elif feat_name == 'std':
-                    feat_vals = torch.cat([pcasl_sigma, vsasl_sigma], dim=1)
-                elif feat_name == 'ttp':
-                    feat_vals = eng_features[:, 0:2]  # pcasl_ttp, vsasl_ttp
-                elif feat_name == 'com':
-                    feat_vals = eng_features[:, 2:4]  # pcasl_com, vsasl_com
-                elif feat_name == 'peak':
-                    feat_vals = eng_features[:, 4:6]  # pcasl_peak, vsasl_peak
-                else:
-                    continue
+                # Extract slice from raw_features
+                feat_vals = raw_features[:, current_idx : current_idx + width]
+                current_idx += width
                 
                 # Normalize using the correct indices from norm_stats
                 mu = s_mean[indices]

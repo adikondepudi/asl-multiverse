@@ -1,4 +1,8 @@
-# FILE: generate_offline_dataset.py
+# FILE: generate_clean_library.py
+"""
+Generates a library of CLEAN (noise-free) ASL signals for training.
+Noise is added dynamically during training by the NoiseInjector.
+"""
 import numpy as np
 import multiprocessing as mp
 from pathlib import Path
@@ -9,10 +13,9 @@ import time
 
 from asl_simulation import ASLParameters
 from enhanced_simulation import RealisticASLSimulator, PhysiologicalVariation
-from utils import engineer_signal_features
 
 def generate_and_save_chunk(args):
-    """Worker function to generate one chunk of the dataset."""
+    """Worker function to generate one chunk of CLEAN signals."""
     chunk_id, num_samples_per_chunk, plds, output_dir, config_dict = args
     
     np.random.seed(int(time.time()) + chunk_id)
@@ -22,7 +25,6 @@ def generate_and_save_chunk(args):
     physio_var = PhysiologicalVariation()
     num_plds = len(plds)
     
-    signals_noisy_chunk = []
     signals_clean_chunk = []
     params_chunk = []
         
@@ -35,8 +37,6 @@ def generate_and_save_chunk(args):
         
         # Enhancement B: Slice timing effect
         slice_delay_factor = np.exp(-(true_slice_idx * 45.0)/1000.0)
-        
-        current_snr = np.random.choice([3.0, 5.0, 10.0, 15.0, 20.0])
 
         perturbed_t_tau = simulator.params.T_tau * (1 + np.random.uniform(*physio_var.t_tau_perturb_range))
         perturbed_alpha_pcasl = np.clip(simulator.params.alpha_PCASL * (1 + np.random.uniform(*physio_var.alpha_perturb_range)), 0.1, 1.1)
@@ -52,43 +52,17 @@ def generate_and_save_chunk(args):
         pcasl_clean += art_sig # Enhancement A: Macrovascular
         clean_signal_vector = np.concatenate([pcasl_clean, vsasl_clean])
 
-        # --- CHANGED FOR BASELINE EXPERIMENT ---
-        # The call to the complex `add_realistic_noise` has been replaced with a simple,
-        # pure Gaussian noise model. This implementation correctly scales the noise based on
-        # a reference signal, the target SNR, and the multi-PLD acquisition timing.
-        
-        # 1. Calculate the noise standard deviation based on a reference signal and SNR
-        ref_signal_level = simulator._compute_reference_signal()
-        noise_sd = ref_signal_level / current_snr
-
-        # 2. Get the correct scaling factor for the multi-PLD scan duration
-        noise_scaling = simulator.compute_tr_noise_scaling(plds)
-        
-        # 3. Generate and add pure Gaussian noise to the clean signals
-        pcasl_noise = noise_sd * noise_scaling['PCASL'] * np.random.randn(num_plds)
-        vsasl_noise = noise_sd * noise_scaling['VSASL'] * np.random.randn(num_plds)
-        
-        pcasl_noisy = pcasl_clean + pcasl_noise
-        vsasl_noisy = vsasl_clean + vsasl_noise
-        
-        noisy_signal_vector = np.concatenate([pcasl_noisy, vsasl_noisy])
-        # --- END OF CHANGE ---
-        
-        eng_features = engineer_signal_features(noisy_signal_vector.reshape(1, -1), num_plds)
-        final_noisy_input = np.concatenate([noisy_signal_vector, eng_features.flatten()])
-        
-        signals_noisy_chunk.append(final_noisy_input.astype(np.float32))
+        # SAVE ONLY CLEAN SIGNALS - noise is added dynamically during training
         signals_clean_chunk.append(clean_signal_vector.astype(np.float32))
         # Save Slice Index as param 3 (0-indexed)
         params_chunk.append(np.array([true_cbf, true_att, true_t1_artery, float(true_slice_idx)]).astype(np.float32))
         
     np.savez_compressed(
         output_dir / f'dataset_chunk_{chunk_id:04d}.npz',
-        signals_noisy=np.array(signals_noisy_chunk),
         signals_clean=np.array(signals_clean_chunk),
         params=np.array(params_chunk)
     )
-    return len(signals_noisy_chunk)
+    return len(signals_clean_chunk)
 
 if __name__ == '__main__':
     # Import FeatureRegistry for default values

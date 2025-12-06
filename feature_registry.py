@@ -13,6 +13,7 @@ All other modules MUST import from here instead of hardcoding values.
 from typing import List, Dict, Any, Optional
 from dataclasses import dataclass
 import numpy as np
+import torch
 import logging
 
 logger = logging.getLogger(__name__)
@@ -39,18 +40,20 @@ class FeatureRegistry:
         'ttp': 2,       # pcasl_ttp, vsasl_ttp (time to peak)
         'com': 2,       # pcasl_com, vsasl_com (center of mass)
         'peak': 2,      # pcasl_peak, vsasl_peak (peak height)
+        'weighted_sum': 2, # New feature: Area under curve weighted by time
         't1_artery': 1, # Single T1 value
         'z_coord': 1,   # Single slice index
     }
     
     # Canonical feature indices in scalar_features_mean/std arrays
-    # Layout: [mu_p(0), sig_p(1), mu_v(2), sig_v(3), ttp_p(4), ttp_v(5), com_p(6), com_v(7), peak_p(8), peak_v(9)]
+    # Layout: [mu_p(0), sig_p(1), mu_v(2), sig_v(3), ttp_p(4), ttp_v(5), com_p(6), com_v(7), peak_p(8), peak_v(9), wsum_p(10), wsum_v(11)]
     NORM_STATS_INDICES: Dict[str, List[int]] = {
-        'mean': [0, 2],   # mu_p, mu_v
-        'std': [1, 3],    # sig_p, sig_v
-        'ttp': [4, 5],    # ttp_p, ttp_v
-        'com': [6, 7],    # com_p, com_v
-        'peak': [8, 9],   # peak_p, peak_v
+        'mean': [0, 2],
+        'std': [1, 3],
+        'ttp': [4, 5],
+        'com': [6, 7],
+        'peak': [8, 9],
+        'weighted_sum': [10, 11]
     }
     
     # Default PLD values (in ms) - should match standard 6-PLD acquisition
@@ -225,6 +228,98 @@ class FeatureRegistry:
         curve_dim = n_plds * 2  # PCASL + VSASL shape vectors
         scalar_dim = cls.compute_scalar_dim(active_features)
         return curve_dim + scalar_dim
+
+    @classmethod
+    def compute_feature_vector(cls, signals: Any, num_plds: int, active_features: List[str]) -> Any:
+        """
+        Universal feature calculator (PyTorch & NumPy).
+        Computes ONLY the requested features and concatenates them.
+        """
+        is_torch = isinstance(signals, torch.Tensor)
+        xp = torch if is_torch else np
+        
+        if signals.ndim == 1:
+            signals = signals.reshape(1, -1) if is_torch else signals[np.newaxis, :]
+            
+        pcasl = signals[:, :num_plds]
+        vsasl = signals[:, num_plds:]
+        
+        # Pre-compute common terms if needed
+        if is_torch:
+            plds = torch.arange(num_plds, device=signals.device, dtype=signals.dtype)
+        else:
+            plds = np.arange(num_plds, dtype=signals.dtype)
+            
+        features = []
+        
+        # Mean / Std
+        if 'mean' in active_features:
+            features.append(xp.mean(pcasl, axis=1, keepdims=True) if not is_torch else pcasl.mean(dim=1, keepdim=True))
+            features.append(xp.mean(vsasl, axis=1, keepdims=True) if not is_torch else vsasl.mean(dim=1, keepdim=True))
+            
+        if 'std' in active_features:
+            if is_torch:
+                features.append(pcasl.std(dim=1, keepdim=True) + 1e-6)
+                features.append(vsasl.std(dim=1, keepdim=True) + 1e-6)
+            else:
+                features.append(np.std(pcasl, axis=1, keepdims=True) + 1e-6)
+                features.append(np.std(vsasl, axis=1, keepdims=True) + 1e-6)
+            
+        # Peak
+        if 'peak' in active_features:
+            if is_torch:
+                features.append(pcasl.max(dim=1, keepdim=True).values)
+                features.append(vsasl.max(dim=1, keepdim=True).values)
+            else:
+                features.append(np.max(pcasl, axis=1, keepdims=True))
+                features.append(np.max(vsasl, axis=1, keepdims=True))
+            
+        # TTP (Time to Peak)
+        if 'ttp' in active_features:
+            if is_torch:
+                features.append(pcasl.argmax(dim=1, keepdim=True).float())
+                features.append(vsasl.argmax(dim=1, keepdim=True).float())
+            else:
+                features.append(np.argmax(pcasl, axis=1)[:, np.newaxis].astype(np.float32))
+                features.append(np.argmax(vsasl, axis=1)[:, np.newaxis].astype(np.float32))
+
+        # COM (Center of Mass)
+        if 'com' in active_features:
+            if is_torch:
+                p_sum = pcasl.sum(dim=1, keepdim=True) + 1e-6
+                v_sum = vsasl.sum(dim=1, keepdim=True) + 1e-6
+                p_com = (pcasl * plds).sum(dim=1, keepdim=True) / p_sum
+                v_com = (vsasl * plds).sum(dim=1, keepdim=True) / v_sum
+            else:
+                p_sum = np.sum(pcasl, axis=1, keepdims=True) + 1e-6
+                v_sum = np.sum(vsasl, axis=1, keepdims=True) + 1e-6
+                p_com = np.sum(pcasl * plds, axis=1, keepdims=True) / p_sum
+                v_com = np.sum(vsasl * plds, axis=1, keepdims=True) / v_sum
+            
+            features.append(p_com)
+            features.append(v_com)
+            
+        # Weighted Sum (Example new feature)
+        if 'weighted_sum' in active_features:
+            if is_torch:
+                weights = (plds + 1).float()
+                features.append((pcasl * weights).sum(dim=1, keepdim=True))
+                features.append((vsasl * weights).sum(dim=1, keepdim=True))
+            else:
+                weights = (plds + 1).astype(np.float32)
+                features.append(np.sum(pcasl * weights, axis=1, keepdims=True))
+                features.append(np.sum(vsasl * weights, axis=1, keepdims=True))
+
+        if not features:
+            if is_torch:
+                return torch.zeros((signals.shape[0], 0), device=signals.device)
+            else:
+                return np.zeros((signals.shape[0], 0))
+            
+        if is_torch:
+            return torch.cat(features, dim=1)
+        else:
+            return np.concatenate(features, axis=1)
 
 
 def validate_signals(signals: np.ndarray, context: str = "unknown") -> None:

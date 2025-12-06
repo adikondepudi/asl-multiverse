@@ -201,9 +201,9 @@ BASE_CONFIG = {
     }
 }
 
-def generate_slurm_script(job_name, run_dir, config_name):
-    """Creates a SLURM script that runs both training stages."""
-    return f"""#!/bin/bash
+def generate_slurm_script(job_name, run_dir, config_name, run_invivo=False):
+    """Creates a SLURM script that runs both training stages AND validation."""
+    script = f"""#!/bin/bash
 #SBATCH --job-name={job_name}
 #SBATCH --partition=gpu
 #SBATCH --gres=gpu:1
@@ -226,13 +226,40 @@ python main.py {config_name} --stage 2 --output-dir {run_dir} --load-weights-fro
 
 echo "--- 3. AUTO-VALIDATION (NN vs LS) ---"
 python validate.py --run_dir {run_dir} --output_dir {run_dir}/validation_results
+"""
+    if run_invivo:
+        script += f"""
+echo "--- 4. IN-VIVO PREDICTION ---"
+# Assumes standard raw data location or passed via env var
+RAW_DATA=${{RAW_DATA:-"Multiverse"}}
+python predict_on_invivo.py processed_npy_cache {run_dir} {run_dir}/invivo_maps
 
+echo "--- 5. IN-VIVO EVALUATION ---"
+python run_all_evaluations.py {run_dir}/invivo_maps processed_npy_cache {run_dir}/invivo_validation {run_dir} {run_dir}/invivo_metrics
+"""
+    script += """
 echo "--- JOB COMPLETE ---"
 """
+    return script
+
+def load_base_config():
+    """Load base config from external YAML file."""
+    import copy
+    config_path = Path("config/base_template.yaml")
+    if config_path.exists():
+        with open(config_path, 'r') as f:
+            return yaml.safe_load(f)
+    else:
+        # Fallback to inline config if YAML doesn't exist
+        return BASE_CONFIG
 
 def main():
+    import copy
     base_dir = Path("hpc_ablation_jobs")
     base_dir.mkdir(exist_ok=True)
+    
+    # Load Base Template
+    base_config = load_base_config()
     
     submit_script_lines = [
         "#!/bin/bash",
@@ -249,22 +276,25 @@ def main():
         exp_dir.mkdir(exist_ok=True)
         
         # 2. Build Config (merge base + experiment specifics)
-        import copy
-        current_config = copy.deepcopy(BASE_CONFIG)
+        current_config = copy.deepcopy(base_config)
         current_config['active_features'] = exp['active_features']
         current_config['data_noise_components'] = exp['noise_type']
         current_config['training']['encoder_type'] = exp['encoder_type']
         current_config['training']['hidden_sizes'] = exp['hidden_sizes']
         current_config['experiment_hypothesis'] = exp['hypothesis']
         
+        # Update offline dataset path to clean library
+        current_config['data']['offline_dataset_path'] = 'asl_clean_library_v1'
+        
         config_path = exp_dir / "config.yaml"
         with open(config_path, 'w') as f:
             yaml.dump(current_config, f, default_flow_style=False)
             
-        # 3. Write SLURM Script
+        # 3. Write SLURM Script (with optional in-vivo)
+        run_invivo = exp.get('run_invivo', False)
         slurm_path = exp_dir / "run.slurm"
         with open(slurm_path, 'w') as f:
-            f.write(generate_slurm_script(exp_name, str(exp_dir), str(config_path)))
+            f.write(generate_slurm_script(exp_name, str(exp_dir), str(config_path), run_invivo))
             
         # 4. Add to Master Submit Script
         submit_script_lines.append(f"# Experiment {i+1}: {exp_name}")
