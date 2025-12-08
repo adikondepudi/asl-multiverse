@@ -8,7 +8,7 @@
   ],
   "learning_rate": 5e-05,
   "use_offline_dataset": true,
-  "offline_dataset_path": "asl_offline_dataset_10M_baseline_v1",
+  "offline_dataset_path": "asl_clean_library_v1",
   "num_samples_to_load": 5000000,
   "n_epochs": 100,
   "steps_per_epoch": 1000,
@@ -62,8 +62,7 @@
   "transformer_nlayers_model": 2,
   "active_features": [
     "mean",
-    "std",
-    "peak"
+    "std"
   ],
   "data_noise_components": [
     "thermal",

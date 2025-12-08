@@ -4,8 +4,13 @@ active_features:
 - peak
 - t1_artery
 data:
+  active_features:
+  - mean
+  - std
+  data_noise_components:
+  - thermal
   num_samples_to_load: 5000000
-  offline_dataset_path: asl_offline_dataset_10M_baseline_v1
+  offline_dataset_path: asl_clean_library_v1
   pld_values:
   - 500
   - 1000
@@ -46,13 +51,6 @@ simulation:
   alpha_BS1: 1.0
   alpha_PCASL: 0.85
   alpha_VSASL: 0.56
-  pld_values:
-  - 500
-  - 1000
-  - 1500
-  - 2000
-  - 2500
-  - 3000
 training:
   batch_size: 4096
   dropout_rate: 0.1
