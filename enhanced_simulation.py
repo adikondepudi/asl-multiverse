@@ -15,7 +15,8 @@ logger = logging.getLogger(__name__)
 class PhysiologicalVariation:
     cbf_range: Tuple[float, float] = (20.0, 100.0)
     att_range: Tuple[float, float] = (500.0, 4000.0)
-    t1_artery_range: Tuple[float, float] = (1650.0, 2050.0)
+    # CRITICAL FIX: Widen T1 range to prevent network from learning it as a constant bias
+    t1_artery_range: Tuple[float, float] = (1350.0, 2250.0) 
     stroke_cbf_range: Tuple[float, float] = (5.0, 30.0)
     stroke_att_range: Tuple[float, float] = (1500.0, 4500.0)
     tumor_cbf_range: Tuple[float, float] = (10.0, 150.0)

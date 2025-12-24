@@ -14,8 +14,8 @@ from pathlib import Path
 EXPERIMENTS = [
     # ID 01: Baseline
     {
-        "name": "01_Baseline_Naive",
-        "hypothesis": "How well can we do with just basic stats?",
+        "name": "01_Baseline_StatsOnly",
+        "hypothesis": "Baseline performance using only Mean and Std (No Amplitude info).",
         "active_features": ["mean", "std"],
         "noise_type": ["thermal"],
         "encoder_type": "physics_processor",  # Standard (with Conv1D)
@@ -23,8 +23,8 @@ EXPERIMENTS = [
     },
     # ID 02: Feature Ablation - Peak
     {
-        "name": "02_Feature_Peak",
-        "hypothesis": "Does adding Peak Height fix the bias?",
+        "name": "02_Feature_Amplitude",
+        "hypothesis": "Does adding Peak (Amplitude) reduce bias in high-CBF regions?",
         "active_features": ["mean", "std", "peak"],
         "noise_type": ["thermal"],
         "encoder_type": "physics_processor",

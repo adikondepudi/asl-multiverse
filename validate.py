@@ -136,8 +136,12 @@ class ASLValidator:
             
             # R2 Score
             ss_res = np.sum(err**2)
-            ss_tot = np.sum((t - np.mean(t))**2)
-            r2 = 1 - (ss_res / (ss_tot + 1e-6))
+            t_mean = np.mean(t)
+            ss_tot = np.sum((t - t_mean)**2)
+            
+            # Fix: If truth is constant (std ~ 0), R2 is undefined/meaningless. Return NaN.
+            if ss_tot < 1e-9: r2 = float('nan')
+            else: r2 = 1 - (ss_res / ss_tot)
             
             return {
                 "MAE": float(mae),
@@ -550,6 +554,32 @@ class ASLValidator:
         # --- Save Reports ---
         self.save_llm_report()
         self.save_plot_data_json()
+
+    def run_phase_4_ood(self):
+        logger.info("--- Phase 4: Out-of-Distribution (Artifact) Robustness ---")
+        # Hypothesis: NN should handle missing data (dropped packets) better than LS
+        n = 1000
+        t_cbf = np.random.uniform(20, 100, n)
+        t_att = np.random.uniform(500, 3000, n)
+        
+        # Generate standard signals
+        sigs = [self.generate_noise(np.concatenate([
+            self.simulator._generate_pcasl_signal(self.plds, a, c, 1850.0, 1800.0, 0.85),
+            self.simulator._generate_vsasl_signal(self.plds, a, c, 1850.0, 0.56)
+        ]), 10.0) for c, a in zip(t_cbf, t_att)]
+        sigs = np.array(sigs)
+        
+        # ARTIFACT INJECTION: Drop the 3rd PLD (index 2) in PCASL to near zero
+        # This simulates severe motion or head coil failure for that volume
+        sigs[:, 2] = sigs[:, 2] * 0.05 
+        
+        logger.info("   > Injected 'Dropped PLD' artifact at index 2 (1500ms)")
+        
+        nn_c, nn_a = self.run_nn_inference(sigs, np.full(n, 1850.0))
+        ls_c, ls_a = self.run_ls_inference(sigs, 1850.0)
+        
+        self._log_llm_metrics("E_Artifact_DroppedPLD", nn_c, ls_c, t_cbf, "CBF")
+        self._plot_scenario("E_Artifact_DroppedPLD", t_cbf, "CBF (ml/100g/min)", nn_c, nn_a, ls_c, ls_a, t_cbf, t_att)
         
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
@@ -561,6 +591,7 @@ if __name__ == "__main__":
         val = ASLValidator(args.run_dir, args.output_dir)
         val.run_phase_1()
         val.run_phase_3()
+        val.run_phase_4_ood()
         print("\n--- [SUCCESS] Validation Finished. Check output dir. ---")
     except KeyboardInterrupt:
         print("\n--- [CANCELLED] User stopped the script. ---")
