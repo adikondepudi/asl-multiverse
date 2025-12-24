@@ -150,8 +150,18 @@ def run_comprehensive_asl_research(config: ResearchConfig, stage: int, output_di
     simulator = RealisticASLSimulator(params=asl_params_sim)
     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
 
-    script_logger.info(f"Loading raw CLEAN data to RAM from {config.offline_dataset_path}...")
-    files = sorted(list(Path(config.offline_dataset_path).glob('dataset_chunk_*.npz')))
+    # Resolve data path relative to this script (project root) to handle SLURM CWD variation
+    dataset_path = Path(config.offline_dataset_path)
+    if not dataset_path.is_absolute():
+        dataset_path = (Path(__file__).parent / dataset_path).resolve()
+
+    script_logger.info(f"Loading raw CLEAN data to RAM from {dataset_path}...")
+    files = sorted(list(dataset_path.glob('dataset_chunk_*.npz')))
+    
+    if not files:
+        script_logger.error(f"FATAL: No .npz data files found in {dataset_path}")
+        script_logger.error("Please verify the dataset exists or run: python generate_clean_library.py asl_clean_library_v1")
+        sys.exit(1)
     all_signals_clean = []
     all_params = []
     samples_loaded = 0
