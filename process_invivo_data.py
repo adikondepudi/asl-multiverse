@@ -106,6 +106,30 @@ def preprocess_subject(subject_dir: Path, output_root: Path):
         low_snr_signals = np.concatenate([pcasl_low_flat, vsasl_low_flat], axis=1)
         high_snr_signals = np.concatenate([pcasl_high_flat, vsasl_high_flat], axis=1)
 
+        # --- SPATIAL PREPARATION for U-Net ---
+        # Concatenate 4D: (H, W, Z, nPLD) -> (Z, 2*nPLD, H, W) for PyTorch
+        # Stack PCASL + VSASL along PLD dim: (H, W, Z, 2*nPLD)
+        spatial_stack = np.concatenate([pcasl_low_snr_4d, vsasl_low_snr_4d], axis=3)
+        # Transpose to (Z, 2*nPLD, H, W)
+        spatial_stack = np.transpose(spatial_stack, (2, 3, 0, 1))
+        
+        # Normalize by M0 with *100 scaling (Avoid division by zero)
+        # This scales ~0.01-0.05 perfusion signals to ~1.0-5.0 NN-friendly range
+        M0_SCALE_FACTOR = 100.0
+        if m0_file_list:
+            m0_exp = np.transpose(m0_data, (2, 0, 1))[:, np.newaxis, :, :]  # (Z, 1, H, W)
+            spatial_stack = np.divide(spatial_stack, m0_exp, out=np.zeros_like(spatial_stack), where=m0_exp > 1e-6)
+            spatial_stack = spatial_stack * M0_SCALE_FACTOR
+        
+        # Pad to nearest multiple of 16 for U-Net compatibility
+        _, _, h, w = spatial_stack.shape
+        pad_h = (16 - h % 16) % 16
+        pad_w = (16 - w % 16) % 16
+        if pad_h > 0 or pad_w > 0:
+            spatial_stack = np.pad(spatial_stack, ((0, 0), (0, 0), (0, pad_h), (0, pad_w)), mode='constant')
+        tqdm.write(f"  --> Spatial stack created with shape {spatial_stack.shape}")
+        # --- END OF SPATIAL PREPARATION ---
+
         # Create Z-coordinate map (Enhancement C)
         # Shape matches flattened brain mask. Contains slice index (0..Z-1)
         zs = np.indices(brain_mask.shape)[2]
@@ -115,6 +139,7 @@ def preprocess_subject(subject_dir: Path, output_root: Path):
         first_img = nib.load(pcasl_files[0])
         subject_plds = [int(re.search(r'_(\d+)', p.name).group(1)) for p in pcasl_files]
 
+        np.save(subject_output_dir / 'spatial_signals.npy', spatial_stack.astype(np.float32))  # NEW
         np.save(subject_output_dir / 'low_snr_signals.npy', low_snr_signals)
         np.save(subject_output_dir / 'high_snr_signals.npy', high_snr_signals)
         np.save(subject_output_dir / 'plds.npy', np.array(subject_plds))

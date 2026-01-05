@@ -12,9 +12,161 @@ from typing import Dict, List, Tuple
 from joblib import Parallel, delayed
 
 from enhanced_asl_network import DisentangledASLNet
+from spatial_asl_network import SpatialASLNet
 from multiverse_functions import fit_PCVSASL_misMatchPLD_vectInit_pep
 from utils import get_grid_search_initial_guess, process_signals_dynamic
 from feature_registry import FeatureRegistry, validate_signals, validate_norm_stats
+
+
+def pad_to_multiple(image: np.ndarray, multiple: int = 16) -> Tuple[np.ndarray, Tuple[int, int, int, int]]:
+    """
+    Pad 2D/3D image to be divisible by multiple (for U-Net pooling).
+    
+    Args:
+        image: (H, W) or (C, H, W) or (C, H, W) array
+        multiple: Value dimensions should be divisible by
+        
+    Returns:
+        padded_image: Padded array
+        padding: (pad_top, pad_bottom, pad_left, pad_right) for unpadding
+    """
+    if image.ndim == 2:
+        h, w = image.shape
+    else:
+        h, w = image.shape[-2:]
+    
+    pad_h = (multiple - h % multiple) % multiple
+    pad_w = (multiple - w % multiple) % multiple
+    
+    pad_top = pad_h // 2
+    pad_bottom = pad_h - pad_top
+    pad_left = pad_w // 2
+    pad_right = pad_w - pad_left
+    
+    if image.ndim == 2:
+        padded = np.pad(image, ((pad_top, pad_bottom), (pad_left, pad_right)), mode='constant', constant_values=0)
+    else:
+        padded = np.pad(image, ((0, 0), (pad_top, pad_bottom), (pad_left, pad_right)), mode='constant', constant_values=0)
+    
+    return padded, (pad_top, pad_bottom, pad_left, pad_right)
+
+
+def unpad(image: np.ndarray, padding: Tuple[int, int, int, int]) -> np.ndarray:
+    """Remove padding from image."""
+    pad_top, pad_bottom, pad_left, pad_right = padding
+    
+    if image.ndim == 2:
+        return image[pad_top:image.shape[0]-pad_bottom if pad_bottom else None,
+                    pad_left:image.shape[1]-pad_right if pad_right else None]
+    else:
+        return image[:, pad_top:image.shape[1]-pad_bottom if pad_bottom else None,
+                    pad_left:image.shape[2]-pad_right if pad_right else None]
+
+
+def predict_spatial_slice(slice_data: np.ndarray, model: torch.nn.Module, 
+                          device: torch.device, m0_slice: np.ndarray = None) -> Tuple[np.ndarray, np.ndarray]:
+    """
+    Run spatial U-Net inference on a single brain slice.
+    
+    Args:
+        slice_data: (2*n_plds, H, W) - PCASL + VSASL channels
+        model: SpatialASLNet model
+        device: torch device
+        m0_slice: (H, W) M0 calibration image for normalization
+        
+    Returns:
+        cbf_map: (H, W) CBF in ml/100g/min
+        att_map: (H, W) ATT in ms
+    """
+    # Normalize by M0 if provided
+    if m0_slice is not None:
+        m0_safe = np.maximum(m0_slice, np.percentile(m0_slice, 5))
+        slice_data = slice_data / m0_safe[np.newaxis, :, :]
+    
+    # Pad to multiple of 16
+    original_shape = slice_data.shape[-2:]
+    padded, padding = pad_to_multiple(slice_data, multiple=16)
+    
+    # Convert to tensor and add batch dimension
+    input_tensor = torch.from_numpy(padded[np.newaxis, ...]).float().to(device)
+    
+    with torch.no_grad():
+        with torch.amp.autocast(device_type=device.type, dtype=torch.float16):
+            cbf_pred, att_pred, _, _ = model(input_tensor)
+    
+    # Convert to numpy and remove batch dim
+    cbf_map = cbf_pred[0, 0].cpu().numpy()
+    att_map = att_pred[0, 0].cpu().numpy()
+    
+    # Unpad to original size
+    cbf_map = unpad(cbf_map, padding)
+    att_map = unpad(att_map, padding)
+    
+    return cbf_map, att_map
+
+
+def predict_spatial_volume(spatial_signals: np.ndarray, model: torch.nn.Module,
+                           device: torch.device, m0_data: np.ndarray = None,
+                           batch_size: int = 8) -> Tuple[np.ndarray, np.ndarray]:
+    """
+    Run spatial U-Net inference on a full 3D volume (slice-by-slice).
+    
+    Args:
+        spatial_signals: (Z, 2*n_plds, H, W) - preprocessed spatial stack
+        model: SpatialASLNet model
+        device: torch device
+        m0_data: (H, W, Z) M0 calibration volume
+        batch_size: Number of slices to process at once
+        
+    Returns:
+        cbf_volume: (H, W, Z) CBF maps
+        att_volume: (H, W, Z) ATT maps
+    """
+    n_slices = spatial_signals.shape[0]
+    _, h, w = spatial_signals.shape[1], spatial_signals.shape[2], spatial_signals.shape[3]
+    
+    # Pad spatial dimensions
+    sample_padded, padding = pad_to_multiple(spatial_signals[0], multiple=16)
+    padded_h, padded_w = sample_padded.shape[-2:]
+    
+    cbf_volume = np.zeros((n_slices, h, w), dtype=np.float32)
+    att_volume = np.zeros((n_slices, h, w), dtype=np.float32)
+    
+    model.eval()
+    
+    for start_idx in range(0, n_slices, batch_size):
+        end_idx = min(start_idx + batch_size, n_slices)
+        batch_slices = spatial_signals[start_idx:end_idx]
+        
+        # Normalize by M0 if provided
+        if m0_data is not None:
+            m0_batch = m0_data[:, :, start_idx:end_idx].transpose(2, 0, 1)  # (batch, H, W)
+            m0_safe = np.maximum(m0_batch, np.percentile(m0_batch, 5, axis=(1, 2), keepdims=True))
+            batch_slices = batch_slices / m0_safe[:, np.newaxis, :, :]
+        
+        # Pad each slice
+        padded_batch = np.zeros((end_idx - start_idx, batch_slices.shape[1], padded_h, padded_w), dtype=np.float32)
+        for i in range(end_idx - start_idx):
+            padded_batch[i], _ = pad_to_multiple(batch_slices[i], multiple=16)
+        
+        # Convert to tensor
+        input_tensor = torch.from_numpy(padded_batch).float().to(device)
+        
+        with torch.no_grad():
+            with torch.amp.autocast(device_type=device.type, dtype=torch.float16):
+                cbf_pred, att_pred, _, _ = model(input_tensor)
+        
+        # Convert to numpy
+        cbf_batch = cbf_pred[:, 0].cpu().numpy()
+        att_batch = att_pred[:, 0].cpu().numpy()
+        
+        # Unpad and store
+        for i in range(end_idx - start_idx):
+            cbf_volume[start_idx + i] = unpad(cbf_batch[i], padding)
+            att_volume[start_idx + i] = unpad(att_batch[i], padding)
+    
+    # Transpose back to (H, W, Z) format
+    return cbf_volume.transpose(1, 2, 0), att_volume.transpose(1, 2, 0)
 
 def denormalize_predictions(cbf_norm, att_norm, cbf_log_var_norm, att_log_var_norm, norm_stats):
     """Applies de-normalization to all NN outputs, including uncertainty."""

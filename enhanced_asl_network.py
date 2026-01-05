@@ -424,7 +424,8 @@ class CustomLoss(nn.Module):
                  w_cbf: float = 1.0, 
                  w_att: float = 1.0,
                  log_var_reg_lambda: float = 0.0,
-                 mse_weight: float = 0.0):
+                 mse_weight: float = 0.0,
+                 dc_weight: float = 0.0):
         super().__init__()
         if training_stage not in [1, 2]:
             raise ValueError("training_stage must be 1 or 2.")
@@ -433,7 +434,10 @@ class CustomLoss(nn.Module):
         self.w_att = w_att
         self.log_var_reg_lambda = log_var_reg_lambda
         self.mse_weight = mse_weight
+        self.dc_weight = dc_weight
         self.mse_loss = nn.MSELoss()
+        self.l1_loss = nn.L1Loss()
+        self.kinetic_model = None  # Set by trainer for DC loss
 
     def forward(self,
                 model_outputs: Tuple,
@@ -474,12 +478,22 @@ class CustomLoss(nn.Module):
                 att_mse = F.mse_loss(att_pred_norm, att_true_norm)
                 mse_component = self.mse_weight * (cbf_mse + att_mse)
 
-            total_loss = total_param_loss + log_var_regularization + mse_component
+            # --- Data Consistency Loss (Self-Supervised) ---
+            # Note: Full DC loss requires raw signals as input and KineticModel integration
+            # This is a placeholder for spatial training integration
+            dc_component = torch.tensor(0.0, device=total_param_loss.device)
+            # DC loss would be computed as:
+            # if self.dc_weight > 0 and self.kinetic_model is not None:
+            #     pred_signal = self.kinetic_model(cbf_pred, att_pred)
+            #     dc_component = self.dc_weight * self.l1_loss(pred_signal, raw_input)
+
+            total_loss = total_param_loss + log_var_regularization + mse_component + dc_component
             
             loss_components = {
                 'param_nll_loss': total_param_loss,
                 'log_var_reg_loss': log_var_regularization,
                 'param_mse_loss': mse_component,
+                'dc_loss': dc_component,
                 'unreduced_loss': combined_nll_loss
             }
             return total_loss, loss_components

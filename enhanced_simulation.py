@@ -4,12 +4,197 @@ from typing import Dict, List, Tuple, Optional, Union
 from dataclasses import dataclass
 from scipy.ndimage import gaussian_filter
 from asl_simulation import ASLSimulator, ASLParameters
+from noise_engine import SpatialNoiseEngine
 import multiprocessing as mp
 from tqdm import tqdm
 import logging
 import time
 
 logger = logging.getLogger(__name__)
+
+
+class SpatialPhantomGenerator:
+    """
+    Generates realistic 2D spatial phantoms for ASL training.
+    
+    Creates tissue segmentation with gray matter, white matter, CSF,
+    and pathological regions (tumor/stroke) with proper partial volume effects.
+    """
+    
+    # Tissue CBF values (ml/100g/min)
+    TISSUE_CBF = {
+        'gray_matter': (50.0, 70.0),
+        'white_matter': (18.0, 28.0),
+        'csf': (0.0, 5.0),
+        'tumor_hyper': (90.0, 150.0),  # Hypervascular tumor
+        'tumor_hypo': (5.0, 20.0),     # Hypoperfused tumor core
+        'stroke_core': (2.0, 10.0),    # Ischemic core
+        'stroke_penumbra': (15.0, 35.0),  # Penumbra (salvageable)
+    }
+    
+    # Tissue ATT values (ms)
+    TISSUE_ATT = {
+        'gray_matter': (1000.0, 1600.0),
+        'white_matter': (1200.0, 1800.0),
+        'csf': (100.0, 500.0),
+        'tumor_hyper': (500.0, 1000.0),   # Fast transit (neovascularization)
+        'tumor_hypo': (1800.0, 2500.0),   # Slow transit
+        'stroke_core': (2500.0, 4000.0),  # Very delayed
+        'stroke_penumbra': (1800.0, 2500.0),
+    }
+    
+    def __init__(self, size: int = 64, pve_sigma: float = 1.0):
+        """
+        Args:
+            size: Image size (size x size)
+            pve_sigma: Gaussian blur sigma for partial volume effect
+        """
+        self.size = size
+        self.pve_sigma = pve_sigma
+        
+    def _generate_blob_mask(self, center: Tuple[int, int], 
+                            radius: int, 
+                            irregularity: float = 0.3) -> np.ndarray:
+        """Generate an irregular blob mask (roughly circular with noise)."""
+        y, x = np.ogrid[:self.size, :self.size]
+        cy, cx = center
+        
+        # Base circular distance
+        dist = np.sqrt((x - cx)**2 + (y - cy)**2)
+        
+        # Add angular irregularity for more realistic shapes
+        theta = np.arctan2(y - cy, x - cx)
+        noise = irregularity * radius * np.sin(3*theta + np.random.rand()*np.pi)
+        noise += irregularity * radius * 0.5 * np.sin(5*theta + np.random.rand()*np.pi)
+        
+        effective_radius = radius + noise
+        mask = dist <= effective_radius
+        
+        return mask
+    
+    def _generate_voronoi_tissue(self) -> np.ndarray:
+        """
+        Generate tissue segmentation using simplified Voronoi-like regions.
+        
+        Returns:
+            tissue_map: (H, W) with values 0=background, 1=GM, 2=WM, 3=CSF
+        """
+        tissue_map = np.zeros((self.size, self.size), dtype=np.int32)
+        
+        # Generate random seed points for regions
+        n_seeds = np.random.randint(15, 30)
+        seeds = np.random.randint(5, self.size-5, size=(n_seeds, 2))
+        
+        # Assign random tissue types (weighted toward GM and WM)
+        tissue_types = np.random.choice(
+            [1, 2, 3],  # GM, WM, CSF
+            size=n_seeds,
+            p=[0.5, 0.4, 0.1]
+        )
+        
+        # Simple Voronoi: each pixel assigned to nearest seed
+        y, x = np.ogrid[:self.size, :self.size]
+        for i, (seed, tissue) in enumerate(zip(seeds, tissue_types)):
+            dist = np.sqrt((x - seed[1])**2 + (y - seed[0])**2)
+            if i == 0:
+                min_dist = dist
+                tissue_map = np.full((self.size, self.size), tissue)
+            else:
+                closer = dist < min_dist
+                tissue_map[closer] = tissue
+                min_dist = np.minimum(min_dist, dist)
+        
+        return tissue_map
+    
+    def generate_phantom(self, 
+                        include_pathology: bool = True,
+                        pathology_type: str = None) -> Tuple[np.ndarray, np.ndarray, Dict]:
+        """
+        Generate a complete spatial phantom with CBF and ATT maps.
+        
+        Args:
+            include_pathology: Whether to add pathological regions
+            pathology_type: 'tumor', 'stroke', or None (random)
+            
+        Returns:
+            cbf_map: (H, W) CBF values in ml/100g/min
+            att_map: (H, W) ATT values in ms
+            metadata: Dict with tissue labels and pathology info
+        """
+        # Generate tissue segmentation
+        tissue_map = self._generate_voronoi_tissue()
+        
+        # Initialize parameter maps
+        cbf_map = np.zeros((self.size, self.size), dtype=np.float32)
+        att_map = np.zeros((self.size, self.size), dtype=np.float32)
+        
+        # Fill based on tissue type
+        tissue_names = ['background', 'gray_matter', 'white_matter', 'csf']
+        for tissue_id, tissue_name in enumerate(tissue_names):
+            if tissue_id == 0:
+                continue
+            mask = tissue_map == tissue_id
+            cbf_range = self.TISSUE_CBF[tissue_name]
+            att_range = self.TISSUE_ATT[tissue_name]
+            
+            # Add some spatial variation within tissue type
+            cbf_map[mask] = np.random.uniform(*cbf_range) + np.random.randn(np.sum(mask)) * 3
+            att_map[mask] = np.random.uniform(*att_range) + np.random.randn(np.sum(mask)) * 50
+        
+        metadata = {'tissue_map': tissue_map, 'pathologies': []}
+        
+        # Add pathological regions
+        if include_pathology:
+            if pathology_type is None:
+                pathology_type = np.random.choice(['tumor', 'stroke', 'none'], p=[0.35, 0.35, 0.3])
+            
+            if pathology_type != 'none':
+                n_lesions = np.random.randint(1, 3)
+                
+                for _ in range(n_lesions):
+                    # Random lesion location (avoid edges)
+                    cx = np.random.randint(15, self.size - 15)
+                    cy = np.random.randint(15, self.size - 15)
+                    radius = np.random.randint(5, 15)
+                    
+                    lesion_mask = self._generate_blob_mask((cy, cx), radius)
+                    
+                    if pathology_type == 'tumor':
+                        # Hypervascular rim with hypoperfused core
+                        core_mask = self._generate_blob_mask((cy, cx), max(3, radius - 4))
+                        rim_mask = lesion_mask & ~core_mask
+                        
+                        cbf_map[rim_mask] = np.random.uniform(*self.TISSUE_CBF['tumor_hyper'])
+                        att_map[rim_mask] = np.random.uniform(*self.TISSUE_ATT['tumor_hyper'])
+                        cbf_map[core_mask] = np.random.uniform(*self.TISSUE_CBF['tumor_hypo'])
+                        att_map[core_mask] = np.random.uniform(*self.TISSUE_ATT['tumor_hypo'])
+                        
+                    elif pathology_type == 'stroke':
+                        # Ischemic core with penumbra
+                        core_mask = self._generate_blob_mask((cy, cx), max(3, radius - 5))
+                        penumbra_mask = lesion_mask & ~core_mask
+                        
+                        cbf_map[core_mask] = np.random.uniform(*self.TISSUE_CBF['stroke_core'])
+                        att_map[core_mask] = np.random.uniform(*self.TISSUE_ATT['stroke_core'])
+                        cbf_map[penumbra_mask] = np.random.uniform(*self.TISSUE_CBF['stroke_penumbra'])
+                        att_map[penumbra_mask] = np.random.uniform(*self.TISSUE_ATT['stroke_penumbra'])
+                    
+                    metadata['pathologies'].append({
+                        'type': pathology_type,
+                        'center': (cy, cx),
+                        'radius': radius
+                    })
+        
+        # Apply Partial Volume Effect (Gaussian blur)
+        # This is CRUCIAL: creates soft edges that break simple LS fitting
+        cbf_map = gaussian_filter(cbf_map, sigma=self.pve_sigma)
+        att_map = gaussian_filter(att_map, sigma=self.pve_sigma)
+        
+        # Clamp to valid ranges
+        cbf_map = np.clip(cbf_map, 0, 200).astype(np.float32)
+        att_map = np.clip(att_map, 100, 5000).astype(np.float32)
+        
+        return cbf_map, att_map, metadata
 
 @dataclass
 class PhysiologicalVariation:
@@ -116,6 +301,121 @@ class RealisticASLSimulator(ASLSimulator):
                 noisy_signal[i] += spike
         
         return noisy_signal
+
+    def generate_spatial_batch(self, plds: np.ndarray, batch_size: int = 4, size: int = 64) -> Tuple[np.ndarray, np.ndarray]:
+        """
+        Generates a batch of 2D ASL training images with blobs and artifacts.
+        Returns: 
+            signals: (Batch, 2*n_plds, Size, Size)
+            targets: (Batch, 2, Size, Size) -> [CBF, ATT]
+        """
+        # Prepare outputs
+        n_plds = len(plds)
+        signals = np.zeros((batch_size, n_plds * 2, size, size), dtype=np.float32)
+        targets = np.zeros((batch_size, 2, size, size), dtype=np.float32)
+        
+        # Pre-calculate physics constants for broadcasting
+        # Shape: (n_plds, 1, 1)
+        plds_bc = plds[:, np.newaxis, np.newaxis] 
+        t1_b = self.params.T1_artery
+        tau = self.params.T_tau
+        lambda_b = 0.90
+        t2_f = self.params.T2_factor
+        
+        # Efficiencies (including BS)
+        alpha_p = self.params.alpha_PCASL * (self.params.alpha_BS1**4)
+        alpha_v = self.params.alpha_VSASL * (self.params.alpha_BS1**3)
+        
+        for b in range(batch_size):
+            # --- 1. Generate Parameter Maps (The "Phantom") ---
+            # Background (Gray Matter-ish)
+            cbf_map = np.random.normal(50, 5, (size, size))
+            att_map = np.random.normal(1200, 100, (size, size))
+            
+            # Add Pathology Blobs
+            num_blobs = np.random.randint(1, 4)
+            for _ in range(num_blobs):
+                cx, cy = np.random.randint(10, size-10, 2)
+                r = np.random.randint(5, 15)
+                
+                y_grid, x_grid = np.ogrid[:size, :size]
+                mask = ((x_grid - cx)**2 + (y_grid - cy)**2) <= r**2
+                
+                # Flip coin: Tumor (High Flow) or Stroke (Low Flow)
+                if np.random.rand() > 0.5:
+                    cbf_map[mask] = np.random.uniform(90, 140)  # Hyperperfusion
+                    att_map[mask] = np.random.uniform(500, 1000)  # Fast transit
+                else:
+                    cbf_map[mask] = np.random.uniform(5, 15)    # Hypoperfusion
+                    att_map[mask] = np.random.uniform(2000, 3000)  # Delayed arrival
+
+            # Smooth edges to simulate Partial Volume Effect
+            cbf_map = gaussian_filter(cbf_map, sigma=1.0)
+            att_map = gaussian_filter(att_map, sigma=1.0)
+            
+            # Save targets
+            targets[b, 0] = cbf_map
+            targets[b, 1] = att_map
+
+            # --- 2. Vectorized Signal Generation (NumPy Broadcasting) ---
+            # Input maps: (Size, Size) -> Broadcast to (n_plds, Size, Size)
+            
+            att_bc = att_map[np.newaxis, :, :]
+            cbf_bc = cbf_map[np.newaxis, :, :]
+            
+            # --- PCASL Logic ---
+            # Mask 1: Bolus Arrived (PLD >= ATT)
+            mask_arrived = (plds_bc >= att_bc)
+            
+            # Mask 2: Bolus in Transit (ATT - tau <= PLD < ATT)
+            mask_transit = (plds_bc < att_bc) & (plds_bc >= (att_bc - tau))
+            
+            # Equation 1: Arrived
+            sig_p_arrived = (2 * alpha_p * cbf_bc * t1_b / 1000.0 *
+                             np.exp(-plds_bc / t1_b) *
+                             (1 - np.exp(-tau / t1_b)) * t2_f) / lambda_b
+                             
+            # Equation 2: Transit
+            sig_p_transit = (2 * alpha_p * cbf_bc * t1_b / 1000.0 *
+                             (np.exp(-att_bc / t1_b) - np.exp(-(tau + plds_bc) / t1_b)) *
+                             t2_f) / lambda_b
+            
+            pcasl_sig = np.zeros_like(plds_bc * cbf_bc)
+            pcasl_sig[mask_arrived] = sig_p_arrived[mask_arrived]
+            pcasl_sig[mask_transit] = sig_p_transit[mask_transit]
+
+            # --- VSASL Logic ---
+            mask_vs_arrived = (plds_bc > att_bc)
+            
+            # Equation 1: PLD <= ATT
+            sig_v_early = (2 * alpha_v * cbf_bc * (plds_bc / 1000.0) *
+                           np.exp(-plds_bc / t1_b) * t2_f) / lambda_b
+                           
+            # Equation 2: PLD > ATT
+            sig_v_late = (2 * alpha_v * cbf_bc * (att_bc / 1000.0) *
+                          np.exp(-plds_bc / t1_b) * t2_f) / lambda_b
+            
+            vsasl_sig = np.where(mask_vs_arrived, sig_v_late, sig_v_early)
+
+            # --- 3. Stack and Add Noise ---
+            # Current shape: (n_plds, Size, Size)
+            # We need to stack into (2*n_plds, Size, Size)
+            clean_stack = np.concatenate([pcasl_sig, vsasl_sig], axis=0)
+            
+            # Add Complex Rician Noise (Spatial)
+            # Calculate signal level for SNR scaling
+            mean_sig = np.mean(clean_stack)
+            # Random SNR per image
+            snr = np.random.uniform(5.0, 15.0) 
+            sigma = mean_sig / snr
+            
+            noise_r = np.random.normal(0, sigma, clean_stack.shape)
+            noise_i = np.random.normal(0, sigma, clean_stack.shape)
+            noisy_stack = np.sqrt((clean_stack + noise_r)**2 + noise_i**2)
+            
+            signals[b] = noisy_stack
+
+        return signals, targets
 
     def generate_diverse_dataset(self, plds: np.ndarray, n_subjects: int = 100,
                                conditions: List[str] = ['healthy', 'stroke', 'tumor', 'elderly'],

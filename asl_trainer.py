@@ -12,6 +12,7 @@ import traceback
 from pathlib import Path
 
 from enhanced_asl_network import CustomLoss, DisentangledASLNet
+from spatial_asl_network import KineticModel
 from feature_registry import FeatureRegistry
 from noise_engine import NoiseInjector
 
@@ -87,7 +88,8 @@ class EnhancedASLTrainer:
             'w_cbf': model_config.get('loss_weight_cbf', 1.0), 
             'w_att': model_config.get('loss_weight_att', 1.0),
             'log_var_reg_lambda': model_config.get('loss_log_var_reg_lambda', 0.0),
-            'mse_weight': model_config.get('mse_weight', 0.0) 
+            'mse_weight': model_config.get('mse_weight', 0.0),
+            'dc_weight': model_config.get('dc_weight', 0.0)
         }
         self.custom_loss_fn = CustomLoss(**loss_params)
         self.global_step = 0; self.norm_stats = None
@@ -96,6 +98,11 @@ class EnhancedASLTrainer:
         self.noise_scale_vec_gpu = None
         self.norm_stats_gpu = None
         self.simulator = None  # Will be set in setup_gpu_noise_params
+        
+        # Initialize Kinetic Model for DC Loss (if needed)
+        pld_values = model_config.get('pld_values', [500, 1000, 1500, 2000, 2500, 3000])
+        self.kinetic_model = KineticModel(pld_values=pld_values).to(self.device)
+        self.custom_loss_fn.kinetic_model = self.kinetic_model
 
     def setup_gpu_noise_params(self, simulator, pld_list, norm_stats):
         if simulator is None or pld_list is None:

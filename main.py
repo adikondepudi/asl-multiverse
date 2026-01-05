@@ -20,6 +20,7 @@ from dataclasses import dataclass, asdict, field
 warnings.filterwarnings('ignore', category=UserWarning)
 
 from enhanced_asl_network import DisentangledASLNet, PhysicsInformedASLProcessor
+from spatial_asl_network import SpatialASLNet
 from asl_simulation import ASLParameters
 from enhanced_simulation import RealisticASLSimulator
 from asl_trainer import EnhancedASLTrainer, FastTensorDataLoader
@@ -273,13 +274,19 @@ def run_comprehensive_asl_research(config: ResearchConfig, stage: int, output_di
     model_mode = 'denoising' if stage == 1 else 'regression'
     
     def create_model_closure(**kwargs): 
-        return DisentangledASLNet(
-            mode=model_mode, 
-            input_size=base_input_size_nn, 
-            num_scalar_features=num_scalar_features_dynamic,
-            active_features_list=active_feats,  # Pass to network for dynamic sizing
-            **kwargs
-        )
+        if config.model_class_name == "SpatialASLNet":
+            return SpatialASLNet(
+                n_plds=num_plds,
+                **kwargs
+            )
+        else:
+            return DisentangledASLNet(
+                mode=model_mode, 
+                input_size=base_input_size_nn, 
+                num_scalar_features=num_scalar_features_dynamic,
+                active_features_list=active_feats,
+                **kwargs
+            )
 
     trainer = EnhancedASLTrainer(stage=stage, model_config=model_creation_config, model_class=create_model_closure, 
                                  weight_decay=config.weight_decay, batch_size=config.batch_size, 
