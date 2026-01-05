@@ -31,7 +31,7 @@ fine_tuning:
 
 data:
   use_offline_dataset: true
-  offline_dataset_path: "asl_clean_library_v1"
+  offline_dataset_path: "asl_spatial_dataset_100k"
   num_samples_to_load: 5000000
   pld_values: [500, 1000, 1500, 2000, 2500, 3000]
   active_features: ["mean", "std"]
