@@ -19,13 +19,14 @@ from dataclasses import dataclass, asdict, field
 
 warnings.filterwarnings('ignore', category=UserWarning)
 
-from enhanced_asl_network import DisentangledASLNet, PhysicsInformedASLProcessor
-from spatial_asl_network import SpatialASLNet
+from enhanced_asl_network import DisentangledASLNet, PhysicsInformedASLProcessor, CustomLoss
+from spatial_asl_network import SpatialASLNet, SpatialDataset, MaskedSpatialLoss
 from asl_simulation import ASLParameters
 from enhanced_simulation import RealisticASLSimulator
 from asl_trainer import EnhancedASLTrainer, FastTensorDataLoader
 from utils import ParallelStreamingStatsCalculator, process_signals_dynamic
 from feature_registry import FeatureRegistry, FeatureConfigError
+from torch.utils.data import DataLoader, random_split
 
 script_logger = logging.getLogger(__name__)
 
@@ -150,53 +151,100 @@ def run_comprehensive_asl_research(config: ResearchConfig, stage: int, output_di
     asl_params_sim = ASLParameters(**{k:v for k,v in asdict(config).items() if k in ASLParameters.__annotations__})
     simulator = RealisticASLSimulator(params=asl_params_sim)
     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+    
+    # === 1. DATA LOADING STRATEGY ===
+    is_spatial_model = (config.model_class_name == "SpatialASLNet")
+    train_loader = None
+    val_loader = None
+    loss_function = None
 
-    script_logger.info(f"Loading raw CLEAN data to RAM from {config.offline_dataset_path}...")
-    
-    data_path_obj = Path(config.offline_dataset_path)
-    files_1d = sorted(list(data_path_obj.glob('dataset_chunk_*.npz')))
-    files_2d = sorted(list(data_path_obj.glob('spatial_chunk_*.npz')))
-    
-    all_signals_clean = []
-    all_params = []
-    samples_loaded = 0
-    
-    if files_1d:
-        script_logger.info(f"Found {len(files_1d)} 1D dataset chunks.")
-        for f in files_1d:
-            d = np.load(f)
-            all_signals_clean.append(d['signals_clean'])
-            all_params.append(d['params'])
-            samples_loaded += len(d['signals_clean'])
-            if config.num_samples_to_load and samples_loaded >= config.num_samples_to_load:
-                break
-    elif files_2d:
-        is_spatial_model = (config.model_class_name == "SpatialASLNet")
-        action_msg = "Keeping 2D dimensions" if is_spatial_model else "Flattening for 1D training"
-        script_logger.info(f"Found {len(files_2d)} 2D spatial chunks. {action_msg}...")
+    if is_spatial_model:
+        script_logger.info(f"[SPATIAL MODE] initializing lazy-loading SpatialDataset from {config.offline_dataset_path}...")
         
-        for f in files_2d:
-            d = np.load(f)
-            # signals: (B, 2P, H, W), targets: (B, 2, H, W)
-            sigs = d['signals']
-            tgts = d['targets']
+        full_dataset = SpatialDataset(
+            data_dir=config.offline_dataset_path, 
+            transform=True, # Augmentation
+            flip_prob=0.5
+        )
+        
+        total_len = len(full_dataset)
+        if total_len == 0:
+            raise FileNotFoundError(f"No spatial chunks found in {config.offline_dataset_path}")
             
-            B, C_sig, H, W = sigs.shape
-            
-            if is_spatial_model:
-                # Keep dimensions for Spatial U-Net
-                # Synthesize 4-channel targets: [CBF, ATT, T1, Z]
-                t1_map = np.full((B, 1, H, W), config.T1_artery, dtype=np.float32)
-                z_map = np.full((B, 1, H, W), 15.0, dtype=np.float32)
+        # Limit dataset size if requested (subsetting)
+        if config.num_samples_to_load and config.num_samples_to_load < total_len:
+            dataset_size = config.num_samples_to_load
+            full_dataset = torch.utils.data.Subset(full_dataset, range(dataset_size))
+            script_logger.info(f"Subsetting dataset to {dataset_size} samples.")
+        else:
+            dataset_size = total_len
+
+        # Split Train/Val (90/10 split)
+        train_size = int(0.9 * dataset_size)
+        val_size = dataset_size - train_size
+        train_dataset, val_dataset = random_split(full_dataset, [train_size, val_size], 
+                                                  generator=torch.Generator().manual_seed(42))
+        
+        script_logger.info(f"Spatial Dataset: {train_size} training, {val_size} validation.")
+
+        # Create Standard DataLoaders (CPU -> GPU streaming)
+        num_workers = min(os.cpu_count(), 8)
+        train_loader = DataLoader(
+            train_dataset, 
+            batch_size=config.batch_size, 
+            shuffle=True, 
+            num_workers=num_workers, 
+            pin_memory=True,
+            prefetch_factor=2
+        )
+        
+        val_loader = DataLoader(
+            val_dataset,
+            batch_size=config.batch_size,
+            shuffle=False,
+            num_workers=num_workers,
+            pin_memory=True
+        )
+        
+        # Instantiate Spatial Loss
+        dc_weight = config.loss_weight_cbf if hasattr(config, 'loss_weight_cbf') else 1.0
+        if hasattr(config, 'dc_weight'): dc_weight = config.dc_weight
+        
+        loss_function = MaskedSpatialLoss(loss_type='l1', dc_weight=dc_weight)
+        
+        # Define input size for model creation (channels)
+        base_input_size_nn = num_plds * 2 
+        model_mode = 'regression'
+
+    else:
+        # === LEGACY 1D LOADING (RAM HEAVY) ===
+        script_logger.info(f"Loading raw CLEAN data to RAM from {config.offline_dataset_path}...")
+    
+        data_path_obj = Path(config.offline_dataset_path)
+        files_1d = sorted(list(data_path_obj.glob('dataset_chunk_*.npz')))
+        files_2d = sorted(list(data_path_obj.glob('spatial_chunk_*.npz')))
+        
+        all_signals_clean = []
+        all_params = []
+        samples_loaded = 0
+        
+        if files_1d:
+            script_logger.info(f"Found {len(files_1d)} 1D dataset chunks.")
+            for f in files_1d:
+                d = np.load(f)
+                all_signals_clean.append(d['signals_clean'])
+                all_params.append(d['params'])
+                samples_loaded += len(d['signals_clean'])
+                if config.num_samples_to_load and samples_loaded >= config.num_samples_to_load:
+                    break
+        elif files_2d:
+            script_logger.info(f"Found {len(files_2d)} 2D spatial chunks. Flattening for 1D training...")
+            for f in files_2d:
+                d = np.load(f)
+                sigs = d['signals']
+                tgts = d['targets']
+                B, C_sig, H, W = sigs.shape
                 
-                # Concatenate along channel dim (1) -> (B, 4, H, W)
-                params_spatial = np.concatenate([tgts, t1_map, z_map], axis=1)
-                
-                all_signals_clean.append(sigs)
-                all_params.append(params_spatial)
-                samples_loaded += B
-            else:
-                # Flatten for 1D Models (DisentangledASLNet)
                 N = B * H * W
                 sigs_flat = sigs.transpose(0, 2, 3, 1).reshape(N, -1)
                 tgts_flat = tgts.transpose(0, 2, 3, 1).reshape(N, 2)
@@ -209,119 +257,78 @@ def run_comprehensive_asl_research(config: ResearchConfig, stage: int, output_di
                 all_signals_clean.append(sigs_flat)
                 all_params.append(params_flat)
                 samples_loaded += N
-            
-            if config.num_samples_to_load and samples_loaded >= config.num_samples_to_load:
-                break
-    else:
-        raise FileNotFoundError(f"No valid dataset files ('dataset_chunk_*.npz' or 'spatial_chunk_*.npz') found in {config.offline_dataset_path}")
-    
-    raw_signals_clean = np.concatenate(all_signals_clean, axis=0)[:config.num_samples_to_load]
-    raw_params = np.concatenate(all_params, axis=0)[:config.num_samples_to_load]
-    
-    script_logger.info(f"Moving {len(raw_signals_clean)} samples to GPU VRAM...")
-    gpu_signals_clean = torch.from_numpy(raw_signals_clean).float().to(device)
-    
-    if stage == 1:
-        # Stage 1: Targets are [Clean Signals (N, 2*P), T1 (N, 1)]
-        # We need T1 for conditioning the encoder even in Stage 1
-        # Params columns: 0:CBF, 1:ATT, 2:T1, 3:SliceIdx
-        t1_values = raw_params[:, 2:3]
-        z_values = raw_params[:, 3:4]
+                
+                if config.num_samples_to_load and samples_loaded >= config.num_samples_to_load:
+                    break
+        else:
+            raise FileNotFoundError(f"No valid dataset files found in {config.offline_dataset_path}")
         
-        gpu_cond = torch.from_numpy(np.concatenate([t1_values, z_values], axis=1)).float().to(device)
-        gpu_targets = torch.cat([gpu_signals_clean, gpu_cond], dim=1)
-    else:
-        # Stage 2: Extract CBF, ATT, T1
-        # raw_params is now [N, 3]
-        cbf = raw_params[:, 0]
-        att = raw_params[:, 1]
-        t1 = raw_params[:, 2] # New T1 column
-        z_idx = raw_params[:, 3] # New Slice Index
+        raw_signals_clean = np.concatenate(all_signals_clean, axis=0)[:config.num_samples_to_load]
+        raw_params = np.concatenate(all_params, axis=0)[:config.num_samples_to_load]
         
-        cbf_norm = (cbf - norm_stats['y_mean_cbf']) / norm_stats['y_std_cbf']
-        att_norm = (att - norm_stats['y_mean_att']) / norm_stats['y_std_att']
+        script_logger.info(f"Moving {len(raw_signals_clean)} samples to GPU VRAM...")
+        gpu_signals_clean = torch.from_numpy(raw_signals_clean).float().to(device)
         
-        # Pass T1 and Z un-normalized (Trainer handles normalization)
-        # Stack: [cbf_norm, att_norm, raw_t1, raw_z]
-        targets_stack = np.stack([cbf_norm, att_norm, t1, z_idx], axis=1)
-        gpu_targets = torch.from_numpy(targets_stack).float().to(device)
+        if stage == 1:
+            t1_values = raw_params[:, 2:3]
+            z_values = raw_params[:, 3:4]
+            gpu_cond = torch.from_numpy(np.concatenate([t1_values, z_values], axis=1)).float().to(device)
+            gpu_targets = torch.cat([gpu_signals_clean, gpu_cond], dim=1)
+        else:
+            cbf = raw_params[:, 0]; att = raw_params[:, 1]; t1 = raw_params[:, 2]; z_idx = raw_params[:, 3]
+            cbf_norm = (cbf - norm_stats['y_mean_cbf']) / norm_stats['y_std_cbf']
+            att_norm = (att - norm_stats['y_mean_att']) / norm_stats['y_std_att']
+            targets_stack = np.stack([cbf_norm, att_norm, t1, z_idx], axis=1)
+            gpu_targets = torch.from_numpy(targets_stack).float().to(device)
 
-    train_loader = FastTensorDataLoader(gpu_signals_clean, gpu_targets, batch_size=config.batch_size, shuffle=True)
-    
-    script_logger.info("Generating fixed validation dataset on CPU...")
-    validation_data_dict = _generate_simple_validation_set(
-        simulator=simulator, plds=plds_np, n_subjects=200, 
-        conditions=['healthy', 'stroke', 'tumor', 'elderly'], 
-        noise_levels=[5.0, 10.0, 15.0]
-    )
-    
-    val_signals_noisy_raw = validation_data_dict['signals']
-    
-    # Extract T1 for validation
-    val_t1_list_input = []
-    for params in validation_data_dict['perturbed_params']:
-        val_t1_list_input.append(params['t1_artery'])
-    val_z_input_np = validation_data_dict['parameters'][:, 3:4].astype(np.float32)
-    val_t1_input_np = np.array(val_t1_list_input).reshape(-1, 1).astype(np.float32)
+        train_loader = FastTensorDataLoader(gpu_signals_clean, gpu_targets, batch_size=config.batch_size, shuffle=True)
+        
+        script_logger.info("Generating fixed validation dataset on CPU...")
+        validation_data_dict = _generate_simple_validation_set(
+            simulator=simulator, plds=plds_np, n_subjects=200, 
+            conditions=['healthy', 'stroke', 'tumor', 'elderly'], 
+            noise_levels=[5.0, 10.0, 15.0]
+        )
+        
+        val_signals_noisy_raw = validation_data_dict['signals']
+        val_t1_input_np = np.array([p['t1_artery'] for p in validation_data_dict['perturbed_params']]).reshape(-1, 1).astype(np.float32)
+        val_z_input_np = validation_data_dict['parameters'][:, 3:4].astype(np.float32)
 
-    # Build config dict for dynamic processing - pass RAW signals, not pre-concatenated
-    # process_signals_dynamic internally calculates features based on active_features config
-    processing_config = {'pld_values': config.pld_values, 'active_features': config.active_features}
-    val_signals_processed = process_signals_dynamic(val_signals_noisy_raw, norm_stats, processing_config, t1_values=val_t1_input_np, z_values=val_z_input_np)
-    
-    val_signals_gpu = torch.from_numpy(val_signals_processed.astype(np.float32)).to(device)
+        processing_config = {'pld_values': config.pld_values, 'active_features': config.active_features}
+        val_signals_processed = process_signals_dynamic(val_signals_noisy_raw, norm_stats, processing_config, t1_values=val_t1_input_np, z_values=val_z_input_np)
+        val_signals_gpu = torch.from_numpy(val_signals_processed.astype(np.float32)).to(device)
 
-    if stage == 1:
-        clean_signals_for_val = []
-        for idx, params in enumerate(validation_data_dict['perturbed_params']):
-            true_cbf = validation_data_dict['parameters'][idx, 0]
-            true_att = validation_data_dict['parameters'][idx, 1]
-            vsasl_c = simulator._generate_vsasl_signal(plds_np, true_att, true_cbf, params['t1_artery'], params['alpha_vsasl'])
-            pcasl_c = simulator._generate_pcasl_signal(plds_np, true_att, true_cbf, params['t1_artery'], params['t_tau'], params['alpha_pcasl'])
-            clean_signals_for_val.append(np.concatenate([pcasl_c, vsasl_c]))
-        
-        clean_val_np = np.array(clean_signals_for_val).astype(np.float32)
-        pcasl_c_raw = clean_val_np[:, :num_plds]
-        vsasl_c_raw = clean_val_np[:, num_plds:]
-        
-        pcasl_mu = np.mean(pcasl_c_raw, axis=1, keepdims=True)
-        pcasl_sigma = np.std(pcasl_c_raw, axis=1, keepdims=True) + 1e-6
-        pcasl_shape = (pcasl_c_raw - pcasl_mu) / pcasl_sigma
-        
-        vsasl_mu = np.mean(vsasl_c_raw, axis=1, keepdims=True)
-        vsasl_sigma = np.std(vsasl_c_raw, axis=1, keepdims=True) + 1e-6
-        vsasl_shape = (vsasl_c_raw - vsasl_mu) / vsasl_sigma
-        
-        val_targets_processed = np.concatenate([pcasl_shape, vsasl_shape], axis=1)
-        
-        # Add T1 to validation targets for Stage 1
-        val_t1_list = []
-        for params in validation_data_dict['perturbed_params']:
-            val_t1_list.append(params['t1_artery'])
-        val_t1_np = np.array(val_t1_list).reshape(-1, 1).astype(np.float32)
-        
-        val_targets_combined = np.concatenate([val_targets_processed, val_t1_np], axis=1)
-        val_targets_gpu = torch.from_numpy(val_targets_combined).float().to(device)
+        if stage == 1:
+            clean_signals_for_val = []
+            for idx, params in enumerate(validation_data_dict['perturbed_params']):
+                true_cbf = validation_data_dict['parameters'][idx, 0]
+                true_att = validation_data_dict['parameters'][idx, 1]
+                vsasl_c = simulator._generate_vsasl_signal(plds_np, true_att, true_cbf, params['t1_artery'], params['alpha_vsasl'])
+                pcasl_c = simulator._generate_pcasl_signal(plds_np, true_att, true_cbf, params['t1_artery'], params['t_tau'], params['alpha_pcasl'])
+                clean_signals_for_val.append(np.concatenate([pcasl_c, vsasl_c]))
+            clean_val_np = np.array(clean_signals_for_val).astype(np.float32)
+            pcasl_c_raw = clean_val_np[:, :num_plds]; vsasl_c_raw = clean_val_np[:, num_plds:]
+            pcasl_shape = (pcasl_c_raw - np.mean(pcasl_c_raw, axis=1, keepdims=True)) / (np.std(pcasl_c_raw, axis=1, keepdims=True) + 1e-6)
+            vsasl_shape = (vsasl_c_raw - np.mean(vsasl_c_raw, axis=1, keepdims=True)) / (np.std(vsasl_c_raw, axis=1, keepdims=True) + 1e-6)
+            val_targets_processed = np.concatenate([pcasl_shape, vsasl_shape], axis=1)
+            val_targets_gpu = torch.from_numpy(np.concatenate([val_targets_processed, val_t1_input_np], axis=1)).float().to(device)
+        else:
+            val_params = validation_data_dict['parameters']
+            cbf_v = val_params[:, 0]; att_v = val_params[:, 1]
+            cbf_norm_v = (cbf_v - norm_stats['y_mean_cbf']) / norm_stats['y_std_cbf']
+            att_norm_v = (att_v - norm_stats['y_mean_att']) / norm_stats['y_std_att']
+            val_targets_gpu = torch.from_numpy(np.stack([cbf_norm_v, att_norm_v], axis=1).astype(np.float32)).to(device)
 
-    else:
-        val_params = validation_data_dict['parameters']
-        cbf_v = val_params[:, 0]; att_v = val_params[:, 1]
-        cbf_norm_v = (cbf_v - norm_stats['y_mean_cbf']) / norm_stats['y_std_cbf']
-        att_norm_v = (att_v - norm_stats['y_mean_att']) / norm_stats['y_std_att']
-        val_targets_gpu = torch.from_numpy(np.stack([cbf_norm_v, att_norm_v], axis=1).astype(np.float32)).to(device)
-
-    val_loader = FastTensorDataLoader(val_signals_gpu, val_targets_gpu, batch_size=config.batch_size, shuffle=False)
-
-    # Use FeatureRegistry for dynamic scalar dimension calculation (SINGLE SOURCE OF TRUTH)
-    active_feats = config.active_features
-    num_scalar_features_dynamic = FeatureRegistry.compute_scalar_dim(active_feats)
-    
-    script_logger.info(f"Active features: {active_feats} -> {num_scalar_features_dynamic} scalar dimensions")
-    
-    # Use dynamic scalar count instead of hardcoded value
-    base_input_size_nn = num_plds * 2 + num_scalar_features_dynamic
+        val_loader = FastTensorDataLoader(val_signals_gpu, val_targets_gpu, batch_size=config.batch_size, shuffle=False)
+        
+        # Model config
+        active_feats = config.active_features
+        num_scalar_features_dynamic = FeatureRegistry.compute_scalar_dim(active_feats)
+        base_input_size_nn = num_plds * 2 + num_scalar_features_dynamic
+        model_mode = 'denoising' if stage == 1 else 'regression'
+        
+    # === MODEL & TRAINER SETUP ===
     model_creation_config = asdict(config)
-    model_mode = 'denoising' if stage == 1 else 'regression'
     
     def create_model_closure(**kwargs): 
         if config.model_class_name == "SpatialASLNet":
@@ -333,14 +340,14 @@ def run_comprehensive_asl_research(config: ResearchConfig, stage: int, output_di
             return DisentangledASLNet(
                 mode=model_mode, 
                 input_size=base_input_size_nn, 
-                num_scalar_features=num_scalar_features_dynamic,
-                active_features_list=active_feats,
+                num_scalar_features=kwargs.get('num_scalar_features', 0),
+                active_features_list=kwargs.get('active_features_list', None),
                 **kwargs
             )
 
     trainer = EnhancedASLTrainer(stage=stage, model_config=model_creation_config, model_class=create_model_closure, 
                                  weight_decay=config.weight_decay, batch_size=config.batch_size, 
-                                 n_ensembles=config.n_ensembles, device=device)
+                                 n_ensembles=config.n_ensembles, device=device, loss_fn=loss_function)
     
     fine_tuning_cfg = config.fine_tuning if stage == 2 else None
     

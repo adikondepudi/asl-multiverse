@@ -166,8 +166,9 @@ BASE_CONFIG = {
         "use_offline_dataset": True,
         "offline_dataset_path": "asl_spatial_dataset_100k",
         
-        # Using 5k for "Smoke Test" (Fits easily in T4 VRAM + System RAM)
-        "num_samples_to_load": 5000,
+        # Using 100k for Spatial (Fits easily with Lazy Loading)
+        # Was 5k which caused OOM in 1D mode, for Spatial we simply iterate dataset
+        "num_samples_to_load": 100000,
         
         "pld_values": [500, 1000, 1500, 2000, 2500, 3000]
     },

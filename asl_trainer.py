@@ -59,7 +59,8 @@ class EnhancedASLTrainer:
     def __init__(self,
                  stage: int, model_config: Dict, model_class: callable,
                  weight_decay: float = 1e-5, batch_size: int = 256, n_ensembles: int = 5,
-                 device: str = 'cuda' if torch.cuda.is_available() else 'cpu', **kwargs):
+                 device: str = 'cuda' if torch.cuda.is_available() else 'cpu',
+                 loss_fn: Optional[nn.Module] = None, **kwargs):
         self.device = torch.device(device); self.model_config = model_config; self.stage = stage
         self.lr_base = float(model_config.get('learning_rate', 0.001)); self.weight_decay = float(weight_decay)
         self.n_ensembles = n_ensembles; self.validation_steps_per_epoch = model_config.get('validation_steps_per_epoch', 50)
@@ -83,7 +84,7 @@ class EnhancedASLTrainer:
             for i, model in enumerate(self.models): wandb.watch(model, log='gradients', log_freq=200, idx=i)
         
         # Extract mse_weight from config
-        loss_params = {
+        default_loss_params = {
             'training_stage': stage, 
             'w_cbf': model_config.get('loss_weight_cbf', 1.0), 
             'w_att': model_config.get('loss_weight_att', 1.0),
@@ -91,7 +92,7 @@ class EnhancedASLTrainer:
             'mse_weight': model_config.get('mse_weight', 0.0),
             'dc_weight': model_config.get('dc_weight', 0.0)
         }
-        self.custom_loss_fn = CustomLoss(**loss_params)
+        self.custom_loss_fn = loss_fn if loss_fn is not None else CustomLoss(**default_loss_params)
         self.global_step = 0; self.norm_stats = None
         
         self.ref_signal_gpu = None
@@ -102,7 +103,8 @@ class EnhancedASLTrainer:
         # Initialize Kinetic Model for DC Loss (if needed)
         pld_values = model_config.get('pld_values', [500, 1000, 1500, 2000, 2500, 3000])
         self.kinetic_model = KineticModel(pld_values=pld_values).to(self.device)
-        self.custom_loss_fn.kinetic_model = self.kinetic_model
+        if hasattr(self.custom_loss_fn, 'kinetic_model'):
+            self.custom_loss_fn.kinetic_model = self.kinetic_model
 
     def setup_gpu_noise_params(self, simulator, pld_list, norm_stats):
         if simulator is None or pld_list is None:
@@ -313,14 +315,27 @@ class EnhancedASLTrainer:
         
         for i in range(steps):
             try: 
-                raw_signals, targets = next(loader_iter)
+                batch = next(loader_iter)
             except StopIteration: 
                 loader_iter = iter(loader)
-                raw_signals, targets = next(loader_iter)
+                batch = next(loader_iter)
+            
+            # Handle Dictionary Batch (SpatialDataset) vs Tuple (FastTensorDataLoader)
+            if isinstance(batch, dict):
+                raw_signals = batch['signals'].to(self.device, non_blocking=True)
+                # For Spatial Loss, we pass the full batch dict or specific keys handled below
+                targets = batch # Pass dict down to logic handling
+            else:
+                raw_signals, targets = batch
             
             # SPLIT TARGETS
             # Targets now: [CBF, ATT, T1, Z]
-            if self.stage == 2:
+            if isinstance(targets, dict):
+                # Spatial Mode
+                processed_signals = self._process_batch_on_gpu(raw_signals)
+                target_for_loss = {k: v.to(self.device, non_blocking=True) if isinstance(v, torch.Tensor) else v 
+                                   for k, v in targets.items()}
+            elif self.stage == 2:
                 training_targets = targets[:, :2] # CBF, ATT for loss
                 t1_inputs = targets[:, 2:3]       # T1 for input
                 z_inputs = targets[:, 3:4]        # Z for input
@@ -354,7 +369,16 @@ class EnhancedASLTrainer:
                 with torch.amp.autocast(device_type=self.device.type, dtype=torch.float16):
                     outputs = model(processed_signals)
                     outputs_f32 = tuple(o.float() if isinstance(o, torch.Tensor) else o for o in outputs)
-                    loss, comps = self.custom_loss_fn(model_outputs=outputs_f32, targets=target_for_loss, global_epoch=epoch)
+                    
+                    if isinstance(target_for_loss, dict):
+                        # Unpack for MaskedSpatialLoss: cbf, att, mask
+                        loss_dict = self.custom_loss_fn(outputs_f32[0], outputs_f32[1], 
+                                                        target_for_loss['cbf'], target_for_loss['att'], 
+                                                        target_for_loss['mask'], processed_signals)
+                        loss = loss_dict['total_loss']
+                        comps = loss_dict
+                    else:
+                        loss, comps = self.custom_loss_fn(model_outputs=outputs_f32, targets=target_for_loss, global_epoch=epoch)
                 
                 self.scaler.scale(loss).backward()
                 self.scaler.unscale_(optimizers[model_idx])
@@ -383,17 +407,30 @@ class EnhancedASLTrainer:
         num_steps = 0
 
         with torch.no_grad():
-            for inputs, targets in loader:
+            for batch in loader:
+                if isinstance(batch, dict):
+                    inputs = batch['signals'].to(self.device)
+                    targets = {k: v.to(self.device) if isinstance(v, torch.Tensor) else v for k, v in batch.items()}
+                else:
+                    inputs, targets = batch
+                
                 for i, model in enumerate(models):
                     with torch.amp.autocast(device_type=self.device.type, dtype=torch.float16):
                         outputs = model(inputs)
                         outputs_f32 = tuple(o.float() if isinstance(o, torch.Tensor) else o for o in outputs)
-                        # Handle Stage 1 Validation where targets might include T1 (13 cols) vs Output (12 cols)
-                        target_for_loss = targets
-                        if self.stage == 1 and targets.shape[1] > outputs_f32[0].shape[1]:
-                            target_for_loss = targets[:, :-1]
                         
-                        loss, _ = self.custom_loss_fn(model_outputs=outputs_f32, targets=target_for_loss, global_epoch=epoch)
+                        if isinstance(targets, dict):
+                            loss_dict = self.custom_loss_fn(outputs_f32[0], outputs_f32[1], 
+                                                            targets['cbf'], targets['att'], 
+                                                            targets['mask'], inputs)
+                            loss = loss_dict['total_loss']
+                        else:
+                            # Handle Stage 1 Validation where targets might include T1 (13 cols) vs Output (12 cols)
+                            target_for_loss = targets
+                            if self.stage == 1 and targets.shape[1] > outputs_f32[0].shape[1]:
+                                target_for_loss = targets[:, :-1]
+                            
+                            loss, _ = self.custom_loss_fn(model_outputs=outputs_f32, targets=target_for_loss, global_epoch=epoch)
                     if not torch.isnan(loss): val_losses[i] += loss.item()
                 num_steps += 1
         return [{'val_loss': v / num_steps if num_steps > 0 else float('nan')} for v in val_losses]
