@@ -171,33 +171,44 @@ def run_comprehensive_asl_research(config: ResearchConfig, stage: int, output_di
             if config.num_samples_to_load and samples_loaded >= config.num_samples_to_load:
                 break
     elif files_2d:
-        script_logger.info(f"Found {len(files_2d)} 2D spatial chunks. Flattening for 1D training...")
+        is_spatial_model = (config.model_class_name == "SpatialASLNet")
+        action_msg = "Keeping 2D dimensions" if is_spatial_model else "Flattening for 1D training"
+        script_logger.info(f"Found {len(files_2d)} 2D spatial chunks. {action_msg}...")
+        
         for f in files_2d:
             d = np.load(f)
             # signals: (B, 2P, H, W), targets: (B, 2, H, W)
             sigs = d['signals']
             tgts = d['targets']
             
-            # Flatten spatial dimensions: (B, H, W, C) -> (N, C)
-            # This treats every pixel as an independent training sample
             B, C_sig, H, W = sigs.shape
-            N = B * H * W
             
-            # Transpose to (B, H, W, C) then flatten to (N, C)
-            sigs_flat = sigs.transpose(0, 2, 3, 1).reshape(N, -1)
-            tgts_flat = tgts.transpose(0, 2, 3, 1).reshape(N, 2)
-            
-            # Synthesize missing T1 and Z columns for compatibility
-            # Params expected structure: [CBF, ATT, T1, Z]
-            # Spatial generator uses constant T1 per chunk (config.T1_artery)
-            t1_vals = np.full((N, 1), config.T1_artery, dtype=np.float32)
-            z_vals = np.full((N, 1), 15.0, dtype=np.float32) # Assume middle slice
-            
-            params_flat = np.concatenate([tgts_flat, t1_vals, z_vals], axis=1)
-            
-            all_signals_clean.append(sigs_flat)
-            all_params.append(params_flat)
-            samples_loaded += N
+            if is_spatial_model:
+                # Keep dimensions for Spatial U-Net
+                # Synthesize 4-channel targets: [CBF, ATT, T1, Z]
+                t1_map = np.full((B, 1, H, W), config.T1_artery, dtype=np.float32)
+                z_map = np.full((B, 1, H, W), 15.0, dtype=np.float32)
+                
+                # Concatenate along channel dim (1) -> (B, 4, H, W)
+                params_spatial = np.concatenate([tgts, t1_map, z_map], axis=1)
+                
+                all_signals_clean.append(sigs)
+                all_params.append(params_spatial)
+                samples_loaded += B
+            else:
+                # Flatten for 1D Models (DisentangledASLNet)
+                N = B * H * W
+                sigs_flat = sigs.transpose(0, 2, 3, 1).reshape(N, -1)
+                tgts_flat = tgts.transpose(0, 2, 3, 1).reshape(N, 2)
+                
+                t1_vals = np.full((N, 1), config.T1_artery, dtype=np.float32)
+                z_vals = np.full((N, 1), 15.0, dtype=np.float32)
+                
+                params_flat = np.concatenate([tgts_flat, t1_vals, z_vals], axis=1)
+                
+                all_signals_clean.append(sigs_flat)
+                all_params.append(params_flat)
+                samples_loaded += N
             
             if config.num_samples_to_load and samples_loaded >= config.num_samples_to_load:
                 break

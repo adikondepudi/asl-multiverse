@@ -151,6 +151,19 @@ class EnhancedASLTrainer:
         if self.noise_scale_vec_gpu is None:
             return raw_signals 
 
+        # Handle 4D Input for Spatial Models (Batch, Channels, Height, Width)
+        if raw_signals.ndim == 4:
+            B, C, H, W = raw_signals.shape
+            # Reshape to (N, C) to use existing NoiseInjector
+            signals_flat = raw_signals.permute(0, 2, 3, 1).reshape(-1, C)
+            
+            # Apply noise
+            noisy_flat = self.noise_injector.apply_noise(signals_flat, self.ref_signal_gpu, self.pld_scaling)
+            
+            # Reshape back to (B, C, H, W) and return raw noisy signals (skip feature extraction)
+            noisy_signals = noisy_flat.reshape(B, H, W, C).permute(0, 3, 1, 2)
+            return noisy_signals
+
         batch_size = raw_signals.shape[0]
         n_plds = raw_signals.shape[1] // 2
         
