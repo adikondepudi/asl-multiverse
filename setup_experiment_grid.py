@@ -115,7 +115,7 @@ BASE_CONFIG = {
         # --- FIX 1: LOWER LEARNING RATE ---
         # Was 0.0003. Changed to 5e-5 to match production fine-tuning stability.
         # High LR during fine-tuning causes catastrophic forgetting of Stage 1 encoder.
-        "learning_rate": 0.00005,
+        "learning_rate": 0.0001,
         
         # --- FIX 2: ADD MSE WEIGHT ---
         # Crucial for convergence. Forces model to predict accurate means,
@@ -127,12 +127,12 @@ BASE_CONFIG = {
         "log_var_reg_lambda": 0.05,
         
         # --- FIX 4: ADD LOG-VAR BOUNDS (match production) ---
-        "log_var_cbf_min": -3.0,
-        "log_var_cbf_max": 7.0,
-        "log_var_att_min": -3.0,
+        "log_var_cbf_min": -5.0,
+        "log_var_cbf_max": 5.0,
+        "log_var_att_min": -5.0,
         "log_var_att_max": 14.0,
         
-        "batch_size": 4096,
+        "batch_size": 128,  # Reduced for Spatial U-Net (was 4096)
         
         # --- FIX 5: INCREASE ENSEMBLES (Statistical Significance) ---
         # Was 1. Increased to 3 for statistically bulletproof comparisons.
@@ -168,8 +168,8 @@ BASE_CONFIG = {
         
         # --- FIX 9: INCREASE DATA VOLUME (Generalization) ---
         # Was 2M. "Robust" models with drift/physio noise need more examples.
-        # You have 10M generated, use more of it.
-        "num_samples_to_load": 5000000,
+        # Using 25k for Spatial to fit in RAM (25k * 256KB ~= 6.4GB)
+        "num_samples_to_load": 25000,
         
         "pld_values": [500, 1000, 1500, 2000, 2500, 3000]
     },
@@ -203,12 +203,24 @@ BASE_CONFIG = {
 
 def generate_slurm_script(job_name, run_dir, config_name, run_invivo=False):
     """Creates a SLURM script that runs both training stages AND validation."""
+    
+    # SpatialASLNet does not support Stage 1 (Denoising/Reconstruction)
+    # We skip directly to Stage 2 (Regression)
+    stage_1_cmd = ""
+    stage_2_load_arg = f"--load-weights-from {run_dir}"
+    
+    # Check config for model class (hacky parse since we don't have the dict here easily)
+    # But we know we are forcing SpatialASLNet now.
+    # If we are strictly spatial, we skip stage 1.
+    stage_1_cmd = f"# Skipping Stage 1 for SpatialASLNet (Regression Only)\n"
+    stage_2_load_arg = "" # Start from scratch
+
     script = f"""#!/bin/bash
 #SBATCH --job-name={job_name}
 #SBATCH --partition=gpu
 #SBATCH --gres=gpu:1
 #SBATCH --nodes=1
-#SBATCH --time=08:00:00
+#SBATCH --time=04:00:00
 #SBATCH --output={run_dir}/slurm.out
 #SBATCH --error={run_dir}/slurm.err
 
@@ -218,11 +230,11 @@ conda activate asl_multiverse
 cd $SLURM_SUBMIT_DIR
 
 echo "=== EXPERIMENT: {job_name} ==="
-echo "--- 1. STAGE 1: DENOISING PRE-TRAINING ---"
-python main.py {config_name} --stage 1 --output-dir {run_dir}
+echo "--- 1. STAGE 1: SKIPPED (Spatial) ---"
+{stage_1_cmd}
 
 echo "--- 2. STAGE 2: REGRESSION TRAINING ---"
-python main.py {config_name} --stage 2 --output-dir {run_dir} --load-weights-from {run_dir}
+python main.py {config_name} --stage 2 --output-dir {run_dir} {stage_2_load_arg}
 
 echo "--- 3. AUTO-VALIDATION (NN vs LS) ---"
 python validate.py --run_dir {run_dir} --output_dir {run_dir}/validation_results
@@ -277,6 +289,7 @@ def main():
         
         # 2. Build Config (merge base + experiment specifics)
         current_config = copy.deepcopy(base_config)
+        current_config['training']['model_class_name'] = "SpatialASLNet" # Force Spatial
         current_config['active_features'] = exp['active_features']
         current_config['data_noise_components'] = exp['noise_type']
         current_config['training']['encoder_type'] = exp['encoder_type']
