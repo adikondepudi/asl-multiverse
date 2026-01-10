@@ -132,7 +132,7 @@ BASE_CONFIG = {
         "log_var_att_min": -5.0,
         "log_var_att_max": 14.0,
         
-        "batch_size": 128,  # Reduced for Spatial U-Net (was 4096)
+        "batch_size": 16,   # Reduced further for safety on T4
         
         # --- FIX 5: INCREASE ENSEMBLES (Statistical Significance) ---
         # Was 1. Increased to 3 for statistically bulletproof comparisons.
@@ -166,10 +166,8 @@ BASE_CONFIG = {
         "use_offline_dataset": True,
         "offline_dataset_path": "asl_spatial_dataset_100k",
         
-        # --- FIX 9: INCREASE DATA VOLUME (Generalization) ---
-        # Was 2M. "Robust" models with drift/physio noise need more examples.
-        # Using 25k for Spatial to fit in RAM (25k * 256KB ~= 6.4GB)
-        "num_samples_to_load": 25000,
+        # Using 5k for "Smoke Test" (Fits easily in T4 VRAM + System RAM)
+        "num_samples_to_load": 5000,
         
         "pld_values": [500, 1000, 1500, 2000, 2500, 3000]
     },
@@ -220,6 +218,8 @@ def generate_slurm_script(job_name, run_dir, config_name, run_invivo=False):
 #SBATCH --partition=gpu
 #SBATCH --gres=gpu:1
 #SBATCH --nodes=1
+#SBATCH --mem=32G
+#SBATCH --cpus-per-task=4
 #SBATCH --time=04:00:00
 #SBATCH --output={run_dir}/slurm.out
 #SBATCH --error={run_dir}/slurm.err
