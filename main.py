@@ -152,18 +152,57 @@ def run_comprehensive_asl_research(config: ResearchConfig, stage: int, output_di
     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
 
     script_logger.info(f"Loading raw CLEAN data to RAM from {config.offline_dataset_path}...")
-    files = sorted(list(Path(config.offline_dataset_path).glob('dataset_chunk_*.npz')))
+    
+    data_path_obj = Path(config.offline_dataset_path)
+    files_1d = sorted(list(data_path_obj.glob('dataset_chunk_*.npz')))
+    files_2d = sorted(list(data_path_obj.glob('spatial_chunk_*.npz')))
+    
     all_signals_clean = []
     all_params = []
     samples_loaded = 0
     
-    for f in files:
-        d = np.load(f)
-        all_signals_clean.append(d['signals_clean'])
-        all_params.append(d['params'])
-        samples_loaded += len(d['signals_clean'])
-        if config.num_samples_to_load and samples_loaded >= config.num_samples_to_load:
-            break
+    if files_1d:
+        script_logger.info(f"Found {len(files_1d)} 1D dataset chunks.")
+        for f in files_1d:
+            d = np.load(f)
+            all_signals_clean.append(d['signals_clean'])
+            all_params.append(d['params'])
+            samples_loaded += len(d['signals_clean'])
+            if config.num_samples_to_load and samples_loaded >= config.num_samples_to_load:
+                break
+    elif files_2d:
+        script_logger.info(f"Found {len(files_2d)} 2D spatial chunks. Flattening for 1D training...")
+        for f in files_2d:
+            d = np.load(f)
+            # signals: (B, 2P, H, W), targets: (B, 2, H, W)
+            sigs = d['signals']
+            tgts = d['targets']
+            
+            # Flatten spatial dimensions: (B, H, W, C) -> (N, C)
+            # This treats every pixel as an independent training sample
+            B, C_sig, H, W = sigs.shape
+            N = B * H * W
+            
+            # Transpose to (B, H, W, C) then flatten to (N, C)
+            sigs_flat = sigs.transpose(0, 2, 3, 1).reshape(N, -1)
+            tgts_flat = tgts.transpose(0, 2, 3, 1).reshape(N, 2)
+            
+            # Synthesize missing T1 and Z columns for compatibility
+            # Params expected structure: [CBF, ATT, T1, Z]
+            # Spatial generator uses constant T1 per chunk (config.T1_artery)
+            t1_vals = np.full((N, 1), config.T1_artery, dtype=np.float32)
+            z_vals = np.full((N, 1), 15.0, dtype=np.float32) # Assume middle slice
+            
+            params_flat = np.concatenate([tgts_flat, t1_vals, z_vals], axis=1)
+            
+            all_signals_clean.append(sigs_flat)
+            all_params.append(params_flat)
+            samples_loaded += N
+            
+            if config.num_samples_to_load and samples_loaded >= config.num_samples_to_load:
+                break
+    else:
+        raise FileNotFoundError(f"No valid dataset files ('dataset_chunk_*.npz' or 'spatial_chunk_*.npz') found in {config.offline_dataset_path}")
     
     raw_signals_clean = np.concatenate(all_signals_clean, axis=0)[:config.num_samples_to_load]
     raw_params = np.concatenate(all_params, axis=0)[:config.num_samples_to_load]

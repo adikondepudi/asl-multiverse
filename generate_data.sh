@@ -19,14 +19,14 @@ conda activate asl_multiverse # Use your environment name
 
 # --- Define Output Directory for the Dataset ---
 # MODIFIED: Changed directory name to reflect the new v3 data strategy
-DATASET_DIR="asl_offline_dataset_10M_baseline_v1"
+DATASET_DIR="asl_clean_library_v1"
 
 # --- Clean up any previous partial run ---
 echo "Checking for and removing previous dataset directory: ${DATASET_DIR}"
 rm -rf "${DATASET_DIR}"
 
 # --- Run the Data Generation Script ---
-echo "Starting offline dataset generation for 10,000,000 samples (v3 Strategy)..."
-python generate_offline_dataset.py "${DATASET_DIR}" --total_samples 10000000 --chunk_size 25000
+echo "Starting offline dataset generation for 10,000,000 samples (Clean Library)..."
+python generate_clean_library.py "${DATASET_DIR}" --total_samples 10000000 --chunk_size 25000
 
 echo "Job finished at $(date)"
