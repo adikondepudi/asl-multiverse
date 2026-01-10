@@ -424,9 +424,10 @@ if __name__ == "__main__":
     else: output_path = Path(f'comprehensive_results/{args.run_name if args.run_name else "run"}_{datetime.now().strftime("%Y%m%d_%H%M%S")}')
     output_path.mkdir(parents=True, exist_ok=True)
     
-    if args.stage == 2:
-        encoder_path = Path(args.load_weights_from) / 'encoder_pretrained.pt'
-        config_obj.pretrained_encoder_path = str(encoder_path)
+    if args.stage == 2 and args.load_weights_from:
+        if args.load_weights_from:
+            encoder_path = Path(args.load_weights_from) / 'encoder_pretrained.pt'
+            config_obj.pretrained_encoder_path = str(encoder_path)
 
     if args.run_name: os.environ['WANDB_RUN_NAME'] = args.run_name
 
