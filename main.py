@@ -188,7 +188,7 @@ def run_comprehensive_asl_research(config: ResearchConfig, stage: int, output_di
         script_logger.info(f"Spatial Dataset: {train_size} training, {val_size} validation.")
 
         # Create Standard DataLoaders (CPU -> GPU streaming)
-        num_workers = min(os.cpu_count(), 8)
+        num_workers = 0  # CRITICAL: 0 workers prevents RAM duplication for in-memory datasets
         train_loader = DataLoader(
             train_dataset, 
             batch_size=config.batch_size, 

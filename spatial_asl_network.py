@@ -26,6 +26,7 @@ class KineticModel(nn.Module):
         self.register_buffer('alpha_pcasl_eff', torch.tensor(alpha_pcasl * (alpha_bs**4), dtype=torch.float32))
         self.register_buffer('alpha_vsasl_eff', torch.tensor(alpha_vsasl * (alpha_bs**3), dtype=torch.float32))
         self.register_buffer('lambda_blood', torch.tensor(0.90, dtype=torch.float32))
+        self.register_buffer('unit_conv', torch.tensor(6000.0, dtype=torch.float32)) # Conversion ml/100g/min -> ml/g/s
 
     def forward(self, cbf, att):
         """
@@ -41,15 +42,18 @@ class KineticModel(nn.Module):
         # Expand dims for broadcasting: (Batch, N_plds, H, W)
         pld_exp = self.plds.view(1, -1, 1, 1)
         
+        # Convert CBF to physiological units (ml/g/s)
+        f = cbf / self.unit_conv
+        
         # --- PCASL GENERATION ---
         # Condition 1: PLD < ATT - tau (Zero signal) - handled by masks
         # Condition 2: ATT - tau <= PLD < ATT
-        term2_p = (2 * self.alpha_pcasl_eff * cbf * self.t1_blood / 1000.0 * 
+        term2_p = (2 * self.alpha_pcasl_eff * f * self.t1_blood / 1000.0 * 
                    (torch.exp(-att / self.t1_blood) - torch.exp(-(self.t_tau + pld_exp) / self.t1_blood)) * 
                    self.t2_factor) / self.lambda_blood
         
         # Condition 3: PLD >= ATT
-        term3_p = (2 * self.alpha_pcasl_eff * cbf * self.t1_blood / 1000.0 * 
+        term3_p = (2 * self.alpha_pcasl_eff * f * self.t1_blood / 1000.0 * 
                    torch.exp(-pld_exp / self.t1_blood) * 
                    (1 - torch.exp(-self.t_tau / self.t1_blood)) * 
                    self.t2_factor) / self.lambda_blood
@@ -64,18 +68,19 @@ class KineticModel(nn.Module):
 
         # --- VSASL GENERATION ---
         # Condition 1: PLD <= ATT
-        term1_v = (2 * self.alpha_vsasl_eff * cbf * (pld_exp / 1000.0) * 
+        term1_v = (2 * self.alpha_vsasl_eff * f * (pld_exp / 1000.0) * 
                    torch.exp(-pld_exp / self.t1_blood) * self.t2_factor) / self.lambda_blood
         
         # Condition 2: PLD > ATT
-        term2_v = (2 * self.alpha_vsasl_eff * cbf * (att / 1000.0) * 
+        term2_v = (2 * self.alpha_vsasl_eff * f * (att / 1000.0) * 
                    torch.exp(-pld_exp / self.t1_blood) * self.t2_factor) / self.lambda_blood
 
         mask_vs_arrived = torch.sigmoid((pld_exp - att) * steep)
         vsasl_sig = (term2_v * mask_vs_arrived) + (term1_v * (1 - mask_vs_arrived))
 
         # Concatenate Channel-wise: [PCASL_t1...tn, VSASL_t1...tn]
-        return torch.cat([pcasl_sig, vsasl_sig], dim=1)
+        # CRITICAL: Scale output to match the SpatialDataset's *100 normalization
+        return torch.cat([pcasl_sig, vsasl_sig], dim=1) * 100.0
 
 
 class DoubleConv(nn.Module):
@@ -168,8 +173,9 @@ class SpatialASLNet(nn.Module):
         out = self.out_conv(d3)
         
         # Activation Constraints
-        cbf_map = F.softplus(out[:, 0:1, :, :])  # Positive (CBF cannot be negative)
-        att_map = 4000.0 * torch.sigmoid(out[:, 1:2, :, :])  # 0 to 4000ms range
+        # Output is now normalized: 0.0 - 1.0 range implies 0 - 100 CBF, 0 - 3000 ATT
+        cbf_map = F.softplus(out[:, 0:1, :, :]) * 100.0 
+        att_map = 3000.0 * torch.sigmoid(out[:, 1:2, :, :])
         
         # Return 4 values to match existing trainer signature
         # (cbf, att, log_var_cbf, log_var_att)
@@ -279,42 +285,38 @@ class SpatialDataset(torch.utils.data.Dataset):
         self.transform = transform
         self.flip_prob = flip_prob
         
-        # Load first file to get dimensions
+        # Preload data into RAM
         if self.data_files:
-            sample = np.load(self.data_files[0])
-            self.samples_per_file = len(sample['signals'])
-            self.n_files = len(self.data_files)
-            self.total_samples = self.samples_per_file * self.n_files
+            # PRELOAD STRATEGY: Load all 20GB into RAM to stop I/O thrashing
+            print(f"[SpatialDataset] Pre-loading {len(self.data_files)} chunks to RAM...")
+            all_sig, all_tgt = [], []
+            for f in self.data_files:
+                d = np.load(f)
+                all_sig.append(d['signals'])
+                all_tgt.append(d['targets'])
+            
+            # Concatenate and normalize immediately
+            self.signals = np.concatenate(all_sig, axis=0) * self.M0_SCALE_FACTOR
+            
+            # Normalize Targets to ~0-1 range to balance Loss Gradients
+            # CBF div 100 (range 0-2), ATT div 3000 (range 0-1.5)
+            raw_targets = np.concatenate(all_tgt, axis=0)
+            self.targets = raw_targets.copy()
+            self.targets[:, 0] = raw_targets[:, 0] / 100.0  # CBF
+            self.targets[:, 1] = raw_targets[:, 1] / 3000.0 # ATT
+            
+            self.total_samples = len(self.signals)
+            print(f"[SpatialDataset] Loaded {self.total_samples} samples. RAM: {self.signals.nbytes/1e9:.1f} GB")
         else:
             self.total_samples = 0
-            
-        self._cached_file_idx = -1
-        self._cached_data = None
         
     def __len__(self):
         return self.total_samples
     
     def __getitem__(self, idx):
-        # Determine which file and which sample within file
-        file_idx = idx // self.samples_per_file
-        sample_idx = idx % self.samples_per_file
-        
-        # Cache file loading
-        if file_idx != self._cached_file_idx:
-            data = np.load(self.data_files[file_idx])
-            self._cached_data = {
-                'signals': data['signals'],  # (batch, 2*PLDs, H, W)
-                'targets': data['targets']   # (batch, 2, H, W) = [CBF, ATT]
-            }
-            self._cached_file_idx = file_idx
-        
-        signals = self._cached_data['signals'][sample_idx].copy()
-        targets = self._cached_data['targets'][sample_idx].copy()
-        
-        # --- M0 Normalization ---
-        # Signals should already be normalized by M0 in generate_clean_library
-        # Apply the *100 scaling here
-        signals = signals * self.M0_SCALE_FACTOR
+        # RAM Access (Instant)
+        signals = self.signals[idx].copy()
+        targets = self.targets[idx]
         
         # --- Create brain mask (non-zero regions) ---
         # Use mean signal across time as proxy for tissue
