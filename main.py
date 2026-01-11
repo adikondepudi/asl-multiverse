@@ -332,8 +332,11 @@ def run_comprehensive_asl_research(config: ResearchConfig, stage: int, output_di
     
     def create_model_closure(**kwargs): 
         if config.model_class_name == "SpatialASLNet":
+            # Map MLP 'hidden_sizes' to U-Net 'features' (sorted ascending for encoder)
+            features = sorted(kwargs.get('hidden_sizes', [32, 64, 128, 256]))
             return SpatialASLNet(
                 n_plds=num_plds,
+                features=features,
                 **kwargs
             )
         else:

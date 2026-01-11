@@ -50,7 +50,7 @@ simulation:
   alpha_PCASL: 0.85
   alpha_VSASL: 0.56
 training:
-  batch_size: 4096
+  batch_size: 128
   dropout_rate: 0.1
   early_stopping_min_delta: 0.0
   early_stopping_patience: 20

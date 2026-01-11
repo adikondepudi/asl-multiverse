@@ -389,8 +389,8 @@ if __name__ == '__main__':
         sys.exit(1)
 
     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
-    for model in models: model.to(device, dtype=torch.bfloat16)
-    print(f"Loaded {len(models)} models. Using device: {device} with bfloat16.")
+    for model in models: model.to(device, dtype=torch.float16)
+    print(f"Loaded {len(models)} models. Using device: {device} with float16 (T4 Optimized).")
 
     subject_dirs = sorted([d for d in preprocessed_root.iterdir() if d.is_dir()])
     for subject_dir in tqdm(subject_dirs, desc="Processing All Subjects"):

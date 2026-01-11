@@ -6,13 +6,13 @@ training:
   weight_decay: 0.0001
   learning_rate: 0.00005
   mse_weight: 50.0
-  dc_weight: 10.0  # Data Consistency Weight for spatial models
+  dc_weight: 0.0  # Data Consistency Weight for spatial models
   log_var_reg_lambda: 0.05
   log_var_cbf_min: -3.0
   log_var_cbf_max: 7.0
   log_var_att_min: -3.0
   log_var_att_max: 14.0
-  batch_size: 4096
+  batch_size: 128
   n_ensembles: 3
   n_epochs: 100
   validation_steps_per_epoch: 25
