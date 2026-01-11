@@ -195,7 +195,6 @@ def run_comprehensive_asl_research(config: ResearchConfig, stage: int, output_di
             shuffle=True, 
             num_workers=num_workers, 
             pin_memory=True,
-            prefetch_factor=2
         )
         
         val_loader = DataLoader(
