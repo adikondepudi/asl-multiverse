@@ -332,8 +332,15 @@ def run_comprehensive_asl_research(config: ResearchConfig, stage: int, output_di
     
     def create_model_closure(**kwargs): 
         if config.model_class_name == "SpatialASLNet":
-            # Map MLP 'hidden_sizes' to U-Net 'features' (sorted ascending for encoder)
-            features = sorted(kwargs.get('hidden_sizes', [32, 64, 128, 256]))
+            # Map MLP 'hidden_sizes' to U-Net 'features'
+            # 1. Sort ascending (U-Net encoders expand: 32 -> 64 -> ...)
+            features = sorted(kwargs.get('hidden_sizes', [256, 128, 64]))
+            
+            # 2. PAD to 4 levels: SpatialASLNet HARDCODES 4 layers. 
+            # If config has only 3, prepend a smaller layer (e.g. [64,128,256] -> [32,64,128,256])
+            while len(features) < 4:
+                features.insert(0, max(1, features[0] // 2))
+
             return SpatialASLNet(
                 n_plds=num_plds,
                 features=features,
