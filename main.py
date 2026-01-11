@@ -352,13 +352,18 @@ def run_comprehensive_asl_research(config: ResearchConfig, stage: int, output_di
     fine_tuning_cfg = config.fine_tuning if stage == 2 else None
     
     if stage == 2:
-        script_logger.info(f"Loading pre-trained encoder weights from: {config.pretrained_encoder_path}")
-        encoder_state_dict = torch.load(config.pretrained_encoder_path, map_location=device)
-        for model in trainer.models:
-            if hasattr(model, 'encoder'):
-                model.encoder.load_state_dict(encoder_state_dict, strict=True)
-        if fine_tuning_cfg is None: fine_tuning_cfg = {'enabled': True}
-        else: fine_tuning_cfg['enabled'] = True
+        if config.pretrained_encoder_path:
+            script_logger.info(f"Loading pre-trained encoder weights from: {config.pretrained_encoder_path}")
+            encoder_state_dict = torch.load(config.pretrained_encoder_path, map_location=device)
+            for model in trainer.models:
+                if hasattr(model, 'encoder'):
+                    model.encoder.load_state_dict(encoder_state_dict, strict=True)
+            if fine_tuning_cfg is None: fine_tuning_cfg = {'enabled': True}
+            else: fine_tuning_cfg['enabled'] = True
+        else:
+            script_logger.info("No pre-trained encoder path provided. Training from scratch (Standard Mode).")
+            # Explicitly disable fine-tuning to prevent reduced encoder learning rates on random initialization
+            if fine_tuning_cfg: fine_tuning_cfg['enabled'] = False
 
     script_logger.info(f"Training {config.n_ensembles}-model ensemble with GPU-resident data...")
     trainer.train_ensemble(
