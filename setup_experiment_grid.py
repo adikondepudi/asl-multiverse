@@ -221,7 +221,7 @@ def generate_slurm_script(job_name, run_dir, config_name, run_invivo=False):
 #SBATCH --nodes=1
 #SBATCH --mem=32G
 #SBATCH --cpus-per-task=4
-#SBATCH --time=04:00:00
+#SBATCH --time=12:00:00
 #SBATCH --output={run_dir}/slurm.out
 #SBATCH --error={run_dir}/slurm.err
 
