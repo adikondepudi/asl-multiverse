@@ -216,9 +216,10 @@ def run_comprehensive_asl_research(config: ResearchConfig, stage: int, output_di
         )
         
         # Instantiate Spatial Loss
-        dc_weight = config.loss_weight_cbf if hasattr(config, 'loss_weight_cbf') else 1.0
-        if hasattr(config, 'dc_weight'): dc_weight = config.dc_weight
-        
+        # DC loss should be opt-in (default 0.0). When enabled, use small weight (0.0001-0.001)
+        # since raw DC loss is ~1000x larger than supervised losses.
+        dc_weight = getattr(config, 'dc_weight', 0.0)
+
         loss_function = MaskedSpatialLoss(loss_type='l1', dc_weight=dc_weight)
         
         # Define input size for model creation (channels)

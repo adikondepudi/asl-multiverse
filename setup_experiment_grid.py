@@ -1,177 +1,165 @@
 # FILE: setup_experiment_grid.py
 """
-Targeted Ablation Study for ASL Neural Network
-10 experiments testing specific scientific hypotheses
+Spatial ASL U-Net Ablation Study
+10 experiments testing specific hypotheses for SpatialASLNet architecture
 """
 import os
 import yaml
-import itertools
+import copy
 from pathlib import Path
 
 # =========================================================
-# EXPLICIT EXPERIMENT DEFINITIONS (Not Factorial)
+# SPATIAL MODEL EXPERIMENT DEFINITIONS
 # =========================================================
+# Parameters that matter for SpatialASLNet (U-Net):
+#   - hidden_sizes (features): U-Net encoder/decoder channel sizes
+#   - dc_weight: Data consistency loss weight (physics regularization)
+#   - noise_type: gaussian vs rician (MRI physics fidelity)
+#   - normalization_mode: per_curve vs global_scale
+#   - noise_components: thermal only vs complex (physio, drift)
+# =========================================================
+
 EXPERIMENTS = [
-    # ID 01: Baseline
+    # === BASELINE ===
     {
-        "name": "01_Baseline_Naive",
-        "hypothesis": "How well can we do with just basic stats?",
-        "active_features": ["mean", "std"],
-        "noise_type": ["thermal"],
-        "encoder_type": "physics_processor",  # Standard (with Conv1D)
-        "hidden_sizes": [256, 128, 64],       # Standard size
+        "name": "01_Baseline",
+        "hypothesis": "Standard U-Net baseline with default settings",
+        "hidden_sizes": [32, 64, 128, 256],
+        "dc_weight": 0.0,
+        "noise_type": "gaussian",
+        "normalization_mode": "per_curve",
+        "noise_components": ["thermal"],
     },
-    # ID 02: Feature Ablation - Peak
+
+    # === CAPACITY ABLATION ===
     {
-        "name": "02_Feature_Peak",
-        "hypothesis": "Does adding Peak Height fix the bias?",
-        "active_features": ["mean", "std", "peak"],
-        "noise_type": ["thermal"],
-        "encoder_type": "physics_processor",
-        "hidden_sizes": [256, 128, 64],
+        "name": "02_Capacity_Small",
+        "hypothesis": "Can a smaller U-Net achieve similar accuracy with faster inference?",
+        "hidden_sizes": [16, 32, 64, 128],
+        "dc_weight": 0.0,
+        "noise_type": "gaussian",
+        "normalization_mode": "per_curve",
+        "noise_components": ["thermal"],
     },
-    # ID 03: Feature Ablation - Full (Best Model Candidate)
     {
-        "name": "03_Feature_Full",
-        "hypothesis": "Does T1 help biological variance?",
-        "active_features": ["mean", "std", "peak", "t1_artery"],
-        "noise_type": ["thermal"],
-        "encoder_type": "physics_processor",
-        "hidden_sizes": [256, 128, 64],
+        "name": "03_Capacity_Large",
+        "hypothesis": "Does increased capacity improve accuracy or cause overfitting?",
+        "hidden_sizes": [64, 128, 256, 512],
+        "dc_weight": 0.0,
+        "noise_type": "gaussian",
+        "normalization_mode": "per_curve",
+        "noise_components": ["thermal"],
     },
-    # ID 04: Architecture - MLP Only (No Conv1D)
+
+    # === DATA CONSISTENCY LOSS ABLATION ===
     {
-        "name": "04_Arch_NoConv",
-        "hypothesis": "Do we strictly need the Conv1D, or are scalars enough?",
-        "active_features": ["mean", "std", "peak", "t1_artery"],
-        "noise_type": ["thermal"],
-        "encoder_type": "mlp_only",  # NEW: MLP without Conv1D
-        "hidden_sizes": [256, 128, 64],
+        "name": "04_DC_Loss_Light",
+        "hypothesis": "Does light physics regularization improve generalization?",
+        "hidden_sizes": [32, 64, 128, 256],
+        "dc_weight": 0.0001,
+        "noise_type": "gaussian",
+        "normalization_mode": "per_curve",
+        "noise_components": ["thermal"],
     },
-    # ID 05: Size Ablation - Small
     {
-        "name": "05_Size_Small",
-        "hypothesis": "Can we make it faster?",
-        "active_features": ["mean", "std", "peak", "t1_artery"],
-        "noise_type": ["thermal"],
-        "encoder_type": "physics_processor",
-        "hidden_sizes": [128, 64, 32],  # Small
+        "name": "05_DC_Loss_Moderate",
+        "hypothesis": "Is stronger DC loss beneficial or does it fight supervised loss?",
+        "hidden_sizes": [32, 64, 128, 256],
+        "dc_weight": 0.001,
+        "noise_type": "gaussian",
+        "normalization_mode": "per_curve",
+        "noise_components": ["thermal"],
     },
-    # ID 06: Size Ablation - Large
+
+    # === NOISE MODEL FIDELITY ===
     {
-        "name": "06_Size_Large",
-        "hypothesis": "Are we underfitting?",
-        "active_features": ["mean", "std", "peak", "t1_artery"],
-        "noise_type": ["thermal"],
-        "encoder_type": "physics_processor",
-        "hidden_sizes": [512, 256, 128],  # Large
+        "name": "06_Rician_Noise",
+        "hypothesis": "Does Rician noise (correct MRI physics) improve real-world transfer?",
+        "hidden_sizes": [32, 64, 128, 256],
+        "dc_weight": 0.0,
+        "noise_type": "rician",
+        "normalization_mode": "global_scale",  # Rician works better with global_scale
+        "noise_components": ["thermal"],
     },
-    # ID 07: Robustness - Full Features
     {
-        "name": "07_Robust_Full",
-        "hypothesis": "Does NN beat LS on realistic noise?",
-        "active_features": ["mean", "std", "peak", "t1_artery"],
-        "noise_type": ["thermal", "physio", "drift"],  # Complex
-        "encoder_type": "physics_processor",
-        "hidden_sizes": [256, 128, 64],
+        "name": "07_Global_Scale_Gaussian",
+        "hypothesis": "Does preserving signal magnitude help even with Gaussian noise?",
+        "hidden_sizes": [32, 64, 128, 256],
+        "dc_weight": 0.0,
+        "noise_type": "gaussian",
+        "normalization_mode": "global_scale",
+        "noise_components": ["thermal"],
     },
-    # ID 08: Robustness - MLP Only
+
+    # === NOISE COMPLEXITY ===
     {
-        "name": "08_Robust_NoConv",
-        "hypothesis": "Does the Conv1D layer help filter complex noise?",
-        "active_features": ["mean", "std", "peak", "t1_artery"],
-        "noise_type": ["thermal", "physio", "drift"],
-        "encoder_type": "mlp_only",
-        "hidden_sizes": [256, 128, 64],
+        "name": "08_Complex_Noise",
+        "hypothesis": "How does the model handle realistic clinical noise patterns?",
+        "hidden_sizes": [32, 64, 128, 256],
+        "dc_weight": 0.0,
+        "noise_type": "gaussian",
+        "normalization_mode": "per_curve",
+        "noise_components": ["thermal", "physio", "drift"],
     },
-    # ID 09: Robustness - Peak Only
     {
-        "name": "09_Robust_Peak",
-        "hypothesis": "Does Peak height help even more when noise is messy?",
-        "active_features": ["mean", "std", "peak"],
-        "noise_type": ["thermal", "physio", "drift"],
-        "encoder_type": "physics_processor",
-        "hidden_sizes": [256, 128, 64],
+        "name": "09_Complex_Noise_DC",
+        "hypothesis": "Does DC loss help regularize against complex noise?",
+        "hidden_sizes": [32, 64, 128, 256],
+        "dc_weight": 0.0001,
+        "noise_type": "gaussian",
+        "normalization_mode": "per_curve",
+        "noise_components": ["thermal", "physio", "drift"],
     },
-    # ID 10: Robustness - Small Model
+
+    # === FULL REALISTIC SCENARIO ===
     {
-        "name": "10_Robust_Small",
-        "hypothesis": "Can a small model handle complex noise?",
-        "active_features": ["mean", "std", "peak", "t1_artery"],
-        "noise_type": ["thermal", "physio", "drift"],
-        "encoder_type": "physics_processor",
-        "hidden_sizes": [128, 64, 32],
+        "name": "10_Rician_Complex_Full",
+        "hypothesis": "Best realistic setting: Rician noise + complex artifacts + DC regularization",
+        "hidden_sizes": [32, 64, 128, 256],
+        "dc_weight": 0.0001,
+        "noise_type": "rician",
+        "normalization_mode": "global_scale",
+        "noise_components": ["thermal", "physio", "drift"],
     },
 ]
 
-# Base Config (shared across all experiments)
-# CRITICAL FIXES APPLIED: Match production hyperparameters for valid ablation comparisons
+# =========================================================
+# BASE CONFIG (Shared across all spatial experiments)
+# =========================================================
 BASE_CONFIG = {
     "training": {
-        "model_class_name": "DisentangledASLNet",
+        "model_class_name": "SpatialASLNet",
         "dropout_rate": 0.1,
         "weight_decay": 0.0001,
-        
-        # --- FIX 1: LOWER LEARNING RATE ---
-        # Was 0.0003. Changed to 5e-5 to match production fine-tuning stability.
-        # High LR during fine-tuning causes catastrophic forgetting of Stage 1 encoder.
         "learning_rate": 0.0001,
-        
-        # --- FIX 2: ADD MSE WEIGHT ---
-        # Crucial for convergence. Forces model to predict accurate means,
-        # not just "safely vague" predictions with high variance.
-        "mse_weight": 50.0,
-        
-        # --- FIX 3: ADD LOG-VAR REGULARIZATION ---
-        # Prevents uncertainty explosion/collapse during training.
-        "log_var_reg_lambda": 0.05,
-        
-        # --- FIX 4: ADD LOG-VAR BOUNDS (match production) ---
-        "log_var_cbf_min": -5.0,
-        "log_var_cbf_max": 5.0,
-        "log_var_att_min": -5.0,
-        "log_var_att_max": 14.0,
-        
-        "batch_size": 16,   # Reduced further for safety on T4
-        
-        # --- FIX 5: INCREASE ENSEMBLES (Statistical Significance) ---
-        # Was 1. Increased to 3 for statistically bulletproof comparisons.
-        # A single run might get lucky/unlucky with random seed.
-        "n_ensembles": 3,
-        
-        # --- FIX 6: INCREASE EPOCHS (Deep Convergence) ---
-        # Was 50. With lower LR, model learns slower but better.
-        "n_epochs": 100,
-        
+
+        # Loss configuration
+        "loss_weight_cbf": 1.0,
+        "loss_weight_att": 1.0,
+
+        # Uncertainty bounds (for future heteroscedastic uncertainty)
+        "log_var_cbf_min": -3.0,
+        "log_var_cbf_max": 7.0,
+        "log_var_att_min": -3.0,
+        "log_var_att_max": 10.0,
+
+        "batch_size": 32,
+        "n_ensembles": 3,          # 3 runs for statistical significance
+        "n_epochs": 50,            # Spatial converges faster than voxel
         "validation_steps_per_epoch": 25,
-        
-        # --- FIX 7: INCREASE PATIENCE (Overcome Plateaus) ---
-        # Was 10. Give model time to overcome learning plateaus.
-        "early_stopping_patience": 20,
+        "early_stopping_patience": 15,
         "early_stopping_min_delta": 0.0,
-        
         "norm_type": "batch",
-        "transformer_d_model_focused": 32,
-        "transformer_nhead_model": 4,
-        "transformer_nlayers_model": 2
     },
-    
-    # --- FIX 8: EXPLICIT FINE-TUNING CONFIG ---
-    "fine_tuning": {
-        "enabled": True,
-        "encoder_lr_factor": 20.0  # Encoder LR = learning_rate / 20
-    },
-    
+
     "data": {
         "use_offline_dataset": True,
         "offline_dataset_path": "asl_spatial_dataset_100k",
-        
-        # Using 100k for Spatial (Fits easily with Lazy Loading)
-        # Was 5k which caused OOM in 1D mode, for Spatial we simply iterate dataset
         "num_samples_to_load": 100000,
-        
-        "pld_values": [500, 1000, 1500, 2000, 2500, 3000]
+        "pld_values": [500, 1000, 1500, 2000, 2500, 3000],
+        "global_scale_factor": 10.0,  # Used when normalization_mode=global_scale
     },
+
     "simulation": {
         "T1_artery": 1850.0,
         "T_tau": 1800.0,
@@ -179,40 +167,26 @@ BASE_CONFIG = {
         "alpha_BS1": 1.0,
         "alpha_PCASL": 0.85,
         "alpha_VSASL": 0.56,
-        "pld_values": [500, 1000, 1500, 2000, 2500, 3000]
     },
-    # Configurable noise parameters for ablation studies
+
     "noise_config": {
-        # --- FIX 10: WIDEN SNR RANGE (Stress Testing) ---
-        # Was [1.5, 10.0]. Clinical data has "hero" scans (SNR 20+) and disasters.
-        # Wider range helps model interpolate better.
-        "snr_range": [1.0, 15.0],
-        
+        "snr_range": [3.0, 15.0],
         "physio_amp_range": [0.05, 0.15],
         "physio_freq_range": [0.5, 2.0],
         "drift_range": [-0.02, 0.02],
         "spike_probability": 0.05,
-        "spike_magnitude_range": [2.0, 5.0]
+        "spike_magnitude_range": [2.0, 5.0],
     },
+
     "wandb": {
-        "wandb_project": "asl-ablation-study",
-        "wandb_entity": "adikondepudi"
-    }
+        "wandb_project": "asl-spatial-ablation",
+        "wandb_entity": "adikondepudi",
+    },
 }
 
-def generate_slurm_script(job_name, run_dir, config_name, run_invivo=False):
-    """Creates a SLURM script that runs both training stages AND validation."""
-    
-    # SpatialASLNet does not support Stage 1 (Denoising/Reconstruction)
-    # We skip directly to Stage 2 (Regression)
-    stage_1_cmd = ""
-    stage_2_load_arg = f"--load-weights-from {run_dir}"
-    
-    # Check config for model class (hacky parse since we don't have the dict here easily)
-    # But we know we are forcing SpatialASLNet now.
-    # If we are strictly spatial, we skip stage 1.
-    stage_1_cmd = f"# Skipping Stage 1 for SpatialASLNet (Regression Only)\n"
-    stage_2_load_arg = "" # Start from scratch
+
+def generate_slurm_script(job_name: str, run_dir: str, config_path: str) -> str:
+    """Creates a SLURM script for spatial model training + validation."""
 
     script = f"""#!/bin/bash
 #SBATCH --job-name={job_name}
@@ -221,7 +195,7 @@ def generate_slurm_script(job_name, run_dir, config_name, run_invivo=False):
 #SBATCH --nodes=1
 #SBATCH --mem=64G
 #SBATCH --cpus-per-task=4
-#SBATCH --time=12:00:00
+#SBATCH --time=8:00:00
 #SBATCH --output={run_dir}/slurm.out
 #SBATCH --error={run_dir}/slurm.err
 
@@ -230,86 +204,74 @@ conda activate asl_multiverse
 
 cd $SLURM_SUBMIT_DIR
 
-echo "=== EXPERIMENT: {job_name} ==="
-echo "--- 1. STAGE 1: SKIPPED (Spatial) ---"
-{stage_1_cmd}
+echo "============================================"
+echo "EXPERIMENT: {job_name}"
+echo "Started: $(date)"
+echo "Host: $(hostname)"
+echo "============================================"
 
-echo "--- 2. STAGE 2: REGRESSION TRAINING ---"
-python main.py {config_name} --stage 2 --output-dir {run_dir} {stage_2_load_arg}
+echo ""
+echo "--- STAGE 2: SPATIAL REGRESSION TRAINING ---"
+python main.py {config_path} --stage 2 --output-dir {run_dir}
 
-echo "--- 3. AUTO-VALIDATION (NN vs LS) ---"
-python validate.py --run_dir {run_dir} --output_dir {run_dir}/validation_results
-"""
-    if run_invivo:
-        script += f"""
-echo "--- 4. IN-VIVO PREDICTION ---"
-# Assumes standard raw data location or passed via env var
-RAW_DATA=${{RAW_DATA:-"Multiverse"}}
-python predict_on_invivo.py processed_npy_cache {run_dir} {run_dir}/invivo_maps
+echo ""
+echo "--- VALIDATION ---"
+python validate.py {run_dir} --output-dir {run_dir}/validation_results
 
-echo "--- 5. IN-VIVO EVALUATION ---"
-python run_all_evaluations.py {run_dir}/invivo_maps processed_npy_cache {run_dir}/invivo_validation {run_dir} {run_dir}/invivo_metrics
-"""
-    script += """
+echo ""
 echo "--- JOB COMPLETE ---"
+echo "Finished: $(date)"
 """
     return script
 
-def load_base_config():
-    """Load base config from external YAML file."""
-    import copy
-    config_path = Path("config/base_template.yaml")
-    if config_path.exists():
-        with open(config_path, 'r') as f:
-            return yaml.safe_load(f)
-    else:
-        # Fallback to inline config if YAML doesn't exist
-        return BASE_CONFIG
 
 def main():
-    import copy
-    base_dir = Path("hpc_ablation_jobs")
+    base_dir = Path("spatial_ablation_jobs")
     base_dir.mkdir(exist_ok=True)
-    
-    # Load Base Template
-    base_config = load_base_config()
-    
+
     submit_script_lines = [
         "#!/bin/bash",
+        "# Spatial ASL U-Net Ablation Study",
+        "# Generated by setup_experiment_grid.py",
+        "",
         "echo '============================================'",
-        "echo 'ASL Ablation Study: 10 Targeted Experiments'",
+        "echo 'ASL Spatial Ablation: 10 Experiments'",
         "echo '============================================'",
-        ""
+        "",
     ]
-    
+
     for i, exp in enumerate(EXPERIMENTS):
         # 1. Create Experiment Directory
         exp_name = exp["name"]
         exp_dir = base_dir / exp_name
         exp_dir.mkdir(exist_ok=True)
-        
+
         # 2. Build Config (merge base + experiment specifics)
-        current_config = copy.deepcopy(base_config)
-        current_config['training']['model_class_name'] = "SpatialASLNet" # Force Spatial
-        current_config['active_features'] = exp['active_features']
-        current_config['data_noise_components'] = exp['noise_type']
-        current_config['training']['encoder_type'] = exp['encoder_type']
-        current_config['training']['hidden_sizes'] = exp['hidden_sizes']
-        current_config['experiment_hypothesis'] = exp['hypothesis']
-        
-        # Update offline dataset path to spatial dataset (generated by generate_spatial_data.sh)
-        current_config['data']['offline_dataset_path'] = 'asl_spatial_dataset_100k'
-        
+        config = copy.deepcopy(BASE_CONFIG)
+
+        # Apply experiment-specific settings
+        config["training"]["hidden_sizes"] = exp["hidden_sizes"]
+        config["training"]["dc_weight"] = exp["dc_weight"]
+        config["data"]["noise_type"] = exp["noise_type"]
+        config["data"]["normalization_mode"] = exp["normalization_mode"]
+        config["data"]["data_noise_components"] = exp["noise_components"]
+
+        # Store hypothesis for reference
+        config["_experiment"] = {
+            "name": exp_name,
+            "hypothesis": exp["hypothesis"],
+        }
+
+        # Write config
         config_path = exp_dir / "config.yaml"
         with open(config_path, 'w') as f:
-            yaml.dump(current_config, f, default_flow_style=False)
-            
-        # 3. Write SLURM Script (with optional in-vivo)
-        run_invivo = exp.get('run_invivo', False)
+            yaml.dump(config, f, default_flow_style=False, sort_keys=False)
+
+        # 3. Write SLURM Script
         slurm_path = exp_dir / "run.slurm"
         with open(slurm_path, 'w') as f:
-            f.write(generate_slurm_script(exp_name, str(exp_dir), str(config_path), run_invivo))
-            
+            f.write(generate_slurm_script(exp_name, str(exp_dir), str(config_path)))
+
         # 4. Add to Master Submit Script
         submit_script_lines.append(f"# Experiment {i+1}: {exp_name}")
         submit_script_lines.append(f"# Hypothesis: {exp['hypothesis']}")
@@ -317,22 +279,48 @@ def main():
         submit_script_lines.append(f'echo "Submitted {exp_name} as Job ID: $JOB_{i}"')
         submit_script_lines.append("")
 
-    # 5. Build dependency string from captured job IDs
+    # 5. Add aggregation job with dependency
     num_jobs = len(EXPERIMENTS)
     job_vars = ":".join([f"$JOB_{i}" for i in range(num_jobs)])
-    submit_script_lines.append("# Launch Aggregator with Dependency on all jobs")
-    submit_script_lines.append(f'DEPENDENCY="{job_vars}"')
-    submit_script_lines.append('sbatch --dependency=afterany:${DEPENDENCY} aggregate_results.slurm')
-    submit_script_lines.append('echo "Aggregator job submitted with dependency on all experiments"')
-    
+    submit_script_lines.extend([
+        "# Wait for all experiments, then aggregate results",
+        f'DEPENDENCY="{job_vars}"',
+        "",
+        "# Create aggregation script if it doesn't exist",
+        "if [ -f aggregate_results.slurm ]; then",
+        '    sbatch --dependency=afterany:${DEPENDENCY} aggregate_results.slurm',
+        '    echo "Aggregator job submitted with dependency on all experiments"',
+        "else",
+        '    echo "No aggregate_results.slurm found - skipping aggregation"',
+        "fi",
+        "",
+        "echo ''",
+        "echo 'All jobs submitted. Monitor with: squeue -u $USER'",
+    ])
+
     # Write Master Script
     with open("submit_all.sh", "w") as f:
         f.write("\n".join(submit_script_lines))
-        
-    print(f"Generated {len(EXPERIMENTS)} targeted experiment configurations:")
-    for exp in EXPERIMENTS:
-        print(f"  - {exp['name']}: {exp['hypothesis']}")
-    print("\nRun: 'bash submit_all.sh' to launch everything.")
+
+    # Print summary
+    print("=" * 60)
+    print("SPATIAL ASL ABLATION STUDY")
+    print("=" * 60)
+    print(f"\nGenerated {len(EXPERIMENTS)} experiments in '{base_dir}/':\n")
+
+    for i, exp in enumerate(EXPERIMENTS):
+        print(f"  {exp['name']}")
+        print(f"    → {exp['hypothesis']}")
+        print(f"    → U-Net: {exp['hidden_sizes']}, DC: {exp['dc_weight']}, "
+              f"Noise: {exp['noise_type']}/{exp['noise_components']}")
+        print()
+
+    print("=" * 60)
+    print("NEXT STEPS:")
+    print("  1. Generate data:  sbatch generate_spatial_data.sh")
+    print("  2. Run experiments: bash submit_all.sh")
+    print("=" * 60)
+
 
 if __name__ == "__main__":
     main()

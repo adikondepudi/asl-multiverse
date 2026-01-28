@@ -125,6 +125,7 @@ training:
   early_stopping_min_delta: 0.0
   norm_type: "batch"
   hidden_sizes: [32, 64, 128, 256]
+  dc_weight: 0.0  # Data consistency loss weight (0.0 = disabled, 0.0001-0.001 for regularization)
 
 data:
   use_offline_dataset: true
@@ -174,6 +175,7 @@ training:
   hidden_sizes: [128, 64, 32]
   transformer_d_model_focused: 32
   transformer_nhead_model: 4
+  dc_weight: 0.0  # Data consistency loss weight (0.0 = disabled)
 
 data:
   use_offline_dataset: true
