@@ -68,12 +68,19 @@ class EnhancedASLTrainer:
         # NEW: Ablation Study Configs
         self.active_features = model_config.get('active_features', ['mean', 'std', 'peak', 't1_artery'])
         self.data_noise_components = model_config.get('data_noise_components', ['thermal'])
-        
+
+        # NEW: Normalization mode ('per_curve' or 'global_scale')
+        self.normalization_mode = model_config.get('normalization_mode', 'per_curve')
+        self.global_scale_factor = model_config.get('global_scale_factor', 10.0)
+
         # Initialize Noise Engine
         self.noise_injector = NoiseInjector(model_config)
         
         logger.info(f"Ablation Config - Active Features: {self.active_features}")
         logger.info(f"Ablation Config - Noise Components: {self.data_noise_components}")
+        logger.info(f"Ablation Config - Normalization Mode: {self.normalization_mode}")
+        if self.normalization_mode == 'global_scale':
+            logger.info(f"Ablation Config - Global Scale Factor: {self.global_scale_factor}")
         
         logger.info("Initializing models (Float32)...")
         self.models = [model_class(**model_config).to(self.device) for _ in range(n_ensembles)]
@@ -172,20 +179,28 @@ class EnhancedASLTrainer:
         # ========== 1. MODULAR NOISE GENERATION (Via Engine) ==========
         noisy_signals = self.noise_injector.apply_noise(raw_signals, self.ref_signal_gpu, self.pld_scaling)
         
-        # ========== 2. COMPUTE ALL FEATURES ==========
+        # ========== 2. COMPUTE SHAPE/SCALED VECTORS (Mode-dependent) ==========
         pcasl_raw = noisy_signals[:, :n_plds]
         vsasl_raw = noisy_signals[:, n_plds:]
-        
-        # Basic stats (always computed)
-        pcasl_mu = torch.mean(pcasl_raw, dim=1, keepdim=True)
-        pcasl_sigma = torch.std(pcasl_raw, dim=1, keepdim=True) + 1e-6
-        pcasl_shape = (pcasl_raw - pcasl_mu) / pcasl_sigma
-        
-        vsasl_mu = torch.mean(vsasl_raw, dim=1, keepdim=True)
-        vsasl_sigma = torch.std(vsasl_raw, dim=1, keepdim=True) + 1e-6
-        vsasl_shape = (vsasl_raw - vsasl_mu) / vsasl_sigma
-        
-        shape_vector = torch.cat([pcasl_shape, vsasl_shape], dim=1)
+
+        if self.normalization_mode == 'global_scale':
+            # Global scaling: multiply by factor to get into ~0-1 range
+            # This preserves relative magnitudes (similar to IVIM-NET's S(b)/S(b=0))
+            pcasl_scaled = pcasl_raw * self.global_scale_factor
+            vsasl_scaled = vsasl_raw * self.global_scale_factor
+            shape_vector = torch.cat([pcasl_scaled, vsasl_scaled], dim=1)
+        else:
+            # Per-curve normalization (legacy behavior)
+            # Creates "shape vectors" that are SNR-invariant
+            pcasl_mu = torch.mean(pcasl_raw, dim=1, keepdim=True)
+            pcasl_sigma = torch.std(pcasl_raw, dim=1, keepdim=True) + 1e-6
+            pcasl_shape = (pcasl_raw - pcasl_mu) / pcasl_sigma
+
+            vsasl_mu = torch.mean(vsasl_raw, dim=1, keepdim=True)
+            vsasl_sigma = torch.std(vsasl_raw, dim=1, keepdim=True) + 1e-6
+            vsasl_shape = (vsasl_raw - vsasl_mu) / vsasl_sigma
+
+            shape_vector = torch.cat([pcasl_shape, vsasl_shape], dim=1)
         
         # ========== 3. DYNAMIC FEATURE SELECTION (Via Engine) ==========
         raw_features = FeatureRegistry.compute_feature_vector(noisy_signals, n_plds, self.active_features)

@@ -37,6 +37,24 @@ data:
   active_features: ["mean", "std"]
   data_noise_components: ["thermal"]
 
+  # ===== NEW: Noise and Normalization Options =====
+  # noise_type: Type of thermal noise to apply
+  #   - 'gaussian': Standard Gaussian additive noise (default, legacy)
+  #   - 'rician': Rician noise - correct MRI physics for magnitude images
+  #               Creates positive bias at low SNR, matching real MRI data
+  noise_type: "gaussian"
+
+  # normalization_mode: How to normalize input signals
+  #   - 'per_curve': Z-score normalize each curve individually (default)
+  #                  Creates SNR-invariant "shape vectors"
+  #   - 'global_scale': Multiply all signals by global_scale_factor
+  #                     Preserves absolute magnitude info (like IVIM-NET's S(b)/S(b=0))
+  normalization_mode: "per_curve"
+
+  # global_scale_factor: Scale factor for 'global_scale' mode
+  #   Typical ASL signals are ~0.01-0.1, so factor of 10 gives ~0.1-1.0 range
+  global_scale_factor: 10.0
+
 simulation:
   T1_artery: 1850.0
   T_tau: 1800.0

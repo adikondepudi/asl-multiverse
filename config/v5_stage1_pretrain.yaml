@@ -34,7 +34,12 @@ data:
   use_offline_dataset: true
   offline_dataset_path: "asl_offline_dataset_10M_v3"
   pld_values: [500, 1000, 1500, 2000, 2500, 3000]
-  num_samples: 1000000 
+  num_samples: 1000000
+
+  # Noise and normalization settings (see base_template.yaml for full docs)
+  noise_type: "gaussian"           # Options: 'gaussian' (default), 'rician'
+  normalization_mode: "per_curve"  # Options: 'per_curve' (default), 'global_scale'
+  global_scale_factor: 10.0        # Used only when normalization_mode='global_scale' 
 
 simulation:
   T1_artery: 1850.0

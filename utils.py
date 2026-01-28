@@ -11,22 +11,37 @@ def process_signals_dynamic(raw_signals, norm_stats, config, t1_values=None, z_v
     """
     Dynamically constructs input vectors based on config['active_features'].
     Uses FeatureRegistry.compute_feature_vector() as single source of truth.
+
+    Supports two normalization modes (config['normalization_mode']):
+    - 'per_curve' (default): Normalize each curve by its mean/std (shape vectors)
+    - 'global_scale': Multiply by global_scale_factor to get signals into ~0-1 range.
+      This preserves absolute magnitude information, similar to IVIM-NET approach.
     """
     num_plds = len(config['pld_values'])
-    
-    # 1. Curve Normalization (Always standard)
+    normalization_mode = config.get('normalization_mode', 'per_curve')
+    global_scale_factor = config.get('global_scale_factor', 10.0)
+
     pcasl_raw = raw_signals[:, :num_plds]
     vsasl_raw = raw_signals[:, num_plds:]
-    
-    pcasl_mu = np.mean(pcasl_raw, axis=1, keepdims=True)
-    pcasl_std = np.std(pcasl_raw, axis=1, keepdims=True) + 1e-6
-    pcasl_shape = (pcasl_raw - pcasl_mu) / pcasl_std
-    
-    vsasl_mu = np.mean(vsasl_raw, axis=1, keepdims=True)
-    vsasl_std = np.std(vsasl_raw, axis=1, keepdims=True) + 1e-6
-    vsasl_shape = (vsasl_raw - vsasl_mu) / vsasl_std
-    
-    input_parts = [pcasl_shape, vsasl_shape]
+
+    if normalization_mode == 'global_scale':
+        # Global scaling: multiply signals by factor to get into ~0-1 range
+        # This preserves relative magnitudes between curves (like S(b)/S(b=0) in IVIM)
+        pcasl_scaled = pcasl_raw * global_scale_factor
+        vsasl_scaled = vsasl_raw * global_scale_factor
+        input_parts = [pcasl_scaled, vsasl_scaled]
+    else:
+        # Per-curve normalization (legacy behavior)
+        # Creates "shape vectors" that are SNR-invariant
+        pcasl_mu = np.mean(pcasl_raw, axis=1, keepdims=True)
+        pcasl_std = np.std(pcasl_raw, axis=1, keepdims=True) + 1e-6
+        pcasl_shape = (pcasl_raw - pcasl_mu) / pcasl_std
+
+        vsasl_mu = np.mean(vsasl_raw, axis=1, keepdims=True)
+        vsasl_std = np.std(vsasl_raw, axis=1, keepdims=True) + 1e-6
+        vsasl_shape = (vsasl_raw - vsasl_mu) / vsasl_std
+
+        input_parts = [pcasl_shape, vsasl_shape]
     
     s_mean = np.array(norm_stats['scalar_features_mean'])
     s_std = np.array(norm_stats['scalar_features_std']) + 1e-6
@@ -164,10 +179,21 @@ class ParallelStreamingStatsCalculator:
             'scalar_features_std': np.clip(scalar_std, 1e-6, None).tolist()
         }
 
-def process_signals_cpu(signals_unnorm: np.ndarray, norm_stats: dict, num_plds: int, t1_values: Optional[np.ndarray] = None, z_values: Optional[np.ndarray] = None) -> np.ndarray:
+def process_signals_cpu(signals_unnorm: np.ndarray, norm_stats: dict, num_plds: int,
+                        t1_values: Optional[np.ndarray] = None, z_values: Optional[np.ndarray] = None,
+                        normalization_mode: str = 'per_curve', global_scale_factor: float = 10.0) -> np.ndarray:
     """
     CPU version of preprocessing for validation data.
     Gracefully handles dimension mismatch between new engineered features (10) and old stats (8).
+
+    Args:
+        signals_unnorm: Raw signals with optional engineered features appended
+        norm_stats: Normalization statistics dictionary
+        num_plds: Number of PLDs
+        t1_values: Optional T1 values for conditioning
+        z_values: Optional Z slice values for conditioning
+        normalization_mode: 'per_curve' (default) or 'global_scale'
+        global_scale_factor: Scale factor for global_scale mode (default: 10.0)
     """
     raw_curves = signals_unnorm[:, :num_plds * 2]
     eng_ttp_com = signals_unnorm[:, num_plds * 2:]
@@ -175,15 +201,22 @@ def process_signals_cpu(signals_unnorm: np.ndarray, norm_stats: dict, num_plds: 
     pcasl_raw = raw_curves[:, :num_plds]
     vsasl_raw = raw_curves[:, num_plds:]
 
-    pcasl_mu = np.mean(pcasl_raw, axis=1, keepdims=True)
-    pcasl_sigma = np.std(pcasl_raw, axis=1, keepdims=True)
-    pcasl_shape = (pcasl_raw - pcasl_mu) / (pcasl_sigma + 1e-6)
+    if normalization_mode == 'global_scale':
+        # Global scaling: multiply signals by factor to get into ~0-1 range
+        pcasl_scaled = pcasl_raw * global_scale_factor
+        vsasl_scaled = vsasl_raw * global_scale_factor
+        shape_vector = np.concatenate([pcasl_scaled, vsasl_scaled], axis=1)
+    else:
+        # Per-curve normalization (legacy behavior)
+        pcasl_mu = np.mean(pcasl_raw, axis=1, keepdims=True)
+        pcasl_sigma = np.std(pcasl_raw, axis=1, keepdims=True)
+        pcasl_shape = (pcasl_raw - pcasl_mu) / (pcasl_sigma + 1e-6)
 
-    vsasl_mu = np.mean(vsasl_raw, axis=1, keepdims=True)
-    vsasl_sigma = np.std(vsasl_raw, axis=1, keepdims=True)
-    vsasl_shape = (vsasl_raw - vsasl_mu) / (vsasl_sigma + 1e-6)
+        vsasl_mu = np.mean(vsasl_raw, axis=1, keepdims=True)
+        vsasl_sigma = np.std(vsasl_raw, axis=1, keepdims=True)
+        vsasl_shape = (vsasl_raw - vsasl_mu) / (vsasl_sigma + 1e-6)
 
-    shape_vector = np.concatenate([pcasl_shape, vsasl_shape], axis=1)
+        shape_vector = np.concatenate([pcasl_shape, vsasl_shape], axis=1)
     scalar_features_unnorm = np.concatenate([pcasl_mu, pcasl_sigma, vsasl_mu, vsasl_sigma, eng_ttp_com], axis=1)
     
     s_mean = np.array(norm_stats['scalar_features_mean'])

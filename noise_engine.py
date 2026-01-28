@@ -14,18 +14,29 @@ class NoiseInjector:
     """
     Single Source of Truth for Noise Generation.
     Handles both PyTorch Tensors (Trainer) and NumPy Arrays (Validation/Sim).
+
+    Supports two noise types:
+    - 'gaussian': Standard Gaussian noise (default, legacy behavior)
+    - 'rician': Rician noise - correct MRI physics for magnitude images
+      Rician noise: S_noisy = sqrt((S + N_real)^2 + N_imag^2)
+      At low SNR, this creates positive bias that matches real MRI data.
     """
     def __init__(self, config: Dict):
         self.config = config.get('noise_config', {})
         self.components = config.get('data_noise_components', ['thermal'])
-        
+
+        # NEW: Noise type selection ('gaussian' or 'rician')
+        self.noise_type = config.get('noise_type', 'gaussian').lower()
+        if self.noise_type not in ('gaussian', 'rician'):
+            raise ValueError(f"Invalid noise_type: {self.noise_type}. Must be 'gaussian' or 'rician'.")
+
         # Ranges
         self.snr_range = self.config.get('snr_range', [1.0, 15.0])
         self.physio_amp_range = self.config.get('physio_amp_range', [0.05, 0.15])
         self.drift_range = self.config.get('drift_range', [-0.02, 0.02])
         self.spike_prob = self.config.get('spike_probability', 0.05)
         self.spike_mag = self.config.get('spike_magnitude_range', [2.0, 5.0])
-        
+
         # Spatial noise parameters
         self.spatial_noise_sigma = self.config.get('spatial_noise_sigma', 0.8)
         self.motion_probability = self.config.get('motion_probability', 0.2)
@@ -73,10 +84,26 @@ class NoiseInjector:
         total_noise = xp.zeros_like(signals)
 
         if 'thermal' in self.components:
-            if is_torch:
-                total_noise += torch.randn_like(signals) * noise_sigma * s_vec
+            if self.noise_type == 'rician':
+                # Rician noise: magnitude of complex signal with Gaussian noise
+                # S_noisy = sqrt((S + N_real)^2 + N_imag^2)
+                # This creates the positive bias seen in real MRI magnitude images
+                if is_torch:
+                    noise_real = torch.randn_like(signals) * noise_sigma * s_vec
+                    noise_imag = torch.randn_like(signals) * noise_sigma * s_vec
+                    # Apply Rician formula - this replaces additive noise
+                    signals = torch.sqrt((signals + noise_real)**2 + noise_imag**2)
+                else:
+                    noise_real = np.random.randn(*signals.shape) * noise_sigma * s_vec
+                    noise_imag = np.random.randn(*signals.shape) * noise_sigma * s_vec
+                    signals = np.sqrt((signals + noise_real)**2 + noise_imag**2)
+                # For Rician, we don't add to total_noise since we modified signals directly
             else:
-                total_noise += np.random.randn(*signals.shape) * noise_sigma * s_vec
+                # Standard Gaussian additive noise (legacy behavior)
+                if is_torch:
+                    total_noise += torch.randn_like(signals) * noise_sigma * s_vec
+                else:
+                    total_noise += np.random.randn(*signals.shape) * noise_sigma * s_vec
 
         if 'physio' in self.components:
             t = xp.arange(seq_len, device=device) if is_torch else np.arange(seq_len)

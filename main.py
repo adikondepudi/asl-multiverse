@@ -73,6 +73,16 @@ class ResearchConfig:
     active_features: List[str] = field(default_factory=lambda: ['mean', 'std', 'peak', 't1_artery'])
     data_noise_components: List[str] = field(default_factory=lambda: ['thermal'])
 
+    # NEW: Noise and Normalization Options
+    # noise_type: 'gaussian' (default) or 'rician' (correct MRI physics)
+    noise_type: str = 'gaussian'
+    # normalization_mode: 'per_curve' (SNR-invariant shape vectors) or 'global_scale' (preserves magnitude)
+    normalization_mode: str = 'per_curve'
+    # global_scale_factor: multiplier for 'global_scale' mode to get signals into ~0-1 range
+    global_scale_factor: float = 10.0
+    # noise_config: dict for NoiseInjector configuration (snr_range, physio, drift, spikes, etc.)
+    noise_config: Optional[Dict[str, Any]] = None
+
 def _generate_simple_validation_set(simulator: RealisticASLSimulator, plds: np.ndarray, n_subjects: int, conditions: List, noise_levels: List) -> Dict:
     """Generates a fixed validation set."""
     dataset = {'signals': [], 'parameters': [], 'conditions': [], 'noise_levels': [], 'perturbed_params': []}
@@ -434,9 +444,13 @@ if __name__ == "__main__":
         FeatureRegistry.validate_noise_components(config_obj.data_noise_components)
         FeatureRegistry.validate_plds(config_obj.pld_values)
         FeatureRegistry.validate_encoder_type(config_obj.encoder_type)
+        FeatureRegistry.validate_noise_type(config_obj.noise_type)
+        FeatureRegistry.validate_normalization_mode(config_obj.normalization_mode)
         script_logger.info(f"Config validated: features={config_obj.active_features}, "
-                          f"noise={config_obj.data_noise_components}, "
-                          f"encoder={config_obj.encoder_type}")
+                          f"noise_components={config_obj.data_noise_components}, "
+                          f"encoder={config_obj.encoder_type}, "
+                          f"noise_type={config_obj.noise_type}, "
+                          f"norm_mode={config_obj.normalization_mode}")
     except FeatureConfigError as e:
         script_logger.error(f"CONFIG VALIDATION FAILED: {e}")
         sys.exit(1)

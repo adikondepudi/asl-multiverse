@@ -71,7 +71,13 @@ class FeatureRegistry:
     
     # Valid noise component names
     VALID_NOISE_COMPONENTS = {'thermal', 'physio', 'drift', 'spikes'}
-    
+
+    # Valid noise types for thermal noise model
+    VALID_NOISE_TYPES = {'gaussian', 'rician'}
+
+    # Valid normalization modes
+    VALID_NORMALIZATION_MODES = {'per_curve', 'global_scale'}
+
     # Valid encoder types
     VALID_ENCODER_TYPES = {'physics_processor', 'mlp_only'}
     
@@ -132,7 +138,7 @@ class FeatureRegistry:
     def validate_encoder_type(cls, encoder_type: str) -> None:
         """
         Validate encoder type string.
-        
+
         Raises:
             FeatureConfigError: If unknown encoder type
         """
@@ -140,6 +146,40 @@ class FeatureRegistry:
             raise FeatureConfigError(
                 f"Unknown encoder_type: '{encoder_type}'. "
                 f"Valid types: {cls.VALID_ENCODER_TYPES}"
+            )
+
+    @classmethod
+    def validate_noise_type(cls, noise_type: str) -> None:
+        """
+        Validate noise type string.
+
+        Args:
+            noise_type: 'gaussian' or 'rician'
+
+        Raises:
+            FeatureConfigError: If unknown noise type
+        """
+        if noise_type.lower() not in cls.VALID_NOISE_TYPES:
+            raise FeatureConfigError(
+                f"Unknown noise_type: '{noise_type}'. "
+                f"Valid types: {cls.VALID_NOISE_TYPES}"
+            )
+
+    @classmethod
+    def validate_normalization_mode(cls, normalization_mode: str) -> None:
+        """
+        Validate normalization mode string.
+
+        Args:
+            normalization_mode: 'per_curve' or 'global_scale'
+
+        Raises:
+            FeatureConfigError: If unknown normalization mode
+        """
+        if normalization_mode.lower() not in cls.VALID_NORMALIZATION_MODES:
+            raise FeatureConfigError(
+                f"Unknown normalization_mode: '{normalization_mode}'. "
+                f"Valid modes: {cls.VALID_NORMALIZATION_MODES}"
             )
     
     @classmethod
@@ -200,18 +240,33 @@ class FeatureRegistry:
         encoder_type = config.get('encoder_type')
         if encoder_type:
             cls.validate_encoder_type(encoder_type)
-        
+
+        # Validate noise type if present (defaults to 'gaussian')
+        noise_type = config.get('noise_type', 'gaussian')
+        cls.validate_noise_type(noise_type)
+
+        # Validate normalization mode if present (defaults to 'per_curve')
+        normalization_mode = config.get('normalization_mode', 'per_curve')
+        cls.validate_normalization_mode(normalization_mode)
+
+        # Validate global_scale_factor if using global_scale mode
+        if normalization_mode == 'global_scale':
+            global_scale_factor = config.get('global_scale_factor', 10.0)
+            if global_scale_factor <= 0:
+                raise FeatureConfigError(f"global_scale_factor must be > 0, got {global_scale_factor}")
+
         # Validate numeric ranges
         n_ensembles = config.get('n_ensembles', 1)
         if n_ensembles < 1:
             raise FeatureConfigError(f"n_ensembles must be >= 1, got {n_ensembles}")
-        
+
         batch_size = config.get('batch_size', 256)
         if batch_size < 1:
             raise FeatureConfigError(f"batch_size must be >= 1, got {batch_size}")
-        
+
         logger.info(f"Config validated: {len(active_features)} features, "
-                    f"{len(pld_values)} PLDs, {noise_components} noise")
+                    f"{len(pld_values)} PLDs, {noise_components} noise, "
+                    f"noise_type={noise_type}, norm_mode={normalization_mode}")
     
     @classmethod
     def get_input_size(cls, n_plds: int, active_features: List[str]) -> int:
