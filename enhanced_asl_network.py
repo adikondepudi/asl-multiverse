@@ -453,12 +453,20 @@ class CustomLoss(nn.Module):
         elif self.training_stage == 2:
             cbf_pred_norm, att_pred_norm, cbf_log_var, att_log_var, _, _ = model_outputs
             cbf_true_norm, att_true_norm = targets[:, 0:1], targets[:, 1:2]
-            
-            cbf_precision = torch.exp(-cbf_log_var)
-            att_precision = torch.exp(-att_log_var)
 
-            cbf_nll_loss = 0.5 * (cbf_precision * (cbf_pred_norm - cbf_true_norm)**2 + cbf_log_var)
-            att_nll_loss = 0.5 * (att_precision * (att_pred_norm - att_true_norm)**2 + att_log_var)
+            # Clamp log_var to prevent precision explosion
+            # log_var in [-10, 10] keeps precision in [exp(-10), exp(10)] ≈ [4.5e-5, 22026]
+            # Further clamp precision directly to avoid numerical instability
+            MAX_PRECISION = 1000.0  # Prevents NaN when log_var is very negative
+
+            cbf_log_var_clamped = torch.clamp(cbf_log_var, min=-7.0, max=10.0)
+            att_log_var_clamped = torch.clamp(att_log_var, min=-7.0, max=10.0)
+
+            cbf_precision = torch.clamp(torch.exp(-cbf_log_var_clamped), max=MAX_PRECISION)
+            att_precision = torch.clamp(torch.exp(-att_log_var_clamped), max=MAX_PRECISION)
+
+            cbf_nll_loss = 0.5 * (cbf_precision * (cbf_pred_norm - cbf_true_norm)**2 + cbf_log_var_clamped)
+            att_nll_loss = 0.5 * (att_precision * (att_pred_norm - att_true_norm)**2 + att_log_var_clamped)
 
             weighted_cbf_loss = self.w_cbf * cbf_nll_loss
             weighted_att_loss = self.w_att * att_nll_loss

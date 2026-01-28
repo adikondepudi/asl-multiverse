@@ -27,6 +27,7 @@ try:
     from asl_simulation import ASLParameters
     from enhanced_simulation import RealisticASLSimulator
     from enhanced_asl_network import DisentangledASLNet
+    from spatial_asl_network import SpatialASLNet  # NEW: Import spatial model
     from utils import process_signals_dynamic, get_grid_search_initial_guess
     from multiverse_functions import fit_PCVSASL_misMatchPLD_vectInit_pep
     from feature_registry import FeatureRegistry, validate_signals, validate_norm_stats
@@ -218,6 +219,27 @@ class ASLValidator:
         
         print(f"   > Saved interactive dashboard data to {json_path}")
 
+    def _detect_model_architecture(self, state_dict_keys):
+        """
+        Auto-detect model architecture from checkpoint keys.
+
+        Returns:
+            str: 'spatial' for SpatialASLNet (U-Net), 'voxel' for DisentangledASLNet
+        """
+        keys_str = ' '.join(state_dict_keys)
+
+        # SpatialASLNet has encoder1.double_conv, encoder2, etc.
+        if 'encoder1.double_conv' in keys_str or 'encoder1.' in keys_str:
+            return 'spatial'
+
+        # DisentangledASLNet has encoder.pcasl_tower or encoder.encoder_mlp
+        if 'encoder.pcasl_tower' in keys_str or 'encoder.encoder_mlp' in keys_str:
+            return 'voxel'
+
+        # Default to voxel if unclear
+        logger.warning("Could not auto-detect architecture from checkpoint keys. Defaulting to 'voxel'.")
+        return 'voxel'
+
     def _load_ensemble(self):
         models_dir = self.run_dir / 'trained_models'
         if not models_dir.exists():
@@ -225,70 +247,101 @@ class ASLValidator:
              sys.exit(1)
 
         model_files = sorted(list(models_dir.glob('ensemble_model_*.pt')))
-        
+
         if not model_files:
             logger.error(f"No .pt files found in {models_dir}")
             sys.exit(1)
-        
+
         logger.info(f"Found {len(model_files)} models. Loading onto {self.device}...")
-        
+
         loaded_models = []
-        
-        # Extract Architecture Params
-        hidden_sizes = self.config.get('hidden_sizes', [128, 64, 32])
-        d_model = self.config.get('transformer_d_model_focused', 32)
-        nhead = self.config.get('transformer_nhead_model', 4)
-        moe_config = self.config.get('moe', None)
-        encoder_type = self.config.get('encoder_type', 'physics_processor')  # <-- NEW
-        
-        # --- AUTO-DETECT NUM_SCALAR_FEATURES ---
-        # Peek at the first model to find the input dimension of the FiLM layer
-        try:
-            first_state = torch.load(model_files[0], map_location='cpu')
-            sd = first_state['model_state_dict'] if 'model_state_dict' in first_state else first_state
-            # Shape is [out, in]. index 1 is input dimension.
-            # For MLP-only encoder, use a different key
-            if encoder_type.lower() == 'mlp_only':
-                self.detected_scalar_features = sd['encoder.encoder_mlp.0.weight'].shape[1] - (len(self.plds) * 2)
-            else:
-                self.detected_scalar_features = sd['encoder.pcasl_film.generator.0.weight'].shape[1]
-            logger.info(f"Auto-detected scalar features from checkpoint: {self.detected_scalar_features}")
-        except Exception as e:
-            logger.warning(f"Could not auto-detect scalar features: {e}. Defaulting to norm_stats + 1.")
-            self.detected_scalar_features = len(self.norm_stats['scalar_features_mean']) + 1
 
-        # Input size is dynamically determined from checkpoint - scalars are auto-detected
-        input_size = len(self.plds) * 2 + self.detected_scalar_features
+        # --- AUTO-DETECT MODEL ARCHITECTURE FROM CHECKPOINT ---
+        first_state = torch.load(model_files[0], map_location='cpu')
+        sd = first_state['model_state_dict'] if 'model_state_dict' in first_state else first_state
+        self.model_architecture = self._detect_model_architecture(list(sd.keys()))
+        logger.info(f"Auto-detected model architecture: {self.model_architecture}")
 
-        for mp in model_files:
-            print(f"   ... Loading {mp.name}")
-            
-            # Reconstruct exact architecture
-            model = DisentangledASLNet(
-                mode='regression',
-                input_size=input_size,
-                n_plds=len(self.plds),
-                num_scalar_features=self.detected_scalar_features,
-                hidden_sizes=hidden_sizes,
-                transformer_d_model_focused=d_model,
-                transformer_nhead_model=nhead,
-                dropout_rate=0.0,
-                moe=moe_config,
-                encoder_type=encoder_type  # <-- NEW
-            )
-            
+        if self.model_architecture == 'spatial':
+            # --- SPATIAL MODEL LOADING (SpatialASLNet / U-Net) ---
+            logger.info("Loading SpatialASLNet (U-Net) models for spatial validation...")
+            self.is_spatial = True
+
+            for mp in model_files:
+                print(f"   ... Loading {mp.name}")
+
+                # SpatialASLNet doesn't need most config params - just n_plds
+                model = SpatialASLNet(n_plds=len(self.plds))
+
+                try:
+                    state_dict = torch.load(mp, map_location=self.device)
+                    if 'model_state_dict' in state_dict:
+                        model.load_state_dict(state_dict['model_state_dict'])
+                    else:
+                        model.load_state_dict(state_dict)
+
+                    model.to(self.device)
+                    model.eval()
+                    loaded_models.append(model)
+                except Exception as e:
+                    logger.error(f"Failed to load {mp.name}: {e}")
+        else:
+            # --- VOXEL MODEL LOADING (DisentangledASLNet) ---
+            self.is_spatial = False
+
+            # Extract Architecture Params
+            hidden_sizes = self.config.get('hidden_sizes', [128, 64, 32])
+            d_model = self.config.get('transformer_d_model_focused', 32)
+            nhead = self.config.get('transformer_nhead_model', 4)
+            moe_config = self.config.get('moe', None)
+            encoder_type = self.config.get('encoder_type', 'physics_processor')
+
+            # --- AUTO-DETECT NUM_SCALAR_FEATURES ---
+            # Peek at the first model to find the input dimension of the FiLM layer
             try:
-                state_dict = torch.load(mp, map_location=self.device)
-                if 'model_state_dict' in state_dict:
-                    model.load_state_dict(state_dict['model_state_dict'])
+                # Shape is [out, in]. index 1 is input dimension.
+                # For MLP-only encoder, use a different key
+                if encoder_type.lower() == 'mlp_only':
+                    self.detected_scalar_features = sd['encoder.encoder_mlp.0.weight'].shape[1] - (len(self.plds) * 2)
                 else:
-                    model.load_state_dict(state_dict)
-                
-                model.to(self.device)
-                model.eval()
-                loaded_models.append(model)
+                    self.detected_scalar_features = sd['encoder.pcasl_film.generator.0.weight'].shape[1]
+                logger.info(f"Auto-detected scalar features from checkpoint: {self.detected_scalar_features}")
             except Exception as e:
-                logger.error(f"Failed to load {mp.name}: {e}")
+                logger.warning(f"Could not auto-detect scalar features: {e}. Defaulting to norm_stats + 1.")
+                self.detected_scalar_features = len(self.norm_stats['scalar_features_mean']) + 1
+
+            # Input size is dynamically determined from checkpoint - scalars are auto-detected
+            input_size = len(self.plds) * 2 + self.detected_scalar_features
+
+            for mp in model_files:
+                print(f"   ... Loading {mp.name}")
+
+                # Reconstruct exact architecture
+                model = DisentangledASLNet(
+                    mode='regression',
+                    input_size=input_size,
+                    n_plds=len(self.plds),
+                    num_scalar_features=self.detected_scalar_features,
+                    hidden_sizes=hidden_sizes,
+                    transformer_d_model_focused=d_model,
+                    transformer_nhead_model=nhead,
+                    dropout_rate=0.0,
+                    moe=moe_config,
+                    encoder_type=encoder_type
+                )
+
+                try:
+                    state_dict = torch.load(mp, map_location=self.device)
+                    if 'model_state_dict' in state_dict:
+                        model.load_state_dict(state_dict['model_state_dict'])
+                    else:
+                        model.load_state_dict(state_dict)
+
+                    model.to(self.device)
+                    model.eval()
+                    loaded_models.append(model)
+                except Exception as e:
+                    logger.error(f"Failed to load {mp.name}: {e}")
 
         if not loaded_models:
             logger.error("All models failed to load.")
@@ -306,6 +359,13 @@ class ASLValidator:
         return clean_signal + np.concatenate([pcasl_noise, vsasl_noise])
 
     def run_nn_inference(self, signals, t1_values):
+        # Guard: Spatial models require different inference pipeline
+        if hasattr(self, 'is_spatial') and self.is_spatial:
+            raise RuntimeError(
+                "run_nn_inference is for voxel-wise models only. "
+                "Spatial (U-Net) models require 2D image input, not 1D voxel signals."
+            )
+
         n_plds = len(self.plds)
         
         # Use active_features from config (validated in __init__)
@@ -493,6 +553,16 @@ class ASLValidator:
 
     def run_phase_3(self):
         logger.info("--- Phase 3: Comprehensive Stats ---")
+
+        # Guard: Spatial models require different validation methodology
+        if hasattr(self, 'is_spatial') and self.is_spatial:
+            logger.warning("=" * 60)
+            logger.warning("SPATIAL MODEL DETECTED - Skipping voxel-wise validation.")
+            logger.warning("Spatial (U-Net) models process 2D images, not 1D voxel signals.")
+            logger.warning("For spatial validation, use a dedicated spatial evaluation script")
+            logger.warning("that operates on full 2D phantom images with brain masks.")
+            logger.warning("=" * 60)
+            return
         n = 500
         
         # A: Fixed CBF, Varying ATT
