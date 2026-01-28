@@ -408,8 +408,15 @@ class EnhancedASLTrainer:
                     lrs = schedulers[model_idx].get_last_lr()
                     log_dict = {"train/total_loss": loss.item(), "train/lr_head": lrs[-1]}
                     if self.stage == 2:
-                        log_dict["train_comps/nll_loss"] = comps.get('param_nll_loss', torch.tensor(0.0)).item()
-                        log_dict["train_comps/mse_loss"] = comps.get('param_mse_loss', torch.tensor(0.0)).item()
+                        if isinstance(target_for_loss, dict):
+                            # Spatial mode: MaskedSpatialLoss returns cbf_loss, att_loss, etc.
+                            log_dict["train_comps/cbf_loss"] = comps.get('cbf_loss', torch.tensor(0.0)).item()
+                            log_dict["train_comps/att_loss"] = comps.get('att_loss', torch.tensor(0.0)).item()
+                            log_dict["train_comps/dc_loss"] = comps.get('dc_loss', torch.tensor(0.0)).item()
+                        else:
+                            # Voxel mode: CustomLoss returns param_nll_loss, param_mse_loss
+                            log_dict["train_comps/nll_loss"] = comps.get('param_nll_loss', torch.tensor(0.0)).item()
+                            log_dict["train_comps/mse_loss"] = comps.get('param_mse_loss', torch.tensor(0.0)).item()
                     wandb.log(log_dict, step=self.global_step)
 
             self.global_step += 1

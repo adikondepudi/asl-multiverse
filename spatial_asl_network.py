@@ -297,13 +297,10 @@ class SpatialDataset(torch.utils.data.Dataset):
             
             # Concatenate and normalize immediately
             self.signals = np.concatenate(all_sig, axis=0) * self.M0_SCALE_FACTOR
-            
-            # Normalize Targets to ~0-1 range to balance Loss Gradients
-            # CBF div 100 (range 0-2), ATT div 3000 (range 0-1.5)
-            raw_targets = np.concatenate(all_tgt, axis=0)
-            self.targets = raw_targets.copy()
-            self.targets[:, 0] = raw_targets[:, 0] / 100.0  # CBF
-            self.targets[:, 1] = raw_targets[:, 1] / 3000.0 # ATT
+
+            # Keep targets in original units (CBF: ml/100g/min, ATT: ms)
+            # Model outputs are scaled to match: CBF via softplus*100, ATT via sigmoid*3000
+            self.targets = np.concatenate(all_tgt, axis=0)
             
             self.total_samples = len(self.signals)
             print(f"[SpatialDataset] Loaded {self.total_samples} samples. RAM: {self.signals.nbytes/1e9:.1f} GB")
