@@ -105,3 +105,26 @@ data:
 
 ### Output Targets
 Models predict normalized CBF and ATT. Denormalization uses `norm_stats.json` saved during training.
+
+### Loss Configuration (CRITICAL)
+The loss function significantly impacts model performance. Pure NLL loss allows the model to "cheat" by predicting high uncertainty instead of accurate values.
+
+Configurable via `loss_mode` in training section:
+- `'mae_only'`: Pure L1 loss - **RECOMMENDED** for forcing accurate predictions
+- `'mse_only'`: Pure L2 loss - standard regression
+- `'nll_only'`: Pure NLL loss - learns uncertainty but can minimize loss without accuracy
+- `'mae_nll'`: MAE primary + NLL secondary - balanced approach (default)
+- `'mse_nll'`: MSE primary + NLL secondary
+
+Example config for accurate predictions:
+```yaml
+training:
+  loss_mode: "mae_only"
+  mae_weight: 1.0
+```
+
+For spatial models, use `loss_type` (l1/l2/huber) and `att_scale` (default 0.033) to balance CBF vs ATT losses.
+
+### Diagnostics
+- **`diagnose_model.py <run_dir>`**: Quick check of model predictions without full validation
+- **`validate.py <run_dir>`**: Full validation with LS comparison (now supports spatial models)

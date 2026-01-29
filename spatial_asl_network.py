@@ -189,24 +189,42 @@ class SpatialASLNet(nn.Module):
 class MaskedSpatialLoss(nn.Module):
     """
     Masked loss function that only counts brain pixels, not background air.
-    
+
     This prevents the network from learning the trivial solution of predicting
     zero everywhere (which would score well on 80% air background).
+
+    Loss Modes:
+    - 'l1' or 'mae': L1 loss (Mean Absolute Error) - RECOMMENDED
+    - 'l2' or 'mse': L2 loss (Mean Squared Error)
+    - 'huber': Huber loss (robust to outliers)
+
+    ATT Scaling:
+    ATT values (500-3000ms) are ~30x larger than CBF (20-100), which can cause
+    the loss to be dominated by ATT errors. We scale ATT loss by 1/30 by default.
     """
-    def __init__(self, loss_type: str = 'l1', dc_weight: float = 0.0, 
-                 kinetic_model: nn.Module = None):
+    def __init__(self, loss_type: str = 'l1', dc_weight: float = 0.0,
+                 kinetic_model: nn.Module = None,
+                 att_scale: float = 0.033,  # 1/30 to balance CBF vs ATT
+                 cbf_weight: float = 1.0,
+                 att_weight: float = 1.0):
         super().__init__()
-        self.loss_type = loss_type
+        self.loss_type = loss_type.lower()
         self.dc_weight = dc_weight
         self.kinetic_model = kinetic_model
-        
+        self.att_scale = att_scale
+        self.cbf_weight = cbf_weight
+        self.att_weight = att_weight
+
+        print(f"[MaskedSpatialLoss] loss_type={loss_type}, att_scale={att_scale}, "
+              f"cbf_weight={cbf_weight}, att_weight={att_weight}, dc_weight={dc_weight}")
+
     def forward(self, pred_cbf: torch.Tensor, pred_att: torch.Tensor,
                 target_cbf: torch.Tensor, target_att: torch.Tensor,
-                brain_mask: torch.Tensor, 
+                brain_mask: torch.Tensor,
                 input_signals: torch.Tensor = None) -> dict:
         """
         Compute masked loss.
-        
+
         Args:
             pred_cbf: (B, 1, H, W) predicted CBF
             pred_att: (B, 1, H, W) predicted ATT
@@ -214,48 +232,74 @@ class MaskedSpatialLoss(nn.Module):
             target_att: (B, 1, H, W) ground truth ATT
             brain_mask: (B, 1, H, W) binary mask (1=brain, 0=air)
             input_signals: (B, 2*PLDs, H, W) for data consistency loss
-            
+
         Returns:
             dict with 'total_loss' and component losses
         """
         # Expand mask if needed
         if brain_mask.dim() == 3:
             brain_mask = brain_mask.unsqueeze(1)
-        
+
         mask_sum = brain_mask.sum() + 1e-6
-        
-        # --- Supervised Loss (L1 or L2, masked) ---
-        if self.loss_type == 'l1':
-            cbf_diff = torch.abs(pred_cbf - target_cbf) * brain_mask
-            att_diff = torch.abs(pred_att - target_att) * brain_mask
-        else:  # L2
-            cbf_diff = (pred_cbf - target_cbf) ** 2 * brain_mask
-            att_diff = (pred_att - target_att) ** 2 * brain_mask
-        
-        # Divide by brain pixel count, NOT total pixels
-        cbf_loss = cbf_diff.sum() / mask_sum
-        att_loss = att_diff.sum() / mask_sum
-        
-        supervised_loss = cbf_loss + att_loss
-        
+
+        # --- Compute errors ---
+        cbf_err = pred_cbf - target_cbf
+        att_err = pred_att - target_att
+
+        # --- Apply loss function ---
+        if self.loss_type in ['l1', 'mae']:
+            cbf_loss_map = torch.abs(cbf_err) * brain_mask
+            att_loss_map = torch.abs(att_err) * brain_mask
+        elif self.loss_type in ['l2', 'mse']:
+            cbf_loss_map = (cbf_err ** 2) * brain_mask
+            att_loss_map = (att_err ** 2) * brain_mask
+        elif self.loss_type == 'huber':
+            delta = 1.0
+            cbf_loss_map = torch.where(
+                torch.abs(cbf_err) < delta,
+                0.5 * cbf_err ** 2,
+                delta * (torch.abs(cbf_err) - 0.5 * delta)
+            ) * brain_mask
+            att_loss_map = torch.where(
+                torch.abs(att_err) < delta * 30,  # Scale delta for ATT range
+                0.5 * att_err ** 2,
+                delta * 30 * (torch.abs(att_err) - 0.5 * delta * 30)
+            ) * brain_mask
+        else:
+            # Default to L1
+            cbf_loss_map = torch.abs(cbf_err) * brain_mask
+            att_loss_map = torch.abs(att_err) * brain_mask
+
+        # --- Compute mean losses over brain voxels ---
+        cbf_loss = cbf_loss_map.sum() / mask_sum
+        att_loss = att_loss_map.sum() / mask_sum
+
+        # Scale ATT loss to balance with CBF
+        att_loss_scaled = att_loss * self.att_scale
+
+        # Weighted combination
+        supervised_loss = self.cbf_weight * cbf_loss + self.att_weight * att_loss_scaled
+
         # --- Data Consistency Loss (Self-Supervised) ---
         dc_loss = torch.tensor(0.0, device=pred_cbf.device)
-        
+
         if self.dc_weight > 0 and self.kinetic_model is not None and input_signals is not None:
             # Reconstruct signals from predicted parameters
             pred_signals = self.kinetic_model(pred_cbf, pred_att)
-            
-            # L1 difference between predicted and actual signals
+
+            # L1 difference between predicted and actual signals (masked)
             signal_diff = torch.abs(pred_signals - input_signals) * brain_mask
             dc_loss = self.dc_weight * signal_diff.sum() / mask_sum
-        
+
         total_loss = supervised_loss + dc_loss
-        
+
+        # Return unscaled losses for logging (easier to interpret)
         return {
             'total_loss': total_loss,
             'supervised_loss': supervised_loss,
-            'cbf_loss': cbf_loss,
-            'att_loss': att_loss,
+            'cbf_loss': cbf_loss,  # Unscaled for interpretability
+            'att_loss': att_loss,  # Unscaled
+            'att_loss_scaled': att_loss_scaled,
             'dc_loss': dc_loss
         }
 

@@ -417,15 +417,29 @@ class CustomLoss(nn.Module):
     """
     Custom loss for the two-stage training strategy.
     - Stage 1: Self-supervised denoising (MSE loss).
-    - Stage 2: Supervised regression (NLL loss).
+    - Stage 2: Supervised regression with configurable loss mode.
+
+    Loss Modes (loss_mode parameter):
+    - 'mae_only': Pure MAE loss - forces model to predict accurately (RECOMMENDED)
+    - 'mse_only': Pure MSE loss - standard regression
+    - 'nll_only': Pure NLL loss - learns uncertainty but can cheat by predicting high variance
+    - 'mae_nll': MAE as primary + NLL for uncertainty (balanced approach)
+    - 'mse_nll': MSE as primary + NLL for uncertainty
+
+    The key insight: NLL loss = 0.5 * (precision * error^2 + log_var)
+    If the model predicts high log_var (low precision), the error term becomes negligible,
+    allowing it to minimize loss without accurate predictions. MAE/MSE forces accuracy.
     """
-    def __init__(self, 
+    def __init__(self,
                  training_stage: int,
-                 w_cbf: float = 1.0, 
+                 w_cbf: float = 1.0,
                  w_att: float = 1.0,
                  log_var_reg_lambda: float = 0.0,
                  mse_weight: float = 0.0,
-                 dc_weight: float = 0.0):
+                 dc_weight: float = 0.0,
+                 loss_mode: str = 'mae_nll',
+                 mae_weight: float = 1.0,
+                 nll_weight: float = 0.1):
         super().__init__()
         if training_stage not in [1, 2]:
             raise ValueError("training_stage must be 1 or 2.")
@@ -435,15 +449,21 @@ class CustomLoss(nn.Module):
         self.log_var_reg_lambda = log_var_reg_lambda
         self.mse_weight = mse_weight
         self.dc_weight = dc_weight
+        self.loss_mode = loss_mode
+        self.mae_weight = mae_weight
+        self.nll_weight = nll_weight
         self.mse_loss = nn.MSELoss()
         self.l1_loss = nn.L1Loss()
         self.kinetic_model = None  # Set by trainer for DC loss
+
+        # Log the loss configuration
+        print(f"[CustomLoss] Initialized with loss_mode='{loss_mode}', mae_weight={mae_weight}, nll_weight={nll_weight}")
 
     def forward(self,
                 model_outputs: Tuple,
                 targets: torch.Tensor,
                 global_epoch: int) -> Tuple[torch.Tensor, Dict[str, torch.Tensor]]:
-        
+
         if self.training_stage == 1:
             reconstructed_signal = model_outputs[0]
             clean_signal_target = targets
@@ -454,54 +474,76 @@ class CustomLoss(nn.Module):
             cbf_pred_norm, att_pred_norm, cbf_log_var, att_log_var, _, _ = model_outputs
             cbf_true_norm, att_true_norm = targets[:, 0:1], targets[:, 1:2]
 
-            # Clamp log_var to prevent precision explosion
-            # log_var in [-10, 10] keeps precision in [exp(-10), exp(10)] ≈ [4.5e-5, 22026]
-            # Further clamp precision directly to avoid numerical instability
-            MAX_PRECISION = 1000.0  # Prevents NaN when log_var is very negative
+            # Initialize loss components
+            device = cbf_pred_norm.device
+            mae_loss = torch.tensor(0.0, device=device)
+            mse_loss = torch.tensor(0.0, device=device)
+            nll_loss = torch.tensor(0.0, device=device)
 
-            cbf_log_var_clamped = torch.clamp(cbf_log_var, min=-7.0, max=10.0)
-            att_log_var_clamped = torch.clamp(att_log_var, min=-7.0, max=10.0)
+            # --- MAE Loss (L1) - Primary accuracy metric ---
+            if self.loss_mode in ['mae_only', 'mae_nll']:
+                cbf_mae = F.l1_loss(cbf_pred_norm, cbf_true_norm)
+                att_mae = F.l1_loss(att_pred_norm, att_true_norm)
+                mae_loss = self.mae_weight * (self.w_cbf * cbf_mae + self.w_att * att_mae)
 
-            cbf_precision = torch.clamp(torch.exp(-cbf_log_var_clamped), max=MAX_PRECISION)
-            att_precision = torch.clamp(torch.exp(-att_log_var_clamped), max=MAX_PRECISION)
-
-            cbf_nll_loss = 0.5 * (cbf_precision * (cbf_pred_norm - cbf_true_norm)**2 + cbf_log_var_clamped)
-            att_nll_loss = 0.5 * (att_precision * (att_pred_norm - att_true_norm)**2 + att_log_var_clamped)
-
-            weighted_cbf_loss = self.w_cbf * cbf_nll_loss
-            weighted_att_loss = self.w_att * att_nll_loss
-            
-            combined_nll_loss = weighted_cbf_loss + weighted_att_loss
-            total_param_loss = torch.mean(combined_nll_loss)
-            
-            log_var_regularization = torch.tensor(0.0, device=total_param_loss.device)
-            if self.log_var_reg_lambda > 0:
-                log_var_regularization = self.log_var_reg_lambda * (torch.mean(cbf_log_var**2) + torch.mean(att_log_var**2))
-            
-            # --- NEW LOGIC: Add MSE Component if mse_weight > 0 ---
-            mse_component = torch.tensor(0.0, device=total_param_loss.device)
-            if self.mse_weight > 0:
-                # Calculate simple MSE for CBF and ATT
+            # --- MSE Loss (L2) ---
+            if self.loss_mode in ['mse_only', 'mse_nll'] or self.mse_weight > 0:
                 cbf_mse = F.mse_loss(cbf_pred_norm, cbf_true_norm)
                 att_mse = F.mse_loss(att_pred_norm, att_true_norm)
-                mse_component = self.mse_weight * (cbf_mse + att_mse)
+                if self.loss_mode in ['mse_only', 'mse_nll']:
+                    mse_loss = self.mae_weight * (self.w_cbf * cbf_mse + self.w_att * att_mse)
+                else:
+                    mse_loss = self.mse_weight * (cbf_mse + att_mse)
 
-            # --- Data Consistency Loss (Self-Supervised) ---
-            # Note: Full DC loss requires raw signals as input and KineticModel integration
-            # This is a placeholder for spatial training integration
-            dc_component = torch.tensor(0.0, device=total_param_loss.device)
-            # DC loss would be computed as:
-            # if self.dc_weight > 0 and self.kinetic_model is not None:
-            #     pred_signal = self.kinetic_model(cbf_pred, att_pred)
-            #     dc_component = self.dc_weight * self.l1_loss(pred_signal, raw_input)
+            # --- NLL Loss (Uncertainty-aware) ---
+            if self.loss_mode in ['nll_only', 'mae_nll', 'mse_nll']:
+                # Clamp log_var to prevent numerical instability
+                MAX_PRECISION = 1000.0
+                cbf_log_var_clamped = torch.clamp(cbf_log_var, min=-7.0, max=10.0)
+                att_log_var_clamped = torch.clamp(att_log_var, min=-7.0, max=10.0)
 
-            total_loss = total_param_loss + log_var_regularization + mse_component + dc_component
-            
+                cbf_precision = torch.clamp(torch.exp(-cbf_log_var_clamped), max=MAX_PRECISION)
+                att_precision = torch.clamp(torch.exp(-att_log_var_clamped), max=MAX_PRECISION)
+
+                cbf_nll = 0.5 * (cbf_precision * (cbf_pred_norm - cbf_true_norm)**2 + cbf_log_var_clamped)
+                att_nll = 0.5 * (att_precision * (att_pred_norm - att_true_norm)**2 + att_log_var_clamped)
+
+                if self.loss_mode == 'nll_only':
+                    nll_loss = torch.mean(self.w_cbf * cbf_nll + self.w_att * att_nll)
+                else:
+                    # NLL as secondary component with reduced weight
+                    nll_loss = self.nll_weight * torch.mean(self.w_cbf * cbf_nll + self.w_att * att_nll)
+
+            # --- Log variance regularization (prevent uncertainty collapse) ---
+            log_var_reg = torch.tensor(0.0, device=device)
+            if self.log_var_reg_lambda > 0:
+                log_var_reg = self.log_var_reg_lambda * (torch.mean(cbf_log_var**2) + torch.mean(att_log_var**2))
+
+            # --- Data Consistency Loss ---
+            dc_loss = torch.tensor(0.0, device=device)
+            # Reserved for future kinetic model integration
+
+            # --- Total Loss ---
+            if self.loss_mode == 'mae_only':
+                total_loss = mae_loss
+            elif self.loss_mode == 'mse_only':
+                total_loss = mse_loss
+            elif self.loss_mode == 'nll_only':
+                total_loss = nll_loss + log_var_reg
+            elif self.loss_mode == 'mae_nll':
+                total_loss = mae_loss + nll_loss + log_var_reg
+            elif self.loss_mode == 'mse_nll':
+                total_loss = mse_loss + nll_loss + log_var_reg
+            else:
+                # Fallback to legacy behavior
+                total_loss = nll_loss + log_var_reg + mse_loss
+
             loss_components = {
-                'param_nll_loss': total_param_loss,
-                'log_var_reg_loss': log_var_regularization,
-                'param_mse_loss': mse_component,
-                'dc_loss': dc_component,
-                'unreduced_loss': combined_nll_loss
+                'param_mae_loss': mae_loss,
+                'param_mse_loss': mse_loss,
+                'param_nll_loss': nll_loss,
+                'log_var_reg_loss': log_var_reg,
+                'dc_loss': dc_loss,
+                'total_loss': total_loss
             }
             return total_loss, loss_components

@@ -1,0 +1,41 @@
+# Configuration for Spatial (U-Net) model training with MAE loss
+# Uses balanced L1 loss with ATT scaling for proper CBF/ATT balance
+
+training:
+  # Model class
+  model_class_name: "SpatialASLNet"
+
+  # === Loss Configuration (for MaskedSpatialLoss) ===
+  loss_type: "l1"        # L1/MAE loss - forces accurate predictions
+  att_scale: 0.033       # Scale ATT loss by ~1/30 to balance with CBF
+  cbf_weight: 1.0
+  att_weight: 1.0
+  dc_weight: 0.0         # Data consistency loss weight (0 = disabled)
+
+  # Training parameters
+  learning_rate: 0.001
+  n_ensembles: 3
+  training_epochs: 50
+  batch_size: 16
+  early_stopping_patience: 15
+
+  # U-Net feature dimensions (can increase for capacity)
+  features: [32, 64, 128, 256]
+
+data:
+  dataset_path: "asl_spatial_dataset_100k"
+  pld_values: [500, 1000, 1500, 2000, 2500, 3000]
+
+  # Noise configuration
+  noise_type: "gaussian"
+  normalization_mode: "per_curve"
+  data_noise_components: ["thermal"]
+
+simulation:
+  T1_artery: 1850.0
+  T_tau: 1800.0
+  alpha_PCASL: 0.85
+  alpha_VSASL: 0.56
+
+noise_config:
+  snr_range: [5, 30]

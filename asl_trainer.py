@@ -90,15 +90,23 @@ class EnhancedASLTrainer:
         if wandb.run:
             for i, model in enumerate(self.models): wandb.watch(model, log='gradients', log_freq=200, idx=i)
         
-        # Extract mse_weight from config
+        # Extract loss configuration from config
+        # NEW: Support configurable loss modes
         default_loss_params = {
-            'training_stage': stage, 
-            'w_cbf': model_config.get('loss_weight_cbf', 1.0), 
+            'training_stage': stage,
+            'w_cbf': model_config.get('loss_weight_cbf', 1.0),
             'w_att': model_config.get('loss_weight_att', 1.0),
             'log_var_reg_lambda': model_config.get('loss_log_var_reg_lambda', 0.0),
             'mse_weight': model_config.get('mse_weight', 0.0),
-            'dc_weight': model_config.get('dc_weight', 0.0)
+            'dc_weight': model_config.get('dc_weight', 0.0),
+            # NEW: Loss mode configuration
+            'loss_mode': model_config.get('loss_mode', 'mae_nll'),  # Default to MAE+NLL
+            'mae_weight': model_config.get('mae_weight', 1.0),
+            'nll_weight': model_config.get('nll_weight', 0.1),
         }
+        logger.info(f"Loss Config - mode: {default_loss_params['loss_mode']}, "
+                    f"mae_weight: {default_loss_params['mae_weight']}, "
+                    f"nll_weight: {default_loss_params['nll_weight']}")
         self.custom_loss_fn = loss_fn if loss_fn is not None else CustomLoss(**default_loss_params)
         self.global_step = 0; self.norm_stats = None
         
@@ -414,9 +422,11 @@ class EnhancedASLTrainer:
                             log_dict["train_comps/att_loss"] = comps.get('att_loss', torch.tensor(0.0)).item()
                             log_dict["train_comps/dc_loss"] = comps.get('dc_loss', torch.tensor(0.0)).item()
                         else:
-                            # Voxel mode: CustomLoss returns param_nll_loss, param_mse_loss
-                            log_dict["train_comps/nll_loss"] = comps.get('param_nll_loss', torch.tensor(0.0)).item()
+                            # Voxel mode: CustomLoss returns mae, mse, nll components
+                            log_dict["train_comps/mae_loss"] = comps.get('param_mae_loss', torch.tensor(0.0)).item()
                             log_dict["train_comps/mse_loss"] = comps.get('param_mse_loss', torch.tensor(0.0)).item()
+                            log_dict["train_comps/nll_loss"] = comps.get('param_nll_loss', torch.tensor(0.0)).item()
+                            log_dict["train_comps/log_var_reg"] = comps.get('log_var_reg_loss', torch.tensor(0.0)).item()
                     wandb.log(log_dict, step=self.global_step)
 
             self.global_step += 1

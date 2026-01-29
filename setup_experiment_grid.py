@@ -133,7 +133,15 @@ BASE_CONFIG = {
         "weight_decay": 0.0001,
         "learning_rate": 0.0001,
 
-        # Loss configuration
+        # === CRITICAL: Loss configuration (FIXED) ===
+        # Using L1/MAE loss which forces accurate predictions
+        # att_scale balances CBF (~60) vs ATT (~1500) - ATT is ~30x larger
+        "loss_type": "l1",          # L1/MAE loss (forces accuracy)
+        "att_scale": 0.033,         # Scale ATT loss by ~1/30 for balance
+        "cbf_weight": 1.0,          # Weight for CBF loss component
+        "att_weight": 1.0,          # Weight for ATT loss component
+
+        # Legacy params (kept for compatibility)
         "loss_weight_cbf": 1.0,
         "loss_weight_att": 1.0,
 
@@ -216,7 +224,7 @@ python main.py {config_path} --stage 2 --output-dir {run_dir}
 
 echo ""
 echo "--- VALIDATION ---"
-python validate.py {run_dir} --output-dir {run_dir}/validation_results
+python validate.py --run_dir {run_dir} --output_dir {run_dir}/validation_results
 
 echo ""
 echo "--- JOB COMPLETE ---"
@@ -226,7 +234,8 @@ echo "Finished: $(date)"
 
 
 def main():
-    base_dir = Path("spatial_ablation_jobs")
+    # Use new directory to avoid overwriting previous results
+    base_dir = Path("spatial_ablation_v2")
     base_dir.mkdir(exist_ok=True)
 
     submit_script_lines = [

@@ -80,6 +80,22 @@ class ResearchConfig:
     normalization_mode: str = 'per_curve'
     # global_scale_factor: multiplier for 'global_scale' mode to get signals into ~0-1 range
     global_scale_factor: float = 10.0
+
+    # NEW: Loss Configuration (for voxel-wise models)
+    # loss_mode options: 'mae_only', 'mse_only', 'nll_only', 'mae_nll', 'mse_nll'
+    # RECOMMENDED: 'mae_only' or 'mae_nll' - forces model to predict accurately
+    # WARNING: 'nll_only' allows model to minimize loss by predicting high uncertainty
+    loss_mode: str = 'mae_nll'  # Default to balanced MAE + NLL
+    mae_weight: float = 1.0     # Weight for MAE loss component
+    nll_weight: float = 0.1     # Weight for NLL loss component (when using mae_nll or mse_nll)
+    mse_weight: float = 0.0     # Legacy MSE weight (for backward compatibility)
+
+    # NEW: Spatial model loss configuration
+    loss_type: str = 'l1'       # For spatial: 'l1', 'l2', 'huber'
+    att_scale: float = 0.033    # Scale ATT loss by ~1/30 to balance with CBF
+    cbf_weight: float = 1.0     # Weight for CBF loss
+    att_weight: float = 1.0     # Weight for ATT loss
+    dc_weight: float = 0.0      # Data consistency loss weight
     # noise_config: dict for NoiseInjector configuration (snr_range, physio, drift, spikes, etc.)
     noise_config: Optional[Dict[str, Any]] = None
 
@@ -215,12 +231,22 @@ def run_comprehensive_asl_research(config: ResearchConfig, stage: int, output_di
             pin_memory=True
         )
         
-        # Instantiate Spatial Loss
+        # Instantiate Spatial Loss with configurable parameters
         # DC loss should be opt-in (default 0.0). When enabled, use small weight (0.0001-0.001)
         # since raw DC loss is ~1000x larger than supervised losses.
         dc_weight = getattr(config, 'dc_weight', 0.0)
+        loss_type = getattr(config, 'loss_type', 'l1')  # l1/mae, l2/mse, huber
+        att_scale = getattr(config, 'att_scale', 0.033)  # Scale ATT loss by ~1/30 for balance
+        cbf_weight = getattr(config, 'cbf_weight', 1.0)
+        att_weight = getattr(config, 'att_weight', 1.0)
 
-        loss_function = MaskedSpatialLoss(loss_type='l1', dc_weight=dc_weight)
+        loss_function = MaskedSpatialLoss(
+            loss_type=loss_type,
+            dc_weight=dc_weight,
+            att_scale=att_scale,
+            cbf_weight=cbf_weight,
+            att_weight=att_weight
+        )
         
         # Define input size for model creation (channels)
         base_input_size_nn = num_plds * 2 
