@@ -362,9 +362,11 @@ class RealisticASLSimulator(ASLSimulator):
 
             # --- 2. Vectorized Signal Generation (NumPy Broadcasting) ---
             # Input maps: (Size, Size) -> Broadcast to (n_plds, Size, Size)
-            
+
             att_bc = att_map[np.newaxis, :, :]
-            cbf_bc = cbf_map[np.newaxis, :, :]
+            # CRITICAL: Convert CBF from ml/100g/min to ml/g/s (divide by 6000)
+            # This matches asl_simulation.py physics equations
+            cbf_bc = (cbf_map / 6000.0)[np.newaxis, :, :]
             
             # --- PCASL Logic ---
             # Mask 1: Bolus Arrived (PLD >= ATT)

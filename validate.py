@@ -605,16 +605,28 @@ class ASLValidator:
             # Scale signals (matching SpatialDataset M0 normalization)
             noisy_signals_scaled = noisy_signals * 100.0
 
+            # CRITICAL: Per-pixel temporal normalization (must match training)
+            # Z-score each pixel's temporal signal across channels
+            temporal_mean = np.mean(noisy_signals_scaled, axis=0, keepdims=True)  # (1, H, W)
+            temporal_std = np.std(noisy_signals_scaled, axis=0, keepdims=True) + 1e-6  # (1, H, W)
+            noisy_signals_normalized = (noisy_signals_scaled - temporal_mean) / temporal_std
+
             # --- NN Inference ---
             # Ensure float32 dtype to match model weights
-            input_tensor = torch.from_numpy(noisy_signals_scaled[np.newaxis, ...]).float().to(self.device)
+            input_tensor = torch.from_numpy(noisy_signals_normalized[np.newaxis, ...]).float().to(self.device)
 
             with torch.no_grad():
                 nn_cbf_maps, nn_att_maps = [], []
                 for model in self.models:
                     cbf_pred, att_pred, _, _ = model(input_tensor)
-                    nn_cbf_maps.append(cbf_pred.cpu().numpy())
-                    nn_att_maps.append(att_pred.cpu().numpy())
+                    # Model outputs NORMALIZED predictions - denormalize to raw units
+                    cbf_denorm = cbf_pred * self.norm_stats['y_std_cbf'] + self.norm_stats['y_mean_cbf']
+                    att_denorm = att_pred * self.norm_stats['y_std_att'] + self.norm_stats['y_mean_att']
+                    # Apply physical constraints
+                    cbf_denorm = torch.clamp(cbf_denorm, min=0.0, max=200.0)
+                    att_denorm = torch.clamp(att_denorm, min=0.0, max=5000.0)
+                    nn_cbf_maps.append(cbf_denorm.cpu().numpy())
+                    nn_att_maps.append(att_denorm.cpu().numpy())
 
                 # Ensemble average
                 nn_cbf = np.mean(nn_cbf_maps, axis=0)[0, 0]  # (H, W)

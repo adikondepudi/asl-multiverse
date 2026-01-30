@@ -158,7 +158,12 @@ def main():
         signals_noisy = signals + 0.001 * np.random.randn(*signals.shape).astype(np.float32)
         signals_scaled = signals_noisy * 100.0
 
-        input_tensor = torch.from_numpy(signals_scaled[np.newaxis, ...]).to(device)
+        # CRITICAL: Per-pixel temporal normalization (must match training)
+        temporal_mean = np.mean(signals_scaled, axis=0, keepdims=True)  # (1, H, W)
+        temporal_std = np.std(signals_scaled, axis=0, keepdims=True) + 1e-6  # (1, H, W)
+        signals_normalized = (signals_scaled - temporal_mean) / temporal_std
+
+        input_tensor = torch.from_numpy(signals_normalized[np.newaxis, ...]).to(device)
 
         print(f"  Input shape: {input_tensor.shape}")
         print(f"  Input stats: mean={input_tensor.mean().item():.4f}, std={input_tensor.std().item():.4f}")
@@ -167,9 +172,23 @@ def main():
 
         # Run inference
         with torch.no_grad():
-            cbf_pred, att_pred, log_var_cbf, log_var_att = model(input_tensor)
+            cbf_pred_raw, att_pred_raw, log_var_cbf, log_var_att = model(input_tensor)
 
-        print("--- Raw Model Outputs ---")
+        print("--- Raw Model Outputs (Normalized) ---")
+        print(f"  CBF (normalized): mean={cbf_pred_raw.mean().item():.4f}, std={cbf_pred_raw.std().item():.4f}")
+        print(f"  ATT (normalized): mean={att_pred_raw.mean().item():.4f}, std={att_pred_raw.std().item():.4f}")
+        print()
+
+        # Denormalize predictions using norm_stats
+        # Model outputs NORMALIZED predictions (z-scores) that need to be converted to raw units
+        cbf_pred = cbf_pred_raw * norm_stats['y_std_cbf'] + norm_stats['y_mean_cbf']
+        att_pred = att_pred_raw * norm_stats['y_std_att'] + norm_stats['y_mean_att']
+
+        # Apply physical constraints
+        cbf_pred = torch.clamp(cbf_pred, min=0.0, max=200.0)
+        att_pred = torch.clamp(att_pred, min=0.0, max=5000.0)
+
+        print("--- Denormalized Model Outputs (Raw Units) ---")
         print(f"  CBF prediction: mean={cbf_pred.mean().item():.2f}, std={cbf_pred.std().item():.4f}")
         print(f"  ATT prediction: mean={att_pred.mean().item():.2f}, std={att_pred.std().item():.4f}")
         print(f"  CBF log_var: mean={log_var_cbf.mean().item():.4f}")
@@ -182,6 +201,8 @@ def main():
         cbf_mean = cbf_pred.mean().item()
         att_mean = att_pred.mean().item()
 
+        # For normalized outputs, low variance in raw outputs indicates good signal
+        # Check denormalized variance instead
         if cbf_pred.std().item() < 1.0:
             print("  [WARNING] CBF predictions have very low variance - possible mean collapse!")
 

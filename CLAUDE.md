@@ -41,6 +41,37 @@ NORM_STATS_INDICES = {
 - `validate.py`: Fixed spatial validation dtype mismatch (float64 → float32)
 - `validate.py`: Added proper ground truth tracking for LS comparison
 
+### Spatial Model Mean Prediction Bug (FIXED - 2026-01-30)
+**Location**: `spatial_asl_network.py`
+
+The spatial U-Net model (`SpatialASLNet`) was learning to predict the dataset mean instead of learning the input-output mapping.
+
+**Root Cause**: Mismatch between 1D and spatial training pipelines:
+- **1D training**: Targets are **normalized** to z-scores before training. Model outputs unbounded predictions.
+- **Spatial training (buggy)**: Targets were **raw** values (CBF: 20-100, ATT: 500-3000). Model had constrained outputs (`softplus*100`, `sigmoid*3000`) that started near the dataset mean and stayed there.
+
+**Old (BUGGY)**:
+```python
+# SpatialASLNet.forward() - constrained outputs with initialization bias
+cbf_map = F.softplus(out[:, 0:1, :, :]) * 100.0   # At init: ~69.3 (near mean!)
+att_map = 3000.0 * torch.sigmoid(out[:, 1:2, :, :])  # At init: 1500 (near mean!)
+```
+
+**New (FIXED)**:
+```python
+# SpatialASLNet.forward() - unbounded normalized outputs
+cbf_norm = out[:, 0:1, :, :]  # At init: ~0 (normalized mean)
+att_norm = out[:, 1:2, :, :]  # Denormalize at inference
+```
+
+**Changes Made**:
+1. `SpatialASLNet.forward()`: Now outputs **unbounded normalized predictions** (z-scores)
+2. `MaskedSpatialLoss`: Now accepts `norm_stats` and **normalizes targets** before computing loss
+3. `main.py`: Passes `norm_stats` to `MaskedSpatialLoss`
+4. `validate.py`, `predict_on_invivo.py`, `diagnose_model.py`: **Denormalize** predictions before use
+
+**Impact**: Spatial models trained before this fix produce constant/mean predictions. **Retrain spatial models with the fixed code.**
+
 ## Common Commands
 
 ### Data Generation

@@ -159,27 +159,43 @@ class EnhancedASLTrainer:
         
         logger.info(f"GPU Noise parameters loaded. Noise components: {self.data_noise_components}")
 
-    def _process_batch_on_gpu(self, raw_signals, t1_values=None, z_values=None):
+    def _process_batch_on_gpu(self, raw_signals, t1_values=None, z_values=None, apply_noise=True):
         """
         Process batch with CONFIGURABLE noise and DYNAMIC feature selection.
         Noise components: ['thermal', 'physio', 'drift', 'spikes']
         Active features: ['mean', 'std', 'ttp', 'com', 'peak', 't1_artery', 'z_coord']
-        """
-        if self.noise_scale_vec_gpu is None:
-            return raw_signals 
 
+        For spatial (4D) data:
+        - Applies noise first (if apply_noise=True and noise is configured)
+        - Then applies per-pixel temporal normalization (z-score)
+        This ensures noise is in raw signal space, not normalized space.
+
+        Args:
+            apply_noise: If False, skip noise injection (for validation)
+        """
         # Handle 4D Input for Spatial Models (Batch, Channels, Height, Width)
         if raw_signals.ndim == 4:
             B, C, H, W = raw_signals.shape
-            # Reshape to (N, C) to use existing NoiseInjector
-            signals_flat = raw_signals.permute(0, 2, 3, 1).reshape(-1, C)
-            
-            # Apply noise
-            noisy_flat = self.noise_injector.apply_noise(signals_flat, self.ref_signal_gpu, self.pld_scaling)
-            
-            # Reshape back to (B, C, H, W) and return raw noisy signals (skip feature extraction)
-            noisy_signals = noisy_flat.reshape(B, H, W, C).permute(0, 3, 1, 2)
-            return noisy_signals
+            signals = raw_signals
+
+            # Step 1: Apply noise (only during training if configured)
+            if apply_noise and self.noise_scale_vec_gpu is not None:
+                signals_flat = signals.permute(0, 2, 3, 1).reshape(-1, C)
+                noisy_flat = self.noise_injector.apply_noise(signals_flat, self.ref_signal_gpu, self.pld_scaling)
+                signals = noisy_flat.reshape(B, H, W, C).permute(0, 3, 1, 2)
+
+            # Step 2: Per-pixel temporal normalization (ALWAYS applied)
+            # Z-score each pixel's temporal signal across channels
+            # signals shape: (B, C, H, W) where C is temporal dimension
+            temporal_mean = signals.mean(dim=1, keepdim=True)  # (B, 1, H, W)
+            temporal_std = signals.std(dim=1, keepdim=True) + 1e-6  # (B, 1, H, W)
+            normalized_signals = (signals - temporal_mean) / temporal_std
+
+            return normalized_signals
+
+        # For 1D models, check if noise is configured
+        if self.noise_scale_vec_gpu is None:
+            return raw_signals
 
         batch_size = raw_signals.shape[0]
         n_plds = raw_signals.shape[1] // 2
@@ -421,6 +437,32 @@ class EnhancedASLTrainer:
                             log_dict["train_comps/cbf_loss"] = comps.get('cbf_loss', torch.tensor(0.0)).item()
                             log_dict["train_comps/att_loss"] = comps.get('att_loss', torch.tensor(0.0)).item()
                             log_dict["train_comps/dc_loss"] = comps.get('dc_loss', torch.tensor(0.0)).item()
+                            log_dict["train_comps/variance_loss"] = comps.get('variance_loss', torch.tensor(0.0)).item()
+
+                            # === DIAGNOSTIC: Prediction vs Target Statistics ===
+                            # This helps catch mean-prediction issues during training
+                            mask = target_for_loss['mask']
+                            pred_cbf, pred_att = outputs_f32[0], outputs_f32[1]
+                            tgt_cbf, tgt_att = target_for_loss['cbf'], target_for_loss['att']
+
+                            # Compute masked statistics (normalized space for predictions)
+                            with torch.no_grad():
+                                pred_cbf_masked = pred_cbf[mask > 0.5]
+                                pred_att_masked = pred_att[mask > 0.5]
+
+                                if len(pred_cbf_masked) > 0:
+                                    log_dict["diag/pred_cbf_mean"] = pred_cbf_masked.mean().item()
+                                    log_dict["diag/pred_cbf_std"] = pred_cbf_masked.std().item()
+                                    log_dict["diag/pred_att_mean"] = pred_att_masked.mean().item()
+                                    log_dict["diag/pred_att_std"] = pred_att_masked.std().item()
+
+                                    # Target stats (raw, for reference)
+                                    tgt_cbf_masked = tgt_cbf[mask > 0.5]
+                                    tgt_att_masked = tgt_att[mask > 0.5]
+                                    log_dict["diag/tgt_cbf_mean"] = tgt_cbf_masked.mean().item()
+                                    log_dict["diag/tgt_cbf_std"] = tgt_cbf_masked.std().item()
+                                    log_dict["diag/tgt_att_mean"] = tgt_att_masked.mean().item()
+                                    log_dict["diag/tgt_att_std"] = tgt_att_masked.std().item()
                         else:
                             # Voxel mode: CustomLoss returns mae, mse, nll components
                             log_dict["train_comps/mae_loss"] = comps.get('param_mae_loss', torch.tensor(0.0)).item()
@@ -441,11 +483,13 @@ class EnhancedASLTrainer:
         with torch.no_grad():
             for batch in loader:
                 if isinstance(batch, dict):
-                    inputs = batch['signals'].to(self.device)
+                    raw_signals = batch['signals'].to(self.device)
                     targets = {k: v.to(self.device) if isinstance(v, torch.Tensor) else v for k, v in batch.items()}
+                    # Apply same processing as training (but without noise)
+                    inputs = self._process_batch_on_gpu(raw_signals, apply_noise=False)
                 else:
                     inputs, targets = batch
-                
+
                 for i, model in enumerate(models):
                     with torch.amp.autocast(device_type=self.device.type, dtype=torch.float16):
                         outputs = model(inputs)

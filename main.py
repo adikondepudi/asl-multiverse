@@ -92,10 +92,11 @@ class ResearchConfig:
 
     # NEW: Spatial model loss configuration
     loss_type: str = 'l1'       # For spatial: 'l1', 'l2', 'huber'
-    att_scale: float = 0.033    # Scale ATT loss by ~1/30 to balance with CBF
+    att_scale: float = 1.0      # Scale ATT loss (1.0 with normalized targets)
     cbf_weight: float = 1.0     # Weight for CBF loss
     att_weight: float = 1.0     # Weight for ATT loss
     dc_weight: float = 0.0      # Data consistency loss weight
+    variance_weight: float = 0.1  # Anti-mean-collapse: penalize low prediction variance
     # noise_config: dict for NoiseInjector configuration (snr_range, physio, drift, spikes, etc.)
     noise_config: Optional[Dict[str, Any]] = None
 
@@ -188,9 +189,10 @@ def run_comprehensive_asl_research(config: ResearchConfig, stage: int, output_di
         script_logger.info(f"[SPATIAL MODE] initializing lazy-loading SpatialDataset from {config.offline_dataset_path}...")
         
         full_dataset = SpatialDataset(
-            data_dir=config.offline_dataset_path, 
+            data_dir=config.offline_dataset_path,
             transform=True, # Augmentation
-            flip_prob=0.5
+            flip_prob=0.5,
+            per_pixel_norm=False  # Normalization done in trainer._process_batch_on_gpu AFTER noise
         )
         
         total_len = len(full_dataset)
@@ -236,16 +238,23 @@ def run_comprehensive_asl_research(config: ResearchConfig, stage: int, output_di
         # since raw DC loss is ~1000x larger than supervised losses.
         dc_weight = getattr(config, 'dc_weight', 0.0)
         loss_type = getattr(config, 'loss_type', 'l1')  # l1/mae, l2/mse, huber
-        att_scale = getattr(config, 'att_scale', 0.033)  # Scale ATT loss by ~1/30 for balance
+        # Note: With normalized targets, att_scale should be 1.0 (both in z-score units)
+        att_scale = getattr(config, 'att_scale', 1.0)
         cbf_weight = getattr(config, 'cbf_weight', 1.0)
         att_weight = getattr(config, 'att_weight', 1.0)
+        # Variance penalty: penalizes if prediction variance < target variance (anti-mean-collapse)
+        variance_weight = getattr(config, 'variance_weight', 0.1)
 
+        # CRITICAL: Pass norm_stats to loss function for target normalization!
+        # Without this, the model will learn to predict the dataset mean.
         loss_function = MaskedSpatialLoss(
             loss_type=loss_type,
             dc_weight=dc_weight,
             att_scale=att_scale,
             cbf_weight=cbf_weight,
-            att_weight=att_weight
+            att_weight=att_weight,
+            norm_stats=norm_stats,
+            variance_weight=variance_weight
         )
         
         # Define input size for model creation (channels)

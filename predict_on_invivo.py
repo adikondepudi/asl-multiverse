@@ -63,17 +63,19 @@ def unpad(image: np.ndarray, padding: Tuple[int, int, int, int]) -> np.ndarray:
                     pad_left:image.shape[2]-pad_right if pad_right else None]
 
 
-def predict_spatial_slice(slice_data: np.ndarray, model: torch.nn.Module, 
-                          device: torch.device, m0_slice: np.ndarray = None) -> Tuple[np.ndarray, np.ndarray]:
+def predict_spatial_slice(slice_data: np.ndarray, model: torch.nn.Module,
+                          device: torch.device, m0_slice: np.ndarray = None,
+                          norm_stats: Dict = None) -> Tuple[np.ndarray, np.ndarray]:
     """
     Run spatial U-Net inference on a single brain slice.
-    
+
     Args:
         slice_data: (2*n_plds, H, W) - PCASL + VSASL channels
         model: SpatialASLNet model
         device: torch device
         m0_slice: (H, W) M0 calibration image for normalization
-        
+        norm_stats: dict with y_mean_cbf, y_std_cbf, y_mean_att, y_std_att for denormalization
+
     Returns:
         cbf_map: (H, W) CBF in ml/100g/min
         att_map: (H, W) ATT in ms
@@ -82,80 +84,116 @@ def predict_spatial_slice(slice_data: np.ndarray, model: torch.nn.Module,
     if m0_slice is not None:
         m0_safe = np.maximum(m0_slice, np.percentile(m0_slice, 5))
         slice_data = slice_data / m0_safe[np.newaxis, :, :]
-    
+
+    # CRITICAL: Per-pixel temporal normalization (must match training)
+    # Z-score each pixel's temporal signal across channels
+    temporal_mean = np.mean(slice_data, axis=0, keepdims=True)  # (1, H, W)
+    temporal_std = np.std(slice_data, axis=0, keepdims=True) + 1e-6  # (1, H, W)
+    slice_data = (slice_data - temporal_mean) / temporal_std
+
     # Pad to multiple of 16
     original_shape = slice_data.shape[-2:]
     padded, padding = pad_to_multiple(slice_data, multiple=16)
-    
+
     # Convert to tensor and add batch dimension
     input_tensor = torch.from_numpy(padded[np.newaxis, ...]).float().to(device)
-    
+
     with torch.no_grad():
         with torch.amp.autocast(device_type=device.type, dtype=torch.float16):
-            cbf_pred, att_pred, _, _ = model(input_tensor)
-    
+            cbf_pred_norm, att_pred_norm, _, _ = model(input_tensor)
+
+    # DENORMALIZE predictions - model outputs normalized z-scores
+    if norm_stats is not None:
+        cbf_pred = cbf_pred_norm * norm_stats['y_std_cbf'] + norm_stats['y_mean_cbf']
+        att_pred = att_pred_norm * norm_stats['y_std_att'] + norm_stats['y_mean_att']
+        # Apply physical constraints
+        cbf_pred = torch.clamp(cbf_pred, min=0.0, max=200.0)
+        att_pred = torch.clamp(att_pred, min=0.0, max=5000.0)
+    else:
+        cbf_pred = cbf_pred_norm
+        att_pred = att_pred_norm
+
     # Convert to numpy and remove batch dim
     cbf_map = cbf_pred[0, 0].cpu().numpy()
     att_map = att_pred[0, 0].cpu().numpy()
-    
+
     # Unpad to original size
     cbf_map = unpad(cbf_map, padding)
     att_map = unpad(att_map, padding)
-    
+
     return cbf_map, att_map
 
 
 def predict_spatial_volume(spatial_signals: np.ndarray, model: torch.nn.Module,
                            device: torch.device, m0_data: np.ndarray = None,
-                           batch_size: int = 8) -> Tuple[np.ndarray, np.ndarray]:
+                           batch_size: int = 8, norm_stats: Dict = None) -> Tuple[np.ndarray, np.ndarray]:
     """
     Run spatial U-Net inference on a full 3D volume (slice-by-slice).
-    
+
     Args:
         spatial_signals: (Z, 2*n_plds, H, W) - preprocessed spatial stack
         model: SpatialASLNet model
         device: torch device
         m0_data: (H, W, Z) M0 calibration volume
         batch_size: Number of slices to process at once
-        
+        norm_stats: dict with y_mean_cbf, y_std_cbf, y_mean_att, y_std_att for denormalization
+
     Returns:
         cbf_volume: (H, W, Z) CBF maps
         att_volume: (H, W, Z) ATT maps
     """
     n_slices = spatial_signals.shape[0]
     _, h, w = spatial_signals.shape[1], spatial_signals.shape[2], spatial_signals.shape[3]
-    
+
     # Pad spatial dimensions
     sample_padded, padding = pad_to_multiple(spatial_signals[0], multiple=16)
     padded_h, padded_w = sample_padded.shape[-2:]
-    
+
     cbf_volume = np.zeros((n_slices, h, w), dtype=np.float32)
     att_volume = np.zeros((n_slices, h, w), dtype=np.float32)
-    
+
     model.eval()
-    
+
     for start_idx in range(0, n_slices, batch_size):
         end_idx = min(start_idx + batch_size, n_slices)
         batch_slices = spatial_signals[start_idx:end_idx]
-        
+
         # Normalize by M0 if provided
         if m0_data is not None:
             m0_batch = m0_data[:, :, start_idx:end_idx].transpose(2, 0, 1)  # (batch, H, W)
             m0_safe = np.maximum(m0_batch, np.percentile(m0_batch, 5, axis=(1, 2), keepdims=True))
             batch_slices = batch_slices / m0_safe[:, np.newaxis, :, :]
-        
+
+        # CRITICAL: Per-pixel temporal normalization (must match training)
+        # Z-score each pixel's temporal signal across channels
+        # batch_slices shape: (batch, C, H, W) where C is temporal
+        temporal_mean = np.mean(batch_slices, axis=1, keepdims=True)  # (batch, 1, H, W)
+        temporal_std = np.std(batch_slices, axis=1, keepdims=True) + 1e-6  # (batch, 1, H, W)
+        batch_slices = (batch_slices - temporal_mean) / temporal_std
+
         # Pad each slice
         padded_batch = np.zeros((end_idx - start_idx, batch_slices.shape[1], padded_h, padded_w), dtype=np.float32)
         for i in range(end_idx - start_idx):
             padded_batch[i], _ = pad_to_multiple(batch_slices[i], multiple=16)
-        
+
         # Convert to tensor
         input_tensor = torch.from_numpy(padded_batch).float().to(device)
-        
+
         with torch.no_grad():
             with torch.amp.autocast(device_type=device.type, dtype=torch.float16):
-                cbf_pred, att_pred, _, _ = model(input_tensor)
-        
+                cbf_pred_norm, att_pred_norm, _, _ = model(input_tensor)
+
+        # DENORMALIZE predictions - model outputs normalized z-scores
+        if norm_stats is not None:
+            cbf_pred = cbf_pred_norm * norm_stats['y_std_cbf'] + norm_stats['y_mean_cbf']
+            att_pred = att_pred_norm * norm_stats['y_std_att'] + norm_stats['y_mean_att']
+            # Apply physical constraints
+            cbf_pred = torch.clamp(cbf_pred, min=0.0, max=200.0)
+            att_pred = torch.clamp(att_pred, min=0.0, max=5000.0)
+        else:
+            cbf_pred = cbf_pred_norm
+            att_pred = att_pred_norm
+
         # Convert to numpy
         cbf_batch = cbf_pred[:, 0].cpu().numpy()
         att_batch = att_pred[:, 0].cpu().numpy()

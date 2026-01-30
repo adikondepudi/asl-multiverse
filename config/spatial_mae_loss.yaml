@@ -1,5 +1,6 @@
 # Configuration for Spatial (U-Net) model training with MAE loss
-# Uses balanced L1 loss with ATT scaling for proper CBF/ATT balance
+# Uses normalized targets (z-scores) for proper training dynamics.
+# This prevents mean-prediction caused by output activation initialization bias.
 
 training:
   # Model class
@@ -7,10 +8,15 @@ training:
 
   # === Loss Configuration (for MaskedSpatialLoss) ===
   loss_type: "l1"        # L1/MAE loss - forces accurate predictions
-  att_scale: 0.033       # Scale ATT loss by ~1/30 to balance with CBF
+  # NOTE: With normalized targets (z-scores), att_scale should be 1.0
+  # Both CBF and ATT are in the same units (standard deviations from mean)
+  att_scale: 1.0
   cbf_weight: 1.0
   att_weight: 1.0
   dc_weight: 0.0         # Data consistency loss weight (0 = disabled)
+  # Variance penalty: penalizes if prediction variance < target variance
+  # This prevents mean-collapse where model just predicts the average
+  variance_weight: 0.1
 
   # Training parameters
   learning_rate: 0.001

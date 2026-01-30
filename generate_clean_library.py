@@ -99,7 +99,9 @@ def generate_spatial_chunk(args):
         
         # Vectorized signal generation using NumPy broadcasting
         att_bc = att_map[np.newaxis, :, :].astype(np.float32)
-        cbf_bc = cbf_map[np.newaxis, :, :].astype(np.float32)
+        # CRITICAL: Convert CBF from ml/100g/min to ml/g/s (divide by 6000)
+        # This matches asl_simulation.py physics equations
+        cbf_bc = (cbf_map / 6000.0)[np.newaxis, :, :].astype(np.float32)
         
         # --- PCASL Signal ---
         mask_arrived = (plds_bc >= att_bc)
