@@ -46,14 +46,16 @@ class FeatureRegistry:
     }
     
     # Canonical feature indices in scalar_features_mean/std arrays
-    # Layout: [mu_p(0), sig_p(1), mu_v(2), sig_v(3), ttp_p(4), ttp_v(5), com_p(6), com_v(7), peak_p(8), peak_v(9), wsum_p(10), wsum_v(11)]
+    # Layout matches compute_feature_vector output order (grouped by feature, not interleaved):
+    # [mean_p(0), mean_v(1), std_p(2), std_v(3), ttp_p(4), ttp_v(5), com_p(6), com_v(7), peak_p(8), peak_v(9), wsum_p(10), wsum_v(11)]
+    # CRITICAL: compute_feature_vector outputs features in active_features order, each feature outputs [pcasl, vsasl]
     NORM_STATS_INDICES: Dict[str, List[int]] = {
-        'mean': [0, 2],
-        'std': [1, 3],
-        'ttp': [4, 5],
-        'com': [6, 7],
-        'peak': [8, 9],
-        'weighted_sum': [10, 11]
+        'mean': [0, 1],      # mean_p, mean_v (positions 0-1 when mean is first feature)
+        'std': [2, 3],       # std_p, std_v (positions 2-3 when std is second feature)
+        'ttp': [4, 5],       # ttp_p, ttp_v
+        'com': [6, 7],       # com_p, com_v
+        'peak': [8, 9],      # peak_p, peak_v
+        'weighted_sum': [10, 11]  # wsum_p, wsum_v
     }
     
     # Default PLD values (in ms) - should match standard 6-PLD acquisition

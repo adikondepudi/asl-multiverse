@@ -33,13 +33,14 @@ class SpatialPhantomGenerator:
     }
     
     # Tissue ATT values (ms)
+    # NOTE: ATT values constrained to max PLD (3000ms) for detectability
     TISSUE_ATT = {
         'gray_matter': (1000.0, 1600.0),
         'white_matter': (1200.0, 1800.0),
         'csf': (100.0, 500.0),
         'tumor_hyper': (500.0, 1000.0),   # Fast transit (neovascularization)
         'tumor_hypo': (1800.0, 2500.0),   # Slow transit
-        'stroke_core': (2500.0, 4000.0),  # Very delayed
+        'stroke_core': (2500.0, 3000.0),  # Very delayed (constrained to max PLD)
         'stroke_penumbra': (1800.0, 2500.0),
     }
     
@@ -198,17 +199,19 @@ class SpatialPhantomGenerator:
 
 @dataclass
 class PhysiologicalVariation:
+    # NOTE: ATT ranges are constrained to max PLD (3000ms) to ensure signals are measurable.
+    # ATT values > max PLD result in zero/minimal signal, making estimation ill-posed.
     cbf_range: Tuple[float, float] = (20.0, 100.0)
-    att_range: Tuple[float, float] = (500.0, 4000.0)
+    att_range: Tuple[float, float] = (500.0, 3000.0)  # Constrained to match PLD range
     t1_artery_range: Tuple[float, float] = (1650.0, 2050.0)
     stroke_cbf_range: Tuple[float, float] = (5.0, 30.0)
-    stroke_att_range: Tuple[float, float] = (1500.0, 4500.0)
+    stroke_att_range: Tuple[float, float] = (1500.0, 3000.0)  # Constrained
     tumor_cbf_range: Tuple[float, float] = (10.0, 150.0)
-    tumor_att_range: Tuple[float, float] = (700.0, 3500.0)
+    tumor_att_range: Tuple[float, float] = (700.0, 3000.0)  # Constrained
     young_cbf_range: Tuple[float, float] = (60.0, 120.0)
     young_att_range: Tuple[float, float] = (500.0, 1500.0)
     elderly_cbf_range: Tuple[float, float] = (30.0, 70.0)
-    elderly_att_range: Tuple[float, float] = (1500.0, 3500.0)
+    elderly_att_range: Tuple[float, float] = (1500.0, 3000.0)  # Constrained
     t_tau_perturb_range: Tuple[float, float] = (-0.05, 0.05)
     alpha_perturb_range: Tuple[float, float] = (-0.10, 0.10)
     arterial_blood_volume_range: Tuple[float, float] = (0.00, 0.015) # 0 to 1.5%

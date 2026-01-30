@@ -8,9 +8,18 @@ import numpy as np
 import yaml
 
 def main():
-    root_dir = Path("hpc_ablation_jobs")
+    # Accept directory as command-line argument or default to hpc_ablation_jobs
+    if len(sys.argv) > 1:
+        root_dir = Path(sys.argv[1])
+    else:
+        root_dir = Path("hpc_ablation_jobs")
+
+    if not root_dir.exists():
+        print(f"Error: Directory '{root_dir}' does not exist.")
+        sys.exit(1)
+
     results = []
-    
+
     print(f"Crawling {root_dir} for 'llm_analysis_report.json'...")
     
     # 1. Crawl for the correct filename

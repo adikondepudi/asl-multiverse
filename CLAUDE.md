@@ -4,7 +4,42 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Project Overview
 
-ASL Multiverse is a neural network framework for Arterial Spin Labeling (ASL) MRI parameter estimation. It trains models to predict Cerebral Blood Flow (CBF) and Arterial Transit Time (ATT) from combined PCASL and VSASL signals, outperforming conventional least-squares fitting methods.
+ASL Multiverse is a neural network framework for Arterial Spin Labeling (ASL) MRI parameter estimation. It trains models to predict Cerebral Blood Flow (CBF) and Arterial Transit Time (ATT) from combined PCASL and VSASL signals.
+
+**Goal**: Beat least-squares fitting methods in accuracy, robustness to noise, and computational speed.
+
+## Critical Bug Fixes (2026-01-29)
+
+### NORM_STATS_INDICES Bug (FIXED)
+**Location**: `feature_registry.py`, lines 48-57
+
+The `NORM_STATS_INDICES` dictionary had incorrect indices that didn't match the actual output order of `compute_feature_vector()`. This caused **wrong normalization statistics** to be applied during training, leading to models that output near-constant predictions.
+
+**Old (BUGGY)**:
+```python
+NORM_STATS_INDICES = {
+    'mean': [0, 2],  # WRONG - assumed interleaved layout
+    'std': [1, 3],
+    ...
+}
+```
+
+**New (FIXED)**:
+```python
+NORM_STATS_INDICES = {
+    'mean': [0, 1],  # CORRECT - grouped layout (mean_p, mean_v)
+    'std': [2, 3],   # (std_p, std_v)
+    ...
+}
+```
+
+**Impact**: All models trained before this fix used incorrect feature normalization. **You must regenerate norm_stats and retrain models.**
+
+### Other Fixes
+- `validate.py`: Hardcoded physics parameters replaced with `self.params.*`
+- `validate.py`: Fixed LS self-comparison bug (`abs(x-x)` → `abs(x-truth)`)
+- `validate.py`: Fixed spatial validation dtype mismatch (float64 → float32)
+- `validate.py`: Added proper ground truth tracking for LS comparison
 
 ## Common Commands
 
@@ -19,10 +54,13 @@ python generate_clean_library.py <output_dir> --mode spatial --total_samples 100
 
 ### Training
 ```bash
-# Stage 1: Self-supervised denoising pre-training
+# Stage 1: Self-supervised denoising pre-training (OPTIONAL)
 python main.py config/v5_stage1_pretrain.yaml --stage 1 --output-dir ./results/stage1
 
-# Stage 2: Supervised regression training (optionally load Stage 1 encoder)
+# Stage 2: Supervised regression training
+python main.py config/v5_stage2_MoE_finetune.yaml --stage 2 --output-dir ./results/stage2
+
+# Stage 2 with pre-trained encoder from Stage 1
 python main.py config/v5_stage2_MoE_finetune.yaml --stage 2 --output-dir ./results/stage2 --load-weights-from ./results/stage1
 ```
 
@@ -41,7 +79,7 @@ streamlit run asl_interactive_dashboard.py
 
 ### Two-Stage Training Pipeline
 1. **Stage 1 (Denoising)**: Self-supervised pre-training where the encoder learns to reconstruct clean signal shapes from noisy inputs
-2. **Stage 2 (Regression)**: Supervised training to predict CBF/ATT with uncertainty estimation (NLL loss)
+2. **Stage 2 (Regression)**: Supervised training to predict CBF/ATT with uncertainty estimation
 
 ### Core Modules
 
@@ -71,31 +109,69 @@ YAML configs in `config/` are flattened into `ResearchConfig` dataclass. Key sec
 - `simulation`: physics parameters (T1_artery, T_tau, alpha values)
 - `noise_config`: SNR range, physio/drift/spike parameters
 
+## Best Practices for Beating Least Squares
+
+### 1. Use Constrained ATT Range
+**Problem**: Default ATT range (500-4000ms) exceeds max PLD (3000ms). Signals with ATT > 3000ms have zero/minimal signal at all measured PLDs, making estimation ill-posed.
+
+**Solution**: Constrain ATT range to match PLD coverage:
+```yaml
+simulation:
+  # In enhanced_simulation.py PhysiologicalVariation:
+  att_range: [500.0, 3000.0]  # Keep within PLD range
+```
+
+### 2. Use MAE Loss (Not Pure NLL)
+Pure NLL loss allows the model to minimize loss by predicting high uncertainty instead of accurate values.
+
+**Recommended**:
+```yaml
+training:
+  loss_mode: "mae_only"  # Forces accurate predictions
+  # OR
+  loss_mode: "mae_nll"   # Balanced: accuracy + uncertainty
+  mae_weight: 1.0
+  nll_weight: 0.1
+```
+
+### 3. Sufficient Training Data
+- Minimum: 1M samples for 1D models
+- Recommended: 5-10M samples
+- Ensure diverse parameter coverage (CBF, ATT, T1 variations)
+
+### 4. Match Training and Validation Noise
+Training uses `NoiseInjector` while validation uses different noise functions. Ensure consistency:
+- Use same noise type (gaussian/rician)
+- Use same noise components
+- Use similar SNR ranges
+
+### 5. Verify Normalization Statistics
+After any code changes, regenerate norm_stats:
+```python
+# In main.py, stats are auto-calculated from training data
+# Check that scalar_features_mean/std have correct dimensionality
+```
+
 ## Key Concepts
 
 ### Feature System
 Active features are configurable via `active_features` list: `['mean', 'std', 'peak', 'ttp', 'com', 't1_artery', 'z_coord']`. The `FeatureRegistry` validates configs and computes dimensions dynamically.
 
+**Feature order in norm_stats**:
+`[mean_p, mean_v, std_p, std_v, ttp_p, ttp_v, com_p, com_v, peak_p, peak_v, wsum_p, wsum_v]`
+
 ### Noise Components
 Configurable via `data_noise_components`: `['thermal', 'physio', 'drift', 'spikes']`. Noise is applied during training, not pre-computed.
 
-### Noise Type (NEW)
+### Noise Type
 Configurable via `noise_type` in data section:
-- `'gaussian'` (default): Standard Gaussian additive noise (legacy behavior)
-- `'rician'`: Rician noise - correct MRI physics for magnitude images. Creates positive bias at low SNR matching real MRI data. Recommended for in-vivo applications.
+- `'gaussian'` (default): Standard Gaussian additive noise
+- `'rician'`: Rician noise - correct MRI physics for magnitude images
 
-### Normalization Mode (NEW)
+### Normalization Mode
 Configurable via `normalization_mode` in data section:
 - `'per_curve'` (default): Z-score normalize each curve individually. Creates SNR-invariant "shape vectors".
-- `'global_scale'`: Multiply signals by `global_scale_factor` (default: 10.0). Preserves absolute magnitude information, similar to IVIM-NET's S(b)/S(b=0) approach. Use when signal magnitude carries information.
-
-Example config for Rician + Global Scaling (recommended for in-vivo):
-```yaml
-data:
-  noise_type: "rician"
-  normalization_mode: "global_scale"
-  global_scale_factor: 10.0
-```
+- `'global_scale'`: Multiply signals by `global_scale_factor` (default: 10.0). Preserves absolute magnitude.
 
 ### Physics Parameters
 - PLDs: Post-labeling delays in ms (default: 500-3000 in 500ms steps)
@@ -104,27 +180,32 @@ data:
 - alpha_PCASL/VSASL: Labeling efficiencies
 
 ### Output Targets
-Models predict normalized CBF and ATT. Denormalization uses `norm_stats.json` saved during training.
-
-### Loss Configuration (CRITICAL)
-The loss function significantly impacts model performance. Pure NLL loss allows the model to "cheat" by predicting high uncertainty instead of accurate values.
-
-Configurable via `loss_mode` in training section:
-- `'mae_only'`: Pure L1 loss - **RECOMMENDED** for forcing accurate predictions
-- `'mse_only'`: Pure L2 loss - standard regression
-- `'nll_only'`: Pure NLL loss - learns uncertainty but can minimize loss without accuracy
-- `'mae_nll'`: MAE primary + NLL secondary - balanced approach (default)
-- `'mse_nll'`: MSE primary + NLL secondary
-
-Example config for accurate predictions:
-```yaml
-training:
-  loss_mode: "mae_only"
-  mae_weight: 1.0
+Models predict **normalized** CBF and ATT. Denormalization uses `norm_stats.json` saved during training:
+```python
+cbf_pred = cbf_norm * y_std_cbf + y_mean_cbf
+att_pred = att_norm * y_std_att + y_mean_att
 ```
 
-For spatial models, use `loss_type` (l1/l2/huber) and `att_scale` (default 0.033) to balance CBF vs ATT losses.
+## Diagnostics
 
-### Diagnostics
-- **`diagnose_model.py <run_dir>`**: Quick check of model predictions without full validation
-- **`validate.py <run_dir>`**: Full validation with LS comparison (now supports spatial models)
+### Quick Checks
+- **`diagnose_model.py <run_dir>`**: Quick check of model predictions
+- **`validate.py <run_dir>`**: Full validation with LS comparison
+
+### Signs of Training Failure
+1. **Near-constant predictions**: Model outputs similar values regardless of input
+   - Check: NN prediction std << true value std
+   - Cause: Usually normalization bug or mode collapse from NLL loss
+
+2. **Very high bias**: Predictions systematically offset from truth
+   - Check: Mean error >> expected noise level
+   - Cause: Denormalization bug or training data mismatch
+
+3. **R² near zero or negative**: Model no better than predicting the mean
+   - Cause: Features not informative or training didn't converge
+
+### Debugging Steps
+1. Check `norm_stats.json` - verify reasonable mean/std values
+2. Run `diagnose_model.py` - see raw prediction distributions
+3. Check training loss curves in wandb
+4. Verify input dimensions match between training and inference

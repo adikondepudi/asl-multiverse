@@ -140,7 +140,7 @@ class SpatialASLNet(nn.Module):
             
         Returns:
             cbf_map: (Batch, 1, H, W) - Positive via Softplus
-            att_map: (Batch, 1, H, W) - 0-4000ms via Sigmoid scaling
+            att_map: (Batch, 1, H, W) - 0-3000ms via Sigmoid scaling
             log_var_cbf: (Batch, 1, H, W) - Placeholder uncertainty
             log_var_att: (Batch, 1, H, W) - Placeholder uncertainty
         """

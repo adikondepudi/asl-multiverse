@@ -566,6 +566,7 @@ class ASLValidator:
         all_nn_cbf, all_ls_cbf = [], []
         all_nn_att, all_ls_att = [], []
         all_true_cbf, all_true_att = [], []
+        all_ls_true_cbf, all_ls_true_att = [], []  # Ground truth for LS-sampled voxels
 
         for phantom_idx in range(n_phantoms):
             # Generate random ground truth maps
@@ -605,7 +606,8 @@ class ASLValidator:
             noisy_signals_scaled = noisy_signals * 100.0
 
             # --- NN Inference ---
-            input_tensor = torch.from_numpy(noisy_signals_scaled[np.newaxis, ...]).to(self.device)
+            # Ensure float32 dtype to match model weights
+            input_tensor = torch.from_numpy(noisy_signals_scaled[np.newaxis, ...]).float().to(self.device)
 
             with torch.no_grad():
                 nn_cbf_maps, nn_att_maps = [], []
@@ -658,12 +660,14 @@ class ASLValidator:
             all_true_cbf.extend(true_cbf_map[brain_mask_bool].flatten())
             all_true_att.extend(true_att_map[brain_mask_bool].flatten())
 
-            # For LS, only use sampled voxels
+            # For LS, only use sampled voxels (with corresponding ground truth)
             for idx in sample_indices:
                 i, j = idx
                 if not np.isnan(ls_cbf[i, j]):
                     all_ls_cbf.append(ls_cbf[i, j])
                     all_ls_att.append(ls_att[i, j])
+                    all_ls_true_cbf.append(true_cbf_map[i, j])
+                    all_ls_true_att.append(true_att_map[i, j])
 
             if phantom_idx == 0:
                 # Log first phantom stats for debugging
@@ -683,6 +687,8 @@ class ASLValidator:
         all_true_att = np.array(all_true_att)
         all_ls_cbf = np.array(all_ls_cbf)
         all_ls_att = np.array(all_ls_att)
+        all_ls_true_cbf = np.array(all_ls_true_cbf)
+        all_ls_true_att = np.array(all_ls_true_att)
 
         # Compute metrics
         logger.info("=" * 60)
@@ -705,12 +711,12 @@ class ASLValidator:
         logger.info(f"True ATT Range - mean: {all_true_att.mean():.2f}, std: {all_true_att.std():.2f}")
 
         # LS Metrics (sampled voxels - need to match indices for fair comparison)
-        if len(all_ls_cbf) > 0:
-            # For LS comparison, we need the corresponding true values
-            # Since we sampled, we'll compute on matched pairs
-            ls_cbf_mae = np.nanmean(np.abs(all_ls_cbf - all_ls_cbf))  # placeholder
-            logger.info(f"LS CBF - Samples: {len(all_ls_cbf)}, Mean: {np.nanmean(all_ls_cbf):.2f}")
-            logger.info(f"LS ATT - Samples: {len(all_ls_att)}, Mean: {np.nanmean(all_ls_att):.2f}")
+        if len(all_ls_cbf) > 0 and len(all_ls_true_cbf) > 0:
+            # Compute LS metrics against ground truth
+            ls_cbf_mae = np.nanmean(np.abs(all_ls_cbf - all_ls_true_cbf))
+            ls_att_mae = np.nanmean(np.abs(all_ls_att - all_ls_true_att))
+            logger.info(f"LS CBF - Samples: {len(all_ls_cbf)}, MAE: {ls_cbf_mae:.2f}, Mean: {np.nanmean(all_ls_cbf):.2f}")
+            logger.info(f"LS ATT - Samples: {len(all_ls_att)}, MAE: {ls_att_mae:.2f}, Mean: {np.nanmean(all_ls_att):.2f}")
 
         # Log to LLM report
         self._log_llm_metrics("Spatial_SNR10", all_nn_cbf[:len(all_ls_cbf)],
@@ -737,10 +743,11 @@ class ASLValidator:
         logger.info("=" * 60)
 
         # A: Fixed CBF, Varying ATT
-        t_cbf = np.full(n, 60.0); t_att = np.linspace(500, 4000, n)
+        # NOTE: ATT constrained to max PLD (3000ms) to ensure signals are measurable
+        t_cbf = np.full(n, 60.0); t_att = np.linspace(500, 3000, n)
         sigs = [self.generate_noise(np.concatenate([
-            self.simulator._generate_pcasl_signal(self.plds, a, c, 1850, 1800, 0.85),
-            self.simulator._generate_vsasl_signal(self.plds, a, c, 1850, 0.56)
+            self.simulator._generate_pcasl_signal(self.plds, a, c, self.params.T1_artery, self.params.T_tau, self.params.alpha_PCASL),
+            self.simulator._generate_vsasl_signal(self.plds, a, c, self.params.T1_artery, self.params.alpha_VSASL)
         ]), 10.0) for c, a in zip(t_cbf, t_att)]
         sigs = np.array(sigs)
         nn_c, nn_a = self.run_nn_inference(sigs, np.full(n, 1850.0))
@@ -764,8 +771,8 @@ class ASLValidator:
         # B: Fixed ATT, Varying CBF
         t_cbf = np.linspace(20, 120, n); t_att = np.full(n, 1500.0)
         sigs = [self.generate_noise(np.concatenate([
-            self.simulator._generate_pcasl_signal(self.plds, a, c, 1850, 1800, 0.85),
-            self.simulator._generate_vsasl_signal(self.plds, a, c, 1850, 0.56)
+            self.simulator._generate_pcasl_signal(self.plds, a, c, self.params.T1_artery, self.params.T_tau, self.params.alpha_PCASL),
+            self.simulator._generate_vsasl_signal(self.plds, a, c, self.params.T1_artery, self.params.alpha_VSASL)
         ]), 10.0) for c, a in zip(t_cbf, t_att)]
         sigs = np.array(sigs)
         nn_c, nn_a = self.run_nn_inference(sigs, np.full(n, 1850.0))
@@ -779,11 +786,12 @@ class ASLValidator:
         self._plot_scenario("B_FixedATT_VarCBF", t_cbf, "CBF", nn_c, nn_a, ls_c, ls_a, t_cbf, t_att)
         
         # C & D
-        t_cbf = np.random.uniform(20, 100, n); t_att = np.random.uniform(500, 4000, n)
+        # NOTE: ATT constrained to max PLD (3000ms) to ensure signals are measurable
+        t_cbf = np.random.uniform(20, 100, n); t_att = np.random.uniform(500, 3000, n)
         for snr, label in [(10.0, "C_VarBoth_SNR10"), (3.0, "D_VarBoth_SNR3")]:
             sigs = [self.generate_noise(np.concatenate([
-                self.simulator._generate_pcasl_signal(self.plds, a, c, 1850, 1800, 0.85),
-                self.simulator._generate_vsasl_signal(self.plds, a, c, 1850, 0.56)
+                self.simulator._generate_pcasl_signal(self.plds, a, c, self.params.T1_artery, self.params.T_tau, self.params.alpha_PCASL),
+                self.simulator._generate_vsasl_signal(self.plds, a, c, self.params.T1_artery, self.params.alpha_VSASL)
             ]), snr) for c, a in zip(t_cbf, t_att)]
             sigs = np.array(sigs)
             nn_c, nn_a = self.run_nn_inference(sigs, np.full(n, 1850.0))

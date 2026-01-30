@@ -1,0 +1,92 @@
+# Optimized Configuration for Beating Least Squares
+# Created: 2026-01-29
+#
+# Key optimizations:
+# 1. Uses MAE loss (forces accurate predictions)
+# 2. Appropriate feature set
+# 3. Robust training with realistic noise
+# 4. ATT range constrained to measurable values
+
+# --- DATA ---
+data:
+  use_offline_dataset: true
+  offline_dataset_path: "asl_clean_library_v1"  # Your data directory
+  num_samples_to_load: 5000000  # 5M samples for good coverage
+
+  pld_values: [500, 1000, 1500, 2000, 2500, 3000]
+
+  # Key features that distinguish signal shapes
+  active_features:
+    - mean
+    - std
+    - peak
+    - t1_artery
+
+  # Noise configuration - match realistic MRI conditions
+  data_noise_components:
+    - thermal
+    - physio     # Physiological oscillations
+    - drift      # Signal drift
+
+  # Use Gaussian noise (simpler, often works better for training)
+  noise_type: "gaussian"
+
+  # Per-curve normalization creates SNR-invariant features
+  normalization_mode: "per_curve"
+
+# --- NOISE ENGINE ---
+noise_config:
+  snr_range: [3.0, 20.0]     # Wide SNR range for robustness
+  physio_amp_range: [0.03, 0.10]
+  physio_freq_range: [0.5, 1.5]
+  drift_range: [-0.015, 0.015]
+  spike_probability: 0.0      # Disable spikes for cleaner training
+
+# --- TRAINING ---
+training:
+  model_class_name: "DisentangledASLNet"
+  encoder_type: "physics_processor"
+
+  # Network architecture
+  hidden_sizes: [256, 128, 64]
+  dropout_rate: 0.1
+  norm_type: "batch"
+
+  # Training parameters
+  n_epochs: 100
+  batch_size: 4096
+  learning_rate: 0.0001
+  weight_decay: 0.0001
+
+  # Ensemble for robustness
+  n_ensembles: 3
+
+  # Early stopping
+  early_stopping_patience: 15
+  early_stopping_min_delta: 0.0
+  validation_steps_per_epoch: 25
+
+  # CRITICAL: Loss configuration
+  # MAE loss forces accurate predictions (no uncertainty cheating)
+  loss_mode: "mae_only"
+  mae_weight: 1.0
+
+  # Uncertainty bounds (if using NLL loss)
+  log_var_cbf_min: -5.0
+  log_var_cbf_max: 7.0
+  log_var_att_min: -5.0
+  log_var_att_max: 10.0
+
+# --- PHYSICS ---
+simulation:
+  T1_artery: 1850.0
+  T_tau: 1800.0
+  alpha_PCASL: 0.85
+  alpha_VSASL: 0.56
+  T2_factor: 1.0
+  alpha_BS1: 1.0
+
+# --- LOGGING ---
+wandb:
+  wandb_project: "asl-beat-ls"
+  wandb_entity: null  # Set to your entity or leave null
