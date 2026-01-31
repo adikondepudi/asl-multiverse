@@ -1,9 +1,24 @@
 # Configuration for Spatial (U-Net) model training with MAE loss
 # Uses normalized targets (z-scores) for proper training dynamics.
 # This prevents mean-prediction caused by output activation initialization bias.
+#
+# ============================================================================
+# CRITICAL NORMALIZATION NOTES:
+# ============================================================================
+# Per-pixel z-score normalization DESTROYS CBF information mathematically!
+#
+# The signal model is: x ≈ CBF · M0 · k(ATT, T1)
+# Z-score: z = (x - mean) / std → CBF · M0 cancels out completely!
+#
+# Result with per_curve (z-score):
+#   - ATT works: Shape k(ATT) is preserved
+#   - CBF FAILS: Amplitude (CBF · M0) is mathematically removed
+#
+# Solution: Use normalization_mode: "global_scale" to preserve CBF information.
+# ============================================================================
 
 training:
-  # Model class
+  # Model class - Options: "SpatialASLNet", "DualEncoderSpatialASLNet"
   model_class_name: "SpatialASLNet"
 
   # === Loss Configuration (for MaskedSpatialLoss) ===
@@ -13,7 +28,11 @@ training:
   att_scale: 1.0
   cbf_weight: 1.0
   att_weight: 1.0
-  dc_weight: 0.0         # Data consistency loss weight (0 = disabled)
+
+  # Data Consistency Loss: Physics-informed loss component
+  # Reconstructs signals from predicted CBF/ATT and compares to input
+  dc_weight: 0.1         # 0 = disabled, 0.1 = recommended starting value
+
   # Variance penalty: penalizes if prediction variance < target variance
   # This prevents mean-collapse where model just predicts the average
   variance_weight: 0.1
@@ -33,15 +52,46 @@ data:
   pld_values: [500, 1000, 1500, 2000, 2500, 3000]
 
   # Noise configuration
-  noise_type: "gaussian"
-  normalization_mode: "per_curve"
+  # Options: "gaussian" (legacy), "rician" (MRI-correct physics)
+  noise_type: "rician"
   data_noise_components: ["thermal"]
 
+  # =========================================================================
+  # CRITICAL: Normalization Mode
+  # =========================================================================
+  # "global_scale" (REQUIRED for CBF): Preserves amplitude information
+  #   - Signal magnitude is proportional to CBF
+  #   - Input is already M0-normalized (*100) by SpatialDataset
+  #   - Additional global_scale_factor for numerical stability
+  #
+  # "per_curve" (LEGACY - DESTROYS CBF): Per-pixel temporal z-score
+  #   - Removes CBF information mathematically
+  #   - Only ATT (shape) information remains
+  #   - DO NOT USE for CBF estimation!
+  # =========================================================================
+  normalization_mode: "global_scale"
+  global_scale_factor: 1.0  # Input already *100 from SpatialDataset M0 norm
+
 simulation:
+  # Physics parameters with domain randomization ranges
   T1_artery: 1850.0
   T_tau: 1800.0
   alpha_PCASL: 0.85
   alpha_VSASL: 0.56
 
+  # Domain randomization: vary physics parameters during training
+  # This prevents the network from overfitting to fixed parameter values
+  domain_randomization:
+    enabled: true
+    T1_artery_range: [1550.0, 2150.0]    # Hematocrit variations
+    alpha_PCASL_range: [0.75, 0.95]      # Labeling efficiency variations
+    alpha_VSASL_range: [0.40, 0.70]      # VSS efficiency range
+    T_tau_perturb: 0.10                  # ±10% variation in label duration
+
 noise_config:
   snr_range: [5, 30]
+  # Spatial noise parameters (for SpatialNoiseEngine)
+  spatial_noise_sigma: 0.8              # Gaussian blur for spatially correlated noise
+  motion_probability: 0.15              # Probability of motion artifact per sample
+  motion_shift_range: [1, 3]            # Pixel shift range
+  motion_rotate_range: [-2, 2]          # Rotation range in degrees

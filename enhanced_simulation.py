@@ -16,11 +16,22 @@ logger = logging.getLogger(__name__)
 class SpatialPhantomGenerator:
     """
     Generates realistic 2D spatial phantoms for ASL training.
-    
+
     Creates tissue segmentation with gray matter, white matter, CSF,
     and pathological regions (tumor/stroke) with proper partial volume effects.
+
+    Domain Randomization:
+    --------------------
+    Supports per-sample variation of physics parameters to prevent overfitting:
+    - Blood T1: Varies with hematocrit (1550-2150 ms)
+    - Labeling efficiencies: α_PCASL (0.75-0.95), α_VSASL (0.40-0.70)
+    - Label duration (τ): ±10% variation
+    - M0 scaling: Receiver gain variations
+
+    This is critical for generalization to real patient data where these
+    parameters vary significantly between subjects and scanners.
     """
-    
+
     # Tissue CBF values (ml/100g/min)
     TISSUE_CBF = {
         'gray_matter': (50.0, 70.0),
@@ -31,7 +42,7 @@ class SpatialPhantomGenerator:
         'stroke_core': (2.0, 10.0),    # Ischemic core
         'stroke_penumbra': (15.0, 35.0),  # Penumbra (salvageable)
     }
-    
+
     # Tissue ATT values (ms)
     # NOTE: ATT values constrained to max PLD (3000ms) for detectability
     TISSUE_ATT = {
@@ -43,15 +54,82 @@ class SpatialPhantomGenerator:
         'stroke_core': (2500.0, 3000.0),  # Very delayed (constrained to max PLD)
         'stroke_penumbra': (1800.0, 2500.0),
     }
-    
-    def __init__(self, size: int = 64, pve_sigma: float = 1.0):
+
+    # Domain randomization default ranges
+    DEFAULT_DOMAIN_RAND = {
+        'T1_artery_range': (1550.0, 2150.0),    # Hematocrit variations
+        'alpha_PCASL_range': (0.75, 0.95),      # Labeling efficiency
+        'alpha_VSASL_range': (0.40, 0.70),      # VSS efficiency
+        'T_tau_perturb': 0.10,                  # ±10% label duration
+        'M0_scale_range': (0.9, 1.1),           # Receiver gain variations
+    }
+
+    def __init__(self, size: int = 64, pve_sigma: float = 1.0,
+                 domain_randomization: dict = None):
         """
         Args:
             size: Image size (size x size)
             pve_sigma: Gaussian blur sigma for partial volume effect
+            domain_randomization: Dict with physics parameter ranges for training
         """
         self.size = size
         self.pve_sigma = pve_sigma
+
+        # Domain randomization config
+        self.domain_rand = domain_randomization or {}
+        self.use_domain_rand = self.domain_rand.get('enabled', True)
+
+        # Physics parameter ranges (with defaults)
+        if self.use_domain_rand:
+            self.T1_range = self.domain_rand.get('T1_artery_range', self.DEFAULT_DOMAIN_RAND['T1_artery_range'])
+            self.alpha_PCASL_range = self.domain_rand.get('alpha_PCASL_range', self.DEFAULT_DOMAIN_RAND['alpha_PCASL_range'])
+            self.alpha_VSASL_range = self.domain_rand.get('alpha_VSASL_range', self.DEFAULT_DOMAIN_RAND['alpha_VSASL_range'])
+            self.T_tau_perturb = self.domain_rand.get('T_tau_perturb', self.DEFAULT_DOMAIN_RAND['T_tau_perturb'])
+            self.M0_scale_range = self.domain_rand.get('M0_scale_range', self.DEFAULT_DOMAIN_RAND['M0_scale_range'])
+
+    def sample_physics_params(self, base_params: 'ASLParameters' = None) -> Dict:
+        """
+        Sample physics parameters with domain randomization.
+
+        This prevents the network from overfitting to fixed parameter values,
+        which is critical for generalization to real patient data.
+
+        Args:
+            base_params: Base ASLParameters to use as defaults
+
+        Returns:
+            Dict with sampled physics parameters:
+            - T1_artery: Blood T1 in ms
+            - T_tau: Label duration in ms
+            - alpha_PCASL: PCASL labeling efficiency
+            - alpha_VSASL: VSASL labeling efficiency
+            - M0_scale: M0 scaling factor
+        """
+        if base_params is None:
+            base_params = ASLParameters()
+
+        if self.use_domain_rand:
+            # Sample from ranges
+            T1_artery = np.random.uniform(*self.T1_range)
+            alpha_PCASL = np.random.uniform(*self.alpha_PCASL_range)
+            alpha_VSASL = np.random.uniform(*self.alpha_VSASL_range)
+            T_tau = base_params.T_tau * (1 + np.random.uniform(-self.T_tau_perturb, self.T_tau_perturb))
+            M0_scale = np.random.uniform(*self.M0_scale_range)
+        else:
+            # Use defaults
+            T1_artery = base_params.T1_artery
+            alpha_PCASL = base_params.alpha_PCASL
+            alpha_VSASL = base_params.alpha_VSASL
+            T_tau = base_params.T_tau
+            M0_scale = 1.0
+
+        return {
+            'T1_artery': T1_artery,
+            'T_tau': T_tau,
+            'alpha_PCASL': alpha_PCASL,
+            'alpha_VSASL': alpha_VSASL,
+            'M0_scale': M0_scale,
+        }
         
     def _generate_blob_mask(self, center: Tuple[int, int], 
                             radius: int, 
@@ -305,10 +383,21 @@ class RealisticASLSimulator(ASLSimulator):
         
         return noisy_signal
 
-    def generate_spatial_batch(self, plds: np.ndarray, batch_size: int = 4, size: int = 64) -> Tuple[np.ndarray, np.ndarray]:
+    def generate_spatial_batch(self, plds: np.ndarray, batch_size: int = 4, size: int = 64,
+                               domain_randomization: dict = None) -> Tuple[np.ndarray, np.ndarray]:
         """
         Generates a batch of 2D ASL training images with blobs and artifacts.
-        Returns: 
+
+        Supports domain randomization: physics parameters (T1, alpha, tau) are
+        sampled per-batch to prevent overfitting to fixed values.
+
+        Args:
+            plds: Post-labeling delays in ms
+            batch_size: Number of images per batch
+            size: Image dimensions (size x size)
+            domain_randomization: Dict with physics parameter ranges
+
+        Returns:
             signals: (Batch, 2*n_plds, Size, Size)
             targets: (Batch, 2, Size, Size) -> [CBF, ATT]
         """
@@ -316,20 +405,35 @@ class RealisticASLSimulator(ASLSimulator):
         n_plds = len(plds)
         signals = np.zeros((batch_size, n_plds * 2, size, size), dtype=np.float32)
         targets = np.zeros((batch_size, 2, size, size), dtype=np.float32)
-        
-        # Pre-calculate physics constants for broadcasting
+
         # Shape: (n_plds, 1, 1)
-        plds_bc = plds[:, np.newaxis, np.newaxis] 
-        t1_b = self.params.T1_artery
-        tau = self.params.T_tau
+        plds_bc = plds[:, np.newaxis, np.newaxis]
         lambda_b = 0.90
         t2_f = self.params.T2_factor
-        
-        # Efficiencies (including BS)
-        alpha_p = self.params.alpha_PCASL * (self.params.alpha_BS1**4)
-        alpha_v = self.params.alpha_VSASL * (self.params.alpha_BS1**3)
-        
+
+        # Domain randomization config
+        dr = domain_randomization or {}
+        use_dr = dr.get('enabled', True)
+        T1_range = dr.get('T1_artery_range', (1550.0, 2150.0))
+        alpha_PCASL_range = dr.get('alpha_PCASL_range', (0.75, 0.95))
+        alpha_VSASL_range = dr.get('alpha_VSASL_range', (0.40, 0.70))
+        T_tau_perturb = dr.get('T_tau_perturb', 0.10)
+        M0_scale_range = dr.get('M0_scale_range', (0.9, 1.1))
+
         for b in range(batch_size):
+            # --- Domain Randomization: Sample physics params per batch ---
+            if use_dr:
+                t1_b = np.random.uniform(*T1_range)
+                tau = self.params.T_tau * (1 + np.random.uniform(-T_tau_perturb, T_tau_perturb))
+                alpha_p = np.random.uniform(*alpha_PCASL_range) * (self.params.alpha_BS1**4)
+                alpha_v = np.random.uniform(*alpha_VSASL_range) * (self.params.alpha_BS1**3)
+                m0_scale = np.random.uniform(*M0_scale_range)
+            else:
+                t1_b = self.params.T1_artery
+                tau = self.params.T_tau
+                alpha_p = self.params.alpha_PCASL * (self.params.alpha_BS1**4)
+                alpha_v = self.params.alpha_VSASL * (self.params.alpha_BS1**3)
+                m0_scale = 1.0
             # --- 1. Generate Parameter Maps (The "Phantom") ---
             # Background (Gray Matter-ish)
             cbf_map = np.random.normal(50, 5, (size, size))
@@ -406,14 +510,18 @@ class RealisticASLSimulator(ASLSimulator):
             # Current shape: (n_plds, Size, Size)
             # We need to stack into (2*n_plds, Size, Size)
             clean_stack = np.concatenate([pcasl_sig, vsasl_sig], axis=0)
-            
+
+            # Apply M0 scaling (domain randomization for receiver gain variations)
+            clean_stack = clean_stack * m0_scale
+
             # Add Complex Rician Noise (Spatial)
-            # Calculate signal level for SNR scaling
+            # Rician noise: S_noisy = sqrt((S + N_real)^2 + N_imag^2)
+            # This correctly simulates the positive bias at low SNR seen in real MRI
             mean_sig = np.mean(clean_stack)
             # Random SNR per image
-            snr = np.random.uniform(5.0, 15.0) 
+            snr = np.random.uniform(5.0, 15.0)
             sigma = mean_sig / snr
-            
+
             noise_r = np.random.normal(0, sigma, clean_stack.shape)
             noise_i = np.random.normal(0, sigma, clean_stack.shape)
             noisy_stack = np.sqrt((clean_stack + noise_r)**2 + noise_i**2)

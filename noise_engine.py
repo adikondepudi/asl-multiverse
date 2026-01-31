@@ -44,14 +44,33 @@ class NoiseInjector:
         self.motion_rotate_range = self.config.get('motion_rotate_range', [-3, 3])  # degrees
 
     def apply_noise(self, signals: Union[torch.Tensor, np.ndarray], ref_signal: float, pld_scaling: dict) -> Union[torch.Tensor, np.ndarray]:
-        """Apply noise to 1D voxel signals (Batch, Features)."""
+        """
+        Apply noise to ASL signals.
+
+        Supports multiple input shapes:
+        - 1D: (Features,) - single voxel signal
+        - 2D: (Batch, Features) - batch of voxel signals
+        - 4D: (Batch, Channels, H, W) - spatial images (uses apply_noise_spatial)
+
+        Args:
+            signals: Input signal tensor/array
+            ref_signal: Reference signal for SNR computation
+            pld_scaling: Dict with 'PCASL' and 'VSASL' scaling factors
+
+        Returns:
+            Noisy signals with same shape as input
+        """
+        # Handle 4D spatial data separately
+        if signals.ndim == 4:
+            return self.apply_noise_spatial(signals, ref_signal, pld_scaling)
+
         is_torch = isinstance(signals, torch.Tensor)
         xp = torch if is_torch else np
-        
+
         # Ensure 2D (Batch, Features)
         if signals.ndim == 1:
             signals = signals.reshape(1, -1) if is_torch else signals[np.newaxis, :]
-            
+
         batch_size, seq_len = signals.shape
         n_plds = seq_len // 2
         device = signals.device if is_torch else None
@@ -141,6 +160,156 @@ class NoiseInjector:
             total_noise += spike_noise
 
         return signals + total_noise
+
+    def apply_noise_spatial(self, signals: Union[torch.Tensor, np.ndarray],
+                           ref_signal: float, pld_scaling: dict) -> Union[torch.Tensor, np.ndarray]:
+        """
+        Apply noise to 4D spatial ASL signals (Batch, Channels, H, W).
+
+        This method implements proper MRI physics for spatial data:
+        1. Rician noise in complex domain (correct for magnitude MRI)
+        2. Spatially correlated noise components (optional)
+        3. Per-channel TR-dependent scaling
+
+        Args:
+            signals: (Batch, 2*n_plds, H, W) input signals [PCASL | VSASL]
+            ref_signal: Reference signal for SNR computation
+            pld_scaling: Dict with 'PCASL' and 'VSASL' scaling factors
+
+        Returns:
+            Noisy signals with same shape
+        """
+        is_torch = isinstance(signals, torch.Tensor)
+
+        if is_torch:
+            return self._apply_noise_spatial_torch(signals, ref_signal, pld_scaling)
+        else:
+            return self._apply_noise_spatial_numpy(signals, ref_signal, pld_scaling)
+
+    def _apply_noise_spatial_torch(self, signals: torch.Tensor,
+                                   ref_signal: float, pld_scaling: dict) -> torch.Tensor:
+        """Apply spatial noise using PyTorch (for training)."""
+        B, C, H, W = signals.shape
+        n_plds = C // 2
+        device = signals.device
+
+        # Sample SNR per-batch
+        snr = torch.empty(B, 1, 1, 1, device=device).uniform_(*self.snr_range)
+        noise_sigma = ref_signal / snr
+
+        # Create scaling vector for channels (Batch, Channels, 1, 1)
+        scale_p = pld_scaling['PCASL']
+        scale_v = pld_scaling['VSASL']
+        s_vec = torch.cat([
+            torch.full((n_plds,), scale_p, device=device),
+            torch.full((n_plds,), scale_v, device=device)
+        ]).view(1, C, 1, 1)
+
+        if 'thermal' in self.components:
+            if self.noise_type == 'rician':
+                # Rician noise: S_noisy = sqrt((S + N_real)^2 + N_imag^2)
+                # This correctly simulates the Rician bias at low SNR
+                noise_real = torch.randn_like(signals) * noise_sigma * s_vec
+                noise_imag = torch.randn_like(signals) * noise_sigma * s_vec
+
+                # Optionally apply spatial correlation for more realistic noise
+                if self.spatial_noise_sigma > 0:
+                    # Use average pooling + upsampling as differentiable approximation
+                    # of Gaussian blur for spatial correlation
+                    kernel_size = max(3, int(self.spatial_noise_sigma * 2 + 1))
+                    if kernel_size % 2 == 0:
+                        kernel_size += 1
+                    padding = kernel_size // 2
+
+                    # Simple spatial smoothing via conv
+                    blur = torch.nn.AvgPool2d(3, stride=1, padding=1)
+                    noise_real = blur(noise_real)
+                    noise_imag = blur(noise_imag)
+
+                    # Rescale to maintain target SNR
+                    noise_real = noise_real * (noise_sigma * s_vec) / (noise_real.std(dim=(2, 3), keepdim=True) + 1e-6)
+                    noise_imag = noise_imag * (noise_sigma * s_vec) / (noise_imag.std(dim=(2, 3), keepdim=True) + 1e-6)
+
+                signals = torch.sqrt((signals + noise_real)**2 + noise_imag**2)
+            else:
+                # Gaussian noise (legacy)
+                noise = torch.randn_like(signals) * noise_sigma * s_vec
+                signals = signals + noise
+
+        # Add other noise components (applied after Rician if using Rician)
+        total_additive = torch.zeros_like(signals)
+
+        if 'physio' in self.components:
+            # Physiological noise - apply same fluctuation spatially
+            amp = torch.empty(B, 1, 1, 1, device=device).uniform_(*self.physio_amp_range)
+            # Create a slow spatial wave
+            x_coord = torch.linspace(0, 1, W, device=device).view(1, 1, 1, W)
+            y_coord = torch.linspace(0, 1, H, device=device).view(1, 1, H, 1)
+            phase = torch.rand(B, 1, 1, 1, device=device) * 6.28
+            physio = amp * noise_sigma * torch.sin(2 * 3.14159 * (x_coord + y_coord) + phase)
+            total_additive = total_additive + physio
+
+        if 'drift' in self.components:
+            # Baseline drift across spatial domain
+            slope = torch.empty(B, 1, 1, 1, device=device).uniform_(*self.drift_range)
+            x_coord = torch.linspace(-1, 1, W, device=device).view(1, 1, 1, W)
+            drift = slope * noise_sigma * x_coord
+            total_additive = total_additive + drift
+
+        if 'spikes' in self.components:
+            # Random spike artifacts (affects random voxels)
+            spike_mask = (torch.rand(B, C, H, W, device=device) < self.spike_prob * 0.1).float()
+            spike_magnitude = torch.empty(B, 1, 1, 1, device=device).uniform_(*self.spike_mag)
+            spike_noise = spike_mask * spike_magnitude * noise_sigma
+            total_additive = total_additive + spike_noise
+
+        return signals + total_additive
+
+    def _apply_noise_spatial_numpy(self, signals: np.ndarray,
+                                   ref_signal: float, pld_scaling: dict) -> np.ndarray:
+        """Apply spatial noise using NumPy (for validation/inference)."""
+        B, C, H, W = signals.shape
+        n_plds = C // 2
+
+        # Sample SNR per-batch
+        snr = np.random.uniform(*self.snr_range, size=(B, 1, 1, 1))
+        noise_sigma = ref_signal / snr
+
+        # Create scaling vector
+        scale_p = pld_scaling['PCASL']
+        scale_v = pld_scaling['VSASL']
+        s_vec = np.concatenate([
+            np.full(n_plds, scale_p),
+            np.full(n_plds, scale_v)
+        ]).reshape(1, C, 1, 1)
+
+        output = signals.copy()
+
+        if 'thermal' in self.components:
+            if self.noise_type == 'rician':
+                noise_real = np.random.randn(B, C, H, W) * noise_sigma * s_vec
+                noise_imag = np.random.randn(B, C, H, W) * noise_sigma * s_vec
+
+                # Apply spatial correlation
+                if self.spatial_noise_sigma > 0:
+                    for b in range(B):
+                        for c in range(C):
+                            noise_real[b, c] = gaussian_filter(noise_real[b, c], sigma=self.spatial_noise_sigma)
+                            noise_imag[b, c] = gaussian_filter(noise_imag[b, c], sigma=self.spatial_noise_sigma)
+
+                    # Rescale to maintain target SNR
+                    for b in range(B):
+                        real_std = noise_real[b].std(axis=(1, 2), keepdims=True) + 1e-6
+                        imag_std = noise_imag[b].std(axis=(1, 2), keepdims=True) + 1e-6
+                        noise_real[b] = noise_real[b] * (noise_sigma[b] * s_vec[0]) / real_std
+                        noise_imag[b] = noise_imag[b] * (noise_sigma[b] * s_vec[0]) / imag_std
+
+                output = np.sqrt((output + noise_real)**2 + noise_imag**2)
+            else:
+                noise = np.random.randn(B, C, H, W) * noise_sigma * s_vec
+                output = output + noise
+
+        return output.astype(np.float32)
 
 
 class SpatialNoiseEngine:

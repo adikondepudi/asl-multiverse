@@ -25,7 +25,7 @@ except ImportError as e:
 # --- 2. Custom Imports ---
 try:
     from asl_simulation import ASLParameters
-    from enhanced_simulation import RealisticASLSimulator
+    from enhanced_simulation import RealisticASLSimulator, SpatialPhantomGenerator
     from enhanced_asl_network import DisentangledASLNet
     from spatial_asl_network import SpatialASLNet  # NEW: Import spatial model
     from utils import process_signals_dynamic, get_grid_search_initial_guess
@@ -568,16 +568,17 @@ class ASLValidator:
         all_true_cbf, all_true_att = [], []
         all_ls_true_cbf, all_ls_true_att = [], []  # Ground truth for LS-sampled voxels
 
-        for phantom_idx in range(n_phantoms):
-            # Generate random ground truth maps
-            np.random.seed(phantom_idx)
-            true_cbf_map = np.random.uniform(20, 100, (phantom_size, phantom_size)).astype(np.float32)
-            true_att_map = np.random.uniform(500, 3000, (phantom_size, phantom_size)).astype(np.float32)
+        # Use SpatialPhantomGenerator to match training data distribution
+        phantom_gen = SpatialPhantomGenerator(size=phantom_size, pve_sigma=1.0)
 
-            # Create brain mask (circular)
-            y, x = np.ogrid[:phantom_size, :phantom_size]
-            center = phantom_size // 2
-            mask = ((x - center)**2 + (y - center)**2 <= (center - 5)**2).astype(np.float32)
+        for phantom_idx in range(n_phantoms):
+            # Generate tissue-structured phantom (matches training data)
+            np.random.seed(phantom_idx)
+            true_cbf_map, true_att_map, metadata = phantom_gen.generate_phantom(include_pathology=True)
+
+            # Create brain mask from non-zero CBF regions
+            # (CSF has CBF 0-5, so threshold at 1 to include most tissue)
+            mask = (true_cbf_map > 1.0).astype(np.float32)
 
             # Generate clean signals for each voxel
             signals = np.zeros((len(self.plds) * 2, phantom_size, phantom_size), dtype=np.float32)
@@ -605,11 +606,20 @@ class ASLValidator:
             # Scale signals (matching SpatialDataset M0 normalization)
             noisy_signals_scaled = noisy_signals * 100.0
 
-            # CRITICAL: Per-pixel temporal normalization (must match training)
-            # Z-score each pixel's temporal signal across channels
-            temporal_mean = np.mean(noisy_signals_scaled, axis=0, keepdims=True)  # (1, H, W)
-            temporal_std = np.std(noisy_signals_scaled, axis=0, keepdims=True) + 1e-6  # (1, H, W)
-            noisy_signals_normalized = (noisy_signals_scaled - temporal_mean) / temporal_std
+            # Apply normalization matching training config
+            # CRITICAL: Z-score normalization DESTROYS CBF information!
+            # Use global_scale mode to preserve amplitude (CBF) information.
+            normalization_mode = self.config.get('normalization_mode', 'per_curve')
+            global_scale_factor = self.config.get('global_scale_factor', 1.0)
+
+            if normalization_mode == 'global_scale':
+                # Global scaling: preserves CBF-proportional amplitude
+                noisy_signals_normalized = noisy_signals_scaled * global_scale_factor
+            else:
+                # Per-pixel z-score (LEGACY - destroys CBF info!)
+                temporal_mean = np.mean(noisy_signals_scaled, axis=0, keepdims=True)
+                temporal_std = np.std(noisy_signals_scaled, axis=0, keepdims=True) + 1e-6
+                noisy_signals_normalized = (noisy_signals_scaled - temporal_mean) / temporal_std
 
             # --- NN Inference ---
             # Ensure float32 dtype to match model weights

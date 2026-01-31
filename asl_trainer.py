@@ -184,12 +184,25 @@ class EnhancedASLTrainer:
                 noisy_flat = self.noise_injector.apply_noise(signals_flat, self.ref_signal_gpu, self.pld_scaling)
                 signals = noisy_flat.reshape(B, H, W, C).permute(0, 3, 1, 2)
 
-            # Step 2: Per-pixel temporal normalization (ALWAYS applied)
-            # Z-score each pixel's temporal signal across channels
-            # signals shape: (B, C, H, W) where C is temporal dimension
-            temporal_mean = signals.mean(dim=1, keepdim=True)  # (B, 1, H, W)
-            temporal_std = signals.std(dim=1, keepdim=True) + 1e-6  # (B, 1, H, W)
-            normalized_signals = (signals - temporal_mean) / temporal_std
+            # Step 2: Normalization mode selection
+            # CRITICAL: Z-score normalization DESTROYS CBF information!
+            # The signal is: x ≈ CBF · M0 · k(ATT, T1)
+            # Z-score: z = (x - mean) / std cancels out CBF · M0 completely!
+            # This is why CBF estimation fails but ATT (encoded in shape k) works.
+            #
+            # Use global_scale mode to PRESERVE amplitude (CBF) information.
+            # The SpatialDataset already applies M0 scaling (*100).
+            if self.normalization_mode == 'global_scale':
+                # Global scaling: preserves CBF-proportional amplitude
+                # Input is already M0-normalized by SpatialDataset (*100)
+                # Just apply additional scaling if needed for numerical stability
+                normalized_signals = signals * self.global_scale_factor
+            else:
+                # Per-pixel z-score normalization (LEGACY - destroys CBF info!)
+                # WARNING: This mode should NOT be used for CBF estimation
+                temporal_mean = signals.mean(dim=1, keepdim=True)  # (B, 1, H, W)
+                temporal_std = signals.std(dim=1, keepdim=True) + 1e-6  # (B, 1, H, W)
+                normalized_signals = (signals - temporal_mean) / temporal_std
 
             return normalized_signals
 
