@@ -18,7 +18,7 @@
 # =============================================================================
 
 #SBATCH --job-name=asl-prod-orchestrator
-#SBATCH --partition=shared
+#SBATCH --partition=cpu
 #SBATCH --nodes=1
 #SBATCH --cpus-per-task=2
 #SBATCH --mem=8G
@@ -111,7 +111,7 @@ cat > slurm_logs/extended_validation.slurm << 'VALIDATION_EOF'
 #!/bin/bash
 #SBATCH --job-name=asl-prod-validate
 #SBATCH --partition=gpu
-#SBATCH --gres=gpu:1
+#SBATCH --gres=gpu:A100:1
 #SBATCH --nodes=1
 #SBATCH --cpus-per-task=8
 #SBATCH --mem=64G
