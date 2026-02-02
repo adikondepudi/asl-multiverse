@@ -1,11 +1,11 @@
 #!/bin/bash
 #SBATCH --job-name=asl-prod-train
-#SBATCH --partition=gpuh100
-#SBATCH --gres=gpu:H100:1
+#SBATCH --partition=gpu
+#SBATCH --gres=gpu:1
 #SBATCH --nodes=1
 #SBATCH --cpus-per-task=16
 #SBATCH --mem=128G
-#SBATCH --time=12:00:00
+#SBATCH --time=36:00:00
 #SBATCH --output=slurm_logs/prod_train_%j.out
 #SBATCH --error=slurm_logs/prod_train_%j.err
 

@@ -110,8 +110,8 @@ echo "[4/4] Submitting extended validation job..."
 cat > slurm_logs/extended_validation.slurm << 'VALIDATION_EOF'
 #!/bin/bash
 #SBATCH --job-name=asl-prod-validate
-#SBATCH --partition=gpuh100
-#SBATCH --gres=gpu:H100:1
+#SBATCH --partition=gpu
+#SBATCH --gres=gpu:1
 #SBATCH --nodes=1
 #SBATCH --cpus-per-task=8
 #SBATCH --mem=64G
