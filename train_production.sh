@@ -1,6 +1,6 @@
 #!/bin/bash
 #SBATCH --job-name=asl-prod-train
-#SBATCH --partition=gpu
+#SBATCH --partition=gpua100
 #SBATCH --gres=gpu:A100:1
 #SBATCH --nodes=1
 #SBATCH --cpus-per-task=16
