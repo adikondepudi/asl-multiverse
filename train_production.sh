@@ -1,11 +1,11 @@
 #!/bin/bash
 #SBATCH --job-name=asl-prod-train
-#SBATCH --partition=gpua100
-#SBATCH --gres=gpu:A100:1
+#SBATCH --partition=gpuh100
+#SBATCH --gres=gpu:H100:1
 #SBATCH --nodes=1
 #SBATCH --cpus-per-task=16
 #SBATCH --mem=128G
-#SBATCH --time=48:00:00
+#SBATCH --time=12:00:00
 #SBATCH --output=slurm_logs/prod_train_%j.out
 #SBATCH --error=slurm_logs/prod_train_%j.err
 
@@ -16,7 +16,7 @@
 #   - 200k sample dataset
 #   - 5-model ensemble
 #   - 200 epochs
-#   - A100 GPU for speed
+#   - H100 GPU for speed
 #   - Comprehensive validation
 # =============================================================================
 

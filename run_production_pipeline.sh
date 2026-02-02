@@ -12,9 +12,9 @@
 #   sbatch run_production_pipeline.sh           # Full pipeline
 #   sbatch run_production_pipeline.sh --train-only  # Skip data generation
 #
-# Estimated time: ~30 hours total
+# Estimated time: ~6-8 hours total (H100)
 #   - Data generation: ~3 hours
-#   - Training: ~24 hours (can vary with GPU)
+#   - Training: ~3-4 hours (H100 is ~2x faster than A100)
 # =============================================================================
 
 #SBATCH --job-name=asl-prod-orchestrator
@@ -98,7 +98,7 @@ echo "[3/4] Submitting training job..."
 
 TRAIN_JOB=$(sbatch --parsable ${DEPENDENCY} train_production.sh)
 echo "  Training job: ${TRAIN_JOB}"
-echo "  Estimated time: ~48 hours"
+echo "  Estimated time: ~3-4 hours (H100)"
 
 # =============================================================================
 # STEP 3: MULTI-SNR VALIDATION (runs after training)
@@ -110,8 +110,8 @@ echo "[4/4] Submitting extended validation job..."
 cat > slurm_logs/extended_validation.slurm << 'VALIDATION_EOF'
 #!/bin/bash
 #SBATCH --job-name=asl-prod-validate
-#SBATCH --partition=gpua100
-#SBATCH --gres=gpu:A100:1
+#SBATCH --partition=gpuh100
+#SBATCH --gres=gpu:H100:1
 #SBATCH --nodes=1
 #SBATCH --cpus-per-task=8
 #SBATCH --mem=64G
@@ -207,7 +207,7 @@ echo "Monitor progress:"
 echo "  squeue -u \$USER"
 echo "  tail -f slurm_logs/prod_train_*.out"
 echo ""
-echo "Expected completion: ~30 hours from now"
+echo "Expected completion: ~6-8 hours from now (H100)"
 echo ""
 echo "Output locations:"
 echo "  Models:     ${OUTPUT_DIR}/trained_models/"
