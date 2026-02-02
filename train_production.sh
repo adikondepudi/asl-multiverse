@@ -13,7 +13,7 @@
 # PRODUCTION MODEL TRAINING
 # =============================================================================
 # Full production training with all optimizations:
-#   - 500k sample dataset
+#   - 200k sample dataset
 #   - 5-model ensemble
 #   - 200 epochs
 #   - A100 GPU for speed
@@ -42,7 +42,7 @@ conda activate asl_multiverse
 # --- Configuration ---
 CONFIG_FILE="config/production_v1.yaml"
 OUTPUT_DIR="production_model_v1"
-DATASET_DIR="asl_spatial_dataset_500k"
+DATASET_DIR="asl_spatial_dataset_200k"
 
 echo ""
 echo "[2/5] Configuration:"
@@ -70,7 +70,7 @@ NUM_CHUNKS=$(ls -1 ${DATASET_DIR}/spatial_chunk_*.npz 2>/dev/null | wc -l)
 echo "  Dataset chunks found: ${NUM_CHUNKS}"
 
 if [ "$NUM_CHUNKS" -lt 100 ]; then
-    echo "WARNING: Dataset seems small (${NUM_CHUNKS} chunks). Expected ~1000 for 500k samples."
+    echo "WARNING: Dataset seems small (${NUM_CHUNKS} chunks). Expected ~400 for 200k samples."
 fi
 
 # Create output directory

@@ -11,7 +11,7 @@
 #   4. Wide SNR range [2, 25] for robustness
 #   5. 5-model ensemble for stability
 #   6. Extended training (200 epochs)
-#   7. Larger dataset (500k samples)
+#   7. Larger dataset (200k samples)
 #   8. Domain randomization for generalization
 # =============================================================================
 
@@ -44,9 +44,17 @@ training:
   # Training parameters
   learning_rate: 0.0001                 # Adam default
   weight_decay: 0.0001                  # L2 regularization
-  batch_size: 32                        # Spatial batches (memory limited)
+  batch_size: 64                        # Increased for A100 (40-80GB VRAM)
   n_epochs: 200                         # Extended training
   n_ensembles: 5                        # 5-model ensemble for robustness
+
+  # A100 Performance Optimizations
+  use_amp: true                         # Mixed precision (FP16) - already enabled
+  use_tf32: true                        # TF32 tensor cores (A100 specific, ~3x faster than FP32)
+  use_compile: true                     # torch.compile (PyTorch 2.0+, ~20-30% speedup)
+  cudnn_benchmark: true                 # Auto-tune convolution algorithms
+  num_workers: 8                        # Parallel data loading
+  pin_memory: true                      # Faster CPU->GPU transfers
 
   # Early stopping
   early_stopping_patience: 25           # More patience for production
@@ -56,8 +64,8 @@ training:
 # --- DATA CONFIGURATION ---
 data:
   use_offline_dataset: true
-  offline_dataset_path: asl_spatial_dataset_500k    # Large production dataset
-  num_samples_to_load: 500000                       # 500k samples
+  offline_dataset_path: asl_spatial_dataset_200k    # Production dataset
+  num_samples_to_load: 200000                       # 200k samples
 
   # PLD values (ms) - standard MULTIVERSE protocol
   pld_values: [500, 1000, 1500, 2000, 2500, 3000]

@@ -3,7 +3,7 @@
 # PRODUCTION PIPELINE ORCHESTRATOR
 # =============================================================================
 # Master script to run the complete production training pipeline:
-#   1. Generate large-scale spatial dataset (500k samples)
+#   1. Generate large-scale spatial dataset (200k samples)
 #   2. Train 5-model ensemble (200 epochs)
 #   3. Run comprehensive validation
 #   4. Generate final report
@@ -12,9 +12,9 @@
 #   sbatch run_production_pipeline.sh           # Full pipeline
 #   sbatch run_production_pipeline.sh --train-only  # Skip data generation
 #
-# Estimated time: ~56 hours total
-#   - Data generation: ~8 hours
-#   - Training: ~48 hours (can vary with GPU)
+# Estimated time: ~30 hours total
+#   - Data generation: ~3 hours
+#   - Training: ~24 hours (can vary with GPU)
 # =============================================================================
 
 #SBATCH --job-name=asl-prod-orchestrator
@@ -58,7 +58,7 @@ conda activate asl_multiverse
 
 # --- Configuration ---
 OUTPUT_DIR="production_model_v1"
-DATASET_DIR="asl_spatial_dataset_500k"
+DATASET_DIR="asl_spatial_dataset_200k"
 CONFIG_FILE="config/production_v1.yaml"
 
 # =============================================================================
@@ -70,7 +70,7 @@ if [ "$TRAIN_ONLY" = false ]; then
 
     DATA_JOB=$(sbatch --parsable generate_production_data.sh)
     echo "  Data generation job: ${DATA_JOB}"
-    echo "  Estimated time: ~8 hours"
+    echo "  Estimated time: ~3 hours"
 
     # Training depends on data generation
     DEPENDENCY="--dependency=afterok:${DATA_JOB}"
@@ -207,7 +207,7 @@ echo "Monitor progress:"
 echo "  squeue -u \$USER"
 echo "  tail -f slurm_logs/prod_train_*.out"
 echo ""
-echo "Expected completion: ~56 hours from now"
+echo "Expected completion: ~30 hours from now"
 echo ""
 echo "Output locations:"
 echo "  Models:     ${OUTPUT_DIR}/trained_models/"

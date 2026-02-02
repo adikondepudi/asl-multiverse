@@ -216,21 +216,30 @@ def run_comprehensive_asl_research(config: ResearchConfig, stage: int, output_di
         script_logger.info(f"Spatial Dataset: {train_size} training, {val_size} validation.")
 
         # Create Standard DataLoaders (CPU -> GPU streaming)
-        num_workers = 0  # CRITICAL: 0 workers prevents RAM duplication for in-memory datasets
+        # num_workers > 0 helps when loading from disk; 0 is better for fully in-memory datasets
+        num_workers = getattr(config, 'num_workers', 4)
+        pin_memory = getattr(config, 'pin_memory', True)
+        # persistent_workers keeps workers alive between epochs (faster, but uses more RAM)
+        persistent = num_workers > 0
+
         train_loader = DataLoader(
-            train_dataset, 
-            batch_size=config.batch_size, 
-            shuffle=True, 
-            num_workers=num_workers, 
-            pin_memory=True,
+            train_dataset,
+            batch_size=config.batch_size,
+            shuffle=True,
+            num_workers=num_workers,
+            pin_memory=pin_memory,
+            persistent_workers=persistent,
+            prefetch_factor=2 if num_workers > 0 else None,
         )
-        
+
         val_loader = DataLoader(
             val_dataset,
             batch_size=config.batch_size,
             shuffle=False,
             num_workers=num_workers,
-            pin_memory=True
+            pin_memory=pin_memory,
+            persistent_workers=persistent,
+            prefetch_factor=2 if num_workers > 0 else None,
         )
         
         # Instantiate Spatial Loss with configurable parameters

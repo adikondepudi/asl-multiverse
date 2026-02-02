@@ -64,6 +64,25 @@ class EnhancedASLTrainer:
         self.device = torch.device(device); self.model_config = model_config; self.stage = stage
         self.lr_base = float(model_config.get('learning_rate', 0.001)); self.weight_decay = float(weight_decay)
         self.n_ensembles = n_ensembles; self.validation_steps_per_epoch = model_config.get('validation_steps_per_epoch', 50)
+
+        # === A100 Performance Optimizations ===
+        if model_config.get('use_tf32', False) and torch.cuda.is_available():
+            # TF32: 3x faster than FP32 on A100 tensor cores, near-FP32 accuracy
+            torch.backends.cuda.matmul.allow_tf32 = True
+            torch.backends.cudnn.allow_tf32 = True
+            # PyTorch 2.0+ preferred API
+            if hasattr(torch, 'set_float32_matmul_precision'):
+                torch.set_float32_matmul_precision('high')
+            logger.info("A100 Optimization: TF32 enabled for matmul and cudnn")
+
+        if model_config.get('cudnn_benchmark', False):
+            # Auto-tune convolution algorithms for fixed input sizes
+            torch.backends.cudnn.benchmark = True
+            logger.info("A100 Optimization: cuDNN benchmark enabled")
+
+        self.use_compile = model_config.get('use_compile', False)
+        self.num_workers = model_config.get('num_workers', 0)
+        self.pin_memory = model_config.get('pin_memory', False)
         
         # NEW: Ablation Study Configs
         self.active_features = model_config.get('active_features', ['mean', 'std', 'peak', 't1_artery'])
@@ -84,7 +103,13 @@ class EnhancedASLTrainer:
         
         logger.info("Initializing models (Float32)...")
         self.models = [model_class(**model_config).to(self.device) for _ in range(n_ensembles)]
-        
+
+        # torch.compile: ~20-30% speedup on PyTorch 2.0+ (A100 benefits most)
+        if self.use_compile and hasattr(torch, 'compile'):
+            logger.info("A100 Optimization: Applying torch.compile() to models...")
+            self.models = [torch.compile(m, mode='reduce-overhead') for m in self.models]
+            logger.info("A100 Optimization: torch.compile() applied successfully")
+
         self.scaler = torch.amp.GradScaler('cuda', enabled=True)
 
         if wandb.run:

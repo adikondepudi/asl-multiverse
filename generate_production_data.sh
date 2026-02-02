@@ -4,7 +4,7 @@
 #SBATCH --nodes=1
 #SBATCH --cpus-per-task=32
 #SBATCH --mem=128G
-#SBATCH --time=8:00:00
+#SBATCH --time=4:00:00
 #SBATCH --output=slurm_logs/prod_datagen_%j.out
 #SBATCH --error=slurm_logs/prod_datagen_%j.err
 
@@ -13,7 +13,7 @@
 # =============================================================================
 # Generates large-scale spatial phantom dataset for production training
 #
-# Dataset: 500,000 64x64 spatial phantoms
+# Dataset: 200,000 64x64 spatial phantoms
 # Features: Tissue segmentation, pathology, realistic CBF/ATT distributions
 # =============================================================================
 
@@ -38,8 +38,8 @@ source /cm/shared/apps/anaconda3/2023.09/etc/profile.d/conda.sh
 conda activate asl_multiverse
 
 # --- Configuration ---
-DATASET_NAME="asl_spatial_dataset_500k"
-TOTAL_SAMPLES=500000
+DATASET_NAME="asl_spatial_dataset_200k"
+TOTAL_SAMPLES=200000
 CHUNK_SIZE=500
 IMAGE_SIZE=64
 
@@ -61,7 +61,7 @@ fi
 # --- Generate Data ---
 echo ""
 echo "[3/3] Generating spatial dataset..."
-echo "  This will take several hours for 500k samples."
+echo "  This will take ~2-3 hours for 200k samples."
 echo ""
 
 python generate_clean_library.py "${DATASET_NAME}" \
