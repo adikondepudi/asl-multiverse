@@ -88,8 +88,7 @@ echo ""
 
 python main.py "${CONFIG_FILE}" \
     --stage 2 \
-    --output-dir "${OUTPUT_DIR}" \
-    --offline_dataset_path "${DATASET_DIR}"
+    --output-dir "${OUTPUT_DIR}"
 
 # --- Validation ---
 echo ""
