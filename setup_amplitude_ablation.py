@@ -402,7 +402,7 @@ def main():
     # Write master orchestrator script
     orchestrator = f"""#!/bin/bash
 #SBATCH --job-name=amp-ablation
-#SBATCH --partition=shared
+#SBATCH --partition=cpu
 #SBATCH --nodes=1
 #SBATCH --cpus-per-task=2
 #SBATCH --mem=8G
@@ -439,7 +439,7 @@ echo "[2/4] Submitting data generation (20k samples)..."
 cat > slurm_logs/gen_ablation_data.slurm << 'EOF'
 #!/bin/bash
 #SBATCH --job-name=amp-datagen
-#SBATCH --partition=shared
+#SBATCH --partition=cpu
 #SBATCH --nodes=1
 #SBATCH --cpus-per-task=16
 #SBATCH --mem=64G
@@ -492,7 +492,7 @@ echo "[4/4] Submitting aggregation job..."
 cat > {base_dir}/aggregate.slurm << 'EOF'
 #!/bin/bash
 #SBATCH --job-name=amp-aggregate
-#SBATCH --partition=shared
+#SBATCH --partition=cpu
 #SBATCH --nodes=1
 #SBATCH --mem=8G
 #SBATCH --time=1:00:00
