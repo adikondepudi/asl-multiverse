@@ -21,6 +21,7 @@ warnings.filterwarnings('ignore', category=UserWarning)
 
 from enhanced_asl_network import DisentangledASLNet, PhysicsInformedASLProcessor, CustomLoss
 from spatial_asl_network import SpatialASLNet, SpatialDataset, MaskedSpatialLoss
+from amplitude_aware_spatial_network import AmplitudeAwareSpatialASLNet
 from asl_simulation import ASLParameters
 from enhanced_simulation import RealisticASLSimulator
 from asl_trainer import EnhancedASLTrainer, FastTensorDataLoader
@@ -180,7 +181,7 @@ def run_comprehensive_asl_research(config: ResearchConfig, stage: int, output_di
     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
     
     # === 1. DATA LOADING STRATEGY ===
-    is_spatial_model = (config.model_class_name == "SpatialASLNet")
+    is_spatial_model = config.model_class_name in ["SpatialASLNet", "AmplitudeAwareSpatialASLNet"]
     train_loader = None
     val_loader = None
     loss_function = None
@@ -384,13 +385,13 @@ def run_comprehensive_asl_research(config: ResearchConfig, stage: int, output_di
     # === MODEL & TRAINER SETUP ===
     model_creation_config = asdict(config)
     
-    def create_model_closure(**kwargs): 
+    def create_model_closure(**kwargs):
         if config.model_class_name == "SpatialASLNet":
             # Map MLP 'hidden_sizes' to U-Net 'features'
             # 1. Sort ascending (U-Net encoders expand: 32 -> 64 -> ...)
             features = sorted(kwargs.get('hidden_sizes', [256, 128, 64]))
-            
-            # 2. PAD to 4 levels: SpatialASLNet HARDCODES 4 layers. 
+
+            # 2. PAD to 4 levels: SpatialASLNet HARDCODES 4 layers.
             # If config has only 3, prepend a smaller layer (e.g. [64,128,256] -> [32,64,128,256])
             while len(features) < 4:
                 features.insert(0, max(1, features[0] // 2))
@@ -398,6 +399,20 @@ def run_comprehensive_asl_research(config: ResearchConfig, stage: int, output_di
             return SpatialASLNet(
                 n_plds=num_plds,
                 features=features,
+                **kwargs
+            )
+        elif config.model_class_name == "AmplitudeAwareSpatialASLNet":
+            # AmplitudeAwareSpatialASLNet: preserves amplitude info for CBF estimation
+            features = sorted(kwargs.get('hidden_sizes', [256, 128, 64]))
+            while len(features) < 4:
+                features.insert(0, max(1, features[0] // 2))
+
+            return AmplitudeAwareSpatialASLNet(
+                n_plds=num_plds,
+                features=features,
+                use_film_at_bottleneck=kwargs.get('use_film_at_bottleneck', True),
+                use_film_at_decoder=kwargs.get('use_film_at_decoder', True),
+                use_amplitude_output_modulation=kwargs.get('use_amplitude_output_modulation', True),
                 **kwargs
             )
         else:
