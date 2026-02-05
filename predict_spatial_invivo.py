@@ -23,7 +23,9 @@ import re
 from tqdm import tqdm
 from typing import Dict, List, Tuple, Optional
 
+import yaml
 from spatial_asl_network import SpatialASLNet
+from amplitude_aware_spatial_network import AmplitudeAwareSpatialASLNet
 
 
 def find_and_sort_files_by_pld(subject_dir: Path, pattern: str) -> List[Path]:
@@ -69,7 +71,7 @@ def unpad(tensor: torch.Tensor, padding: Tuple[int, int, int, int]) -> torch.Ten
 
 
 def load_spatial_model(model_dir: Path, device: torch.device) -> Tuple[List[torch.nn.Module], Dict, Dict]:
-    """Load SpatialASLNet ensemble from model directory."""
+    """Load SpatialASLNet or AmplitudeAwareSpatialASLNet ensemble from model directory."""
     print(f"Loading model from: {model_dir}")
 
     # Load config and norm stats
@@ -78,8 +80,19 @@ def load_spatial_model(model_dir: Path, device: torch.device) -> Tuple[List[torc
     with open(model_dir / 'norm_stats.json', 'r') as f:
         norm_stats = json.load(f)
 
+    # Load training config to determine model class
+    config_yaml_path = model_dir / 'config.yaml'
+    training_config = {}
+    if config_yaml_path.exists():
+        with open(config_yaml_path, 'r') as f:
+            full_config = yaml.safe_load(f)
+            training_config = full_config.get('training', {})
+
+    model_class_name = training_config.get('model_class_name', 'SpatialASLNet')
+
     # Determine number of PLDs from config
     n_plds = len(config['pld_values'])
+    print(f"  Model class: {model_class_name}")
     print(f"  Model expects {n_plds} PLDs: {config['pld_values']}")
 
     # Load ensemble models
@@ -87,9 +100,44 @@ def load_spatial_model(model_dir: Path, device: torch.device) -> Tuple[List[torc
     models_dir = model_dir / 'trained_models'
 
     for model_path in sorted(models_dir.glob('ensemble_model_*.pt')):
-        model = SpatialASLNet(n_plds=n_plds)
-        state_dict = torch.load(model_path, map_location='cpu')
-        model.load_state_dict(state_dict)
+        # Load state dict first to check for FiLM keys
+        state_dict = torch.load(model_path, map_location='cpu', weights_only=False)
+        if 'model_state_dict' in state_dict:
+            sd = state_dict['model_state_dict']
+        else:
+            sd = state_dict
+
+        # Determine model architecture from checkpoint
+        if model_class_name == 'AmplitudeAwareSpatialASLNet':
+            has_film_keys = any('film' in k for k in sd.keys())
+            features = training_config.get('hidden_sizes', [32, 64, 128, 256])
+
+            if has_film_keys:
+                # Full architecture (how models were actually trained due to bug)
+                model = AmplitudeAwareSpatialASLNet(
+                    n_plds=n_plds,
+                    features=features,
+                    use_film_at_bottleneck=True,
+                    use_film_at_decoder=True,
+                    use_amplitude_output_modulation=True,
+                )
+            else:
+                model = AmplitudeAwareSpatialASLNet(
+                    n_plds=n_plds,
+                    features=features,
+                    use_film_at_bottleneck=training_config.get('use_film_at_bottleneck', True),
+                    use_film_at_decoder=training_config.get('use_film_at_decoder', True),
+                    use_amplitude_output_modulation=training_config.get('use_amplitude_output_modulation', True),
+                )
+        else:
+            model = SpatialASLNet(n_plds=n_plds)
+
+        # Load weights
+        if 'model_state_dict' in state_dict:
+            model.load_state_dict(state_dict['model_state_dict'])
+        else:
+            model.load_state_dict(state_dict)
+
         model.to(device)
         model.eval()
         models.append(model)
@@ -200,11 +248,18 @@ def preprocess_subject(subject_dir: Path, model_plds: List[int], global_scale: f
     # Transpose to (Z, 2*n_plds, H, W) for PyTorch
     spatial_stack = np.transpose(combined, (2, 3, 0, 1))
 
-    # CRITICAL: Apply global_scale normalization (NOT z-score!)
-    # The normdiff data has values ~0.002, we scale to ~0.02 for the network
-    # Training used *100 M0 scaling, but normdiff is already M0-normalized
-    # So we just apply the global_scale factor
-    spatial_stack = spatial_stack * global_scale
+    # CRITICAL: Apply BOTH M0 scaling and global_scale to match training!
+    #
+    # Training pipeline (SpatialDataset):
+    #   1. Generate signals (~0.01)
+    #   2. M0_SCALE_FACTOR = 100 (signals *= 100)  <- THIS WAS MISSING!
+    #   3. global_scale_factor = 10 (signals *= 10)
+    #   Final training range: ~1-50
+    #
+    # In-vivo data is already M0-normalized (normdiff ~0.001-0.01)
+    # We need to apply BOTH scaling factors to match training:
+    M0_SCALE_FACTOR = 100.0  # Must match SpatialDataset.M0_SCALE_FACTOR
+    spatial_stack = spatial_stack * M0_SCALE_FACTOR * global_scale
 
     print(f"  Preprocessed shape: {spatial_stack.shape}")
     print(f"  Signal range after scaling: [{spatial_stack.min():.4f}, {spatial_stack.max():.4f}]")

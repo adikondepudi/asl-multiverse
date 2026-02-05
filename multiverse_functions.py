@@ -140,26 +140,32 @@ def fit_PCVSASL_misMatchPLD_vectInit_pep(PLDTI, diff_sig, Init, T1_artery, T_tau
     # Calculate confidence intervals
     residual = result.fun
     jacobian = result.jac
-    
+
     # Degrees of freedom
     n = len(residual)
     p = len(beta)
     df = n - p
-    
+
     # Mean squared error
     mse = np.sum(residual**2) / df
-    
-    # Parameter covariance matrix
-    pcov = np.linalg.inv(jacobian.T @ jacobian) * mse
-    
+
+    # Parameter covariance matrix - use pseudo-inverse for robustness to ill-conditioned Jacobians
+    try:
+        # Try regular inverse first (faster)
+        JTJ = jacobian.T @ jacobian
+        pcov = np.linalg.inv(JTJ) * mse
+    except np.linalg.LinAlgError:
+        # Fall back to pseudo-inverse for singular/ill-conditioned matrices
+        pcov = np.linalg.pinv(jacobian.T @ jacobian) * mse
+
     # Standard errors
-    se = np.sqrt(np.diag(pcov))
-    
+    se = np.sqrt(np.maximum(np.diag(pcov), 0))  # Ensure non-negative for sqrt
+
     # 95% confidence intervals
     t_val = t.ppf(0.975, df)
     conintval = np.column_stack([beta - t_val*se, beta + t_val*se])
-    
+
     # Calculate RMSE
     rmse = np.sqrt(np.sum(residual**2) / df)
-    
+
     return beta, conintval, rmse, df

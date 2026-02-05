@@ -194,6 +194,7 @@ EXPERIMENTS = [
                 "T1_artery_range": [1550.0, 2150.0],
                 "alpha_PCASL_range": [0.75, 0.95],
                 "alpha_VSASL_range": [0.40, 0.70],
+                "alpha_BS1_range": [0.85, 1.0],  # Background suppression variation
                 "T_tau_perturb": 0.10,
             },
         },
@@ -214,6 +215,7 @@ EXPERIMENTS = [
                 "T1_artery_range": [1550.0, 2150.0],
                 "alpha_PCASL_range": [0.75, 0.95],
                 "alpha_VSASL_range": [0.40, 0.70],
+                "alpha_BS1_range": [0.85, 1.0],  # Background suppression variation
                 "T_tau_perturb": 0.10,
             },
         },

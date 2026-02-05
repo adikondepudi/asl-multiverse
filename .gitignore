@@ -44,3 +44,11 @@ __pycache__/
 *.npy
 *.nii.gz
 hpc_ablation_jobs/*/validation_results/*.md
+
+# models
+production_model*/
+amplitude_ablation*/
+invivo_results*/
+invivo_comparison*/
+ls_verification/
+*.csv

@@ -101,6 +101,11 @@ class ResearchConfig:
     # noise_config: dict for NoiseInjector configuration (snr_range, physio, drift, spikes, etc.)
     noise_config: Optional[Dict[str, Any]] = None
 
+    # AmplitudeAwareSpatialASLNet configuration
+    use_film_at_bottleneck: bool = True   # FiLM conditioning at bottleneck
+    use_film_at_decoder: bool = True      # FiLM conditioning at decoder layers
+    use_amplitude_output_modulation: bool = True  # Direct amplitude scaling of CBF output
+
 def _generate_simple_validation_set(simulator: RealisticASLSimulator, plds: np.ndarray, n_subjects: int, conditions: List, noise_levels: List) -> Dict:
     """Generates a fixed validation set."""
     dataset = {'signals': [], 'parameters': [], 'conditions': [], 'noise_levels': [], 'perturbed_params': []}

@@ -24,10 +24,12 @@ except ImportError as e:
 
 # --- 2. Custom Imports ---
 try:
+    import yaml
     from asl_simulation import ASLParameters
     from enhanced_simulation import RealisticASLSimulator, SpatialPhantomGenerator
     from enhanced_asl_network import DisentangledASLNet
     from spatial_asl_network import SpatialASLNet  # NEW: Import spatial model
+    from amplitude_aware_spatial_network import AmplitudeAwareSpatialASLNet  # Amplitude-aware model
     from utils import process_signals_dynamic, get_grid_search_initial_guess
     from multiverse_functions import fit_PCVSASL_misMatchPLD_vectInit_pep
     from feature_registry import FeatureRegistry, validate_signals, validate_norm_stats
@@ -263,15 +265,52 @@ class ASLValidator:
         logger.info(f"Auto-detected model architecture: {self.model_architecture}")
 
         if self.model_architecture == 'spatial':
-            # --- SPATIAL MODEL LOADING (SpatialASLNet / U-Net) ---
-            logger.info("Loading SpatialASLNet (U-Net) models for spatial validation...")
+            # --- SPATIAL MODEL LOADING ---
             self.is_spatial = True
+
+            # Load config.yaml to determine exact model class
+            config_yaml_path = self.run_dir / 'config.yaml'
+            training_config = {}
+            if config_yaml_path.exists():
+                with open(config_yaml_path, 'r') as f:
+                    full_config = yaml.safe_load(f)
+                    training_config = full_config.get('training', {})
+
+            model_class_name = training_config.get('model_class_name', 'SpatialASLNet')
+            logger.info(f"Loading {model_class_name} models for spatial validation...")
 
             for mp in model_files:
                 print(f"   ... Loading {mp.name}")
 
-                # SpatialASLNet doesn't need most config params - just n_plds
-                model = SpatialASLNet(n_plds=len(self.plds))
+                # Instantiate correct model class based on config
+                if model_class_name == 'AmplitudeAwareSpatialASLNet':
+                    # NOTE: Due to a bug in main.py (ResearchConfig missing FiLM fields),
+                    # all AmplitudeAwareSpatialASLNet models trained before Feb 2026 were
+                    # trained with FULL architecture regardless of config.yaml settings.
+                    # Check if checkpoint has FiLM keys to determine actual architecture.
+                    has_film_keys = any('film' in k for k in sd.keys())
+
+                    if has_film_keys:
+                        # Checkpoint has FiLM layers - use full architecture
+                        model = AmplitudeAwareSpatialASLNet(
+                            n_plds=len(self.plds),
+                            features=training_config.get('hidden_sizes', [32, 64, 128, 256]),
+                            use_film_at_bottleneck=True,
+                            use_film_at_decoder=True,
+                            use_amplitude_output_modulation=True,
+                        )
+                    else:
+                        # Checkpoint doesn't have FiLM - use config settings
+                        model = AmplitudeAwareSpatialASLNet(
+                            n_plds=len(self.plds),
+                            features=training_config.get('hidden_sizes', [32, 64, 128, 256]),
+                            use_film_at_bottleneck=training_config.get('use_film_at_bottleneck', True),
+                            use_film_at_decoder=training_config.get('use_film_at_decoder', True),
+                            use_amplitude_output_modulation=training_config.get('use_amplitude_output_modulation', True),
+                        )
+                else:
+                    # Default to SpatialASLNet
+                    model = SpatialASLNet(n_plds=len(self.plds))
 
                 try:
                     state_dict = torch.load(mp, map_location=self.device)

@@ -419,14 +419,18 @@ class RealisticASLSimulator(ASLSimulator):
         alpha_VSASL_range = dr.get('alpha_VSASL_range', (0.40, 0.70))
         T_tau_perturb = dr.get('T_tau_perturb', 0.10)
         M0_scale_range = dr.get('M0_scale_range', (0.9, 1.1))
+        # Background suppression: 1.0 = no BS, 0.85-0.95 = typical in-vivo BS
+        # PCASL uses alpha_BS1^4 (4 BS pulses), VSASL uses alpha_BS1^3 (3 BS pulses)
+        alpha_BS1_range = dr.get('alpha_BS1_range', (0.85, 1.0))
 
         for b in range(batch_size):
             # --- Domain Randomization: Sample physics params per batch ---
             if use_dr:
                 t1_b = np.random.uniform(*T1_range)
                 tau = self.params.T_tau * (1 + np.random.uniform(-T_tau_perturb, T_tau_perturb))
-                alpha_p = np.random.uniform(*alpha_PCASL_range) * (self.params.alpha_BS1**4)
-                alpha_v = np.random.uniform(*alpha_VSASL_range) * (self.params.alpha_BS1**3)
+                alpha_bs1 = np.random.uniform(*alpha_BS1_range)
+                alpha_p = np.random.uniform(*alpha_PCASL_range) * (alpha_bs1**4)
+                alpha_v = np.random.uniform(*alpha_VSASL_range) * (alpha_bs1**3)
                 m0_scale = np.random.uniform(*M0_scale_range)
             else:
                 t1_b = self.params.T1_artery

@@ -57,6 +57,8 @@ class KineticModel(nn.Module):
             self.alpha_pcasl_range = self.domain_randomization.get('alpha_PCASL_range', [0.75, 0.95])
             self.alpha_vsasl_range = self.domain_randomization.get('alpha_VSASL_range', [0.40, 0.70])
             self.t_tau_perturb = self.domain_randomization.get('T_tau_perturb', 0.10)
+            # Background suppression: 1.0 = no BS, 0.85-0.95 = typical in-vivo BS
+            self.alpha_bs1_range = self.domain_randomization.get('alpha_BS1_range', [0.85, 1.0])
 
     def forward(self, cbf, att, randomize_params: bool = False):
         """
@@ -78,11 +80,15 @@ class KineticModel(nn.Module):
         if randomize_params and self.use_domain_rand:
             # Sample per-batch physics parameters
             t1_blood = torch.empty(batch_size, 1, 1, 1, device=device).uniform_(*self.t1_range)
-            alpha_pcasl = torch.empty(batch_size, 1, 1, 1, device=device).uniform_(*self.alpha_pcasl_range)
-            alpha_vsasl = torch.empty(batch_size, 1, 1, 1, device=device).uniform_(*self.alpha_vsasl_range)
+            # Sample background suppression efficiency (1.0 = no BS, <1 = with BS)
+            alpha_bs1 = torch.empty(batch_size, 1, 1, 1, device=device).uniform_(*self.alpha_bs1_range)
+            # Effective labeling efficiency = raw efficiency * BS attenuation
+            # PCASL uses 4 BS pulses (alpha_BS1^4), VSASL uses 3 BS pulses (alpha_BS1^3)
+            alpha_pcasl = torch.empty(batch_size, 1, 1, 1, device=device).uniform_(*self.alpha_pcasl_range) * (alpha_bs1 ** 4)
+            alpha_vsasl = torch.empty(batch_size, 1, 1, 1, device=device).uniform_(*self.alpha_vsasl_range) * (alpha_bs1 ** 3)
             t_tau = self.t_tau_default * (1 + torch.empty(1, device=device).uniform_(-self.t_tau_perturb, self.t_tau_perturb))
         else:
-            # Use default parameters
+            # Use default parameters (alpha_BS1 = 1.0, no attenuation)
             t1_blood = self.t1_blood_default
             alpha_pcasl = self.alpha_pcasl_default
             alpha_vsasl = self.alpha_vsasl_default

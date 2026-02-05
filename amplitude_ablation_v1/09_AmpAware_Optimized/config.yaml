@@ -87,6 +87,9 @@ simulation:
     alpha_VSASL_range:
     - 0.4
     - 0.7
+    alpha_BS1_range:
+    - 0.85
+    - 1.0
     T_tau_perturb: 0.1
 wandb:
   wandb_project: asl-amplitude-ablation

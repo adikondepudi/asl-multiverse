@@ -257,10 +257,15 @@ def get_grid_search_initial_guess(
     """
     Performs a coarse grid search for a single voxel to find a robust
     initial guess for NLLS fitting.
+
+    Grid bounds must match the LS optimizer bounds in fit_PCVSASL_misMatchPLD_vectInit_pep:
+    - CBF: [1, 100] ml/100g/min  (internal: [1/6000, 100/6000] ml/g/s)
+    - ATT: [100, 6000] ms
     """
     # --- 1. Define the search grid ---
-    cbf_values_grid = np.linspace(1, 150, 15)  # 15 steps for CBF
-    att_values_grid = np.linspace(100, 4500, 22) # 22 steps for ATT
+    # IMPORTANT: Must stay within LS optimizer bounds: CBF [1, 100], ATT [100, 6000]
+    cbf_values_grid = np.linspace(1, 100, 15)  # 15 steps for CBF, max=100 to match LS bounds
+    att_values_grid = np.linspace(100, 5500, 22) # 22 steps for ATT, within [100, 6000]
 
     # --- 2. Pre-calculate model parameters ---
     t1_artery = asl_params['T1_artery']
