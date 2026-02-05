@@ -418,7 +418,7 @@ def run_comprehensive_asl_research(config: ResearchConfig, stage: int, output_di
                 use_film_at_bottleneck=kwargs.get('use_film_at_bottleneck', True),
                 use_film_at_decoder=kwargs.get('use_film_at_decoder', True),
                 use_amplitude_output_modulation=kwargs.get('use_amplitude_output_modulation', True),
-                **kwargs
+                # Don't pass **kwargs - it contains duplicates of the above arguments
             )
         else:
             return DisentangledASLNet(
