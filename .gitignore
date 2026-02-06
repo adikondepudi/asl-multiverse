@@ -43,8 +43,13 @@ slurm_logs/
 *.~lock.*
 
 # ==========================
-# Results directories (generated on HPC)
+# Generated results (HPC output)
 # ==========================
+**/validation_results/
+**/amplitude_sensitivity.json
+**/norm_stats.json
+**/research_config.json
+**/comprehensive_evaluation.json
 results/
 invivo_results*/
 invivo_comparison*/
@@ -57,6 +62,7 @@ final_maps/
 evaluation_results/
 ls_verification/
 production_model_v1/
+email_attachments/
 
 # ==========================
 # Python
