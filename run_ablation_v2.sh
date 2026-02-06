@@ -44,7 +44,7 @@ cat > slurm_logs/gen_ablation_v2_data.slurm << 'EOF'
 #SBATCH --partition=cpu
 #SBATCH --nodes=1
 #SBATCH --cpus-per-task=16
-#SBATCH --mem=128G
+#SBATCH --mem=64G
 #SBATCH --time=4:00:00
 #SBATCH --output=slurm_logs/v2_datagen_%j.out
 #SBATCH --error=slurm_logs/v2_datagen_%j.err
