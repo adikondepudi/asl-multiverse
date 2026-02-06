@@ -96,8 +96,9 @@ class SpatialValidator:
         logger.info(f"Using PLDs: {self.plds}")
 
     def _load_ensemble(self) -> List[torch.nn.Module]:
-        """Load trained SpatialASLNet models."""
+        """Load trained spatial models (SpatialASLNet or AmplitudeAwareSpatialASLNet)."""
         from spatial_asl_network import SpatialASLNet
+        from amplitude_aware_spatial_network import AmplitudeAwareSpatialASLNet
 
         # Find model files
         models_dir = self.run_dir / 'trained_models'
@@ -119,12 +120,34 @@ class SpatialValidator:
         while len(features) < 4:
             features.insert(0, max(1, features[0] // 2))
 
+        # Detect model class from config
+        model_class_name = self.config.get('model_class_name', 'SpatialASLNet')
+        logger.info(f"Using model class: {model_class_name}")
+
+        # Amplitude-aware config flags
+        use_film_at_bottleneck = self.config.get('use_film_at_bottleneck', True)
+        use_film_at_decoder = self.config.get('use_film_at_decoder', True)
+        use_amplitude_output_modulation = self.config.get('use_amplitude_output_modulation', True)
+        logger.info(f"AmplitudeAware Config: film_bottleneck={use_film_at_bottleneck}, "
+                    f"film_decoder={use_film_at_decoder}, output_mod={use_amplitude_output_modulation}")
+
         loaded_models = []
 
         for mp in model_files:
             logger.info(f"Loading {mp.name}...")
 
-            model = SpatialASLNet(n_plds=len(self.plds), features=features)
+            # Instantiate correct model class
+            if model_class_name == "AmplitudeAwareSpatialASLNet":
+                model = AmplitudeAwareSpatialASLNet(
+                    n_plds=len(self.plds),
+                    features=features,
+                    use_film_at_bottleneck=use_film_at_bottleneck,
+                    use_film_at_decoder=use_film_at_decoder,
+                    use_amplitude_output_modulation=use_amplitude_output_modulation
+                )
+            else:
+                # Default to SpatialASLNet
+                model = SpatialASLNet(n_plds=len(self.plds), features=features)
 
             try:
                 state_dict = torch.load(mp, map_location=self.device)
@@ -139,6 +162,8 @@ class SpatialValidator:
                 logger.info(f"  Loaded successfully")
             except Exception as e:
                 logger.error(f"  Failed to load: {e}")
+                import traceback
+                logger.error(f"  Traceback: {traceback.format_exc()}")
 
         if not loaded_models:
             raise RuntimeError("All models failed to load!")
