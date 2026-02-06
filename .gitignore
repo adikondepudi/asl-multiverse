@@ -1,54 +1,79 @@
-/papers/
-/codes/*.docx
-/results/
-/logs/
-__pycache__/
-/test_results/
-/comprehensive_results/
-/comparison_results/
-/wandb/
-.DS_Store
-/pinn*/
-/Multiverse/
-/invivo_predictions/
-/invivo_preprocessed/
-/prediction_maps/
-/preprocessed_data/
-/raw_invivo_data_validated/
-/final_maps/
-/evaluation_results/
-/data/
-/final_training_run*/
-/final_benchmark_results/
-/results_all_versions/
-/my_ablation_study_results/
-/disentangled*/
-/prod_*/
-/diagnostic*/
-/xu_figure*/
-/results*/
-# Ignore Model Weights (Heavy!)
+# ==========================
+# Model weights (large)
+# ==========================
 *.pt
 *.pth
 *.ckpt
 trained_models/
 
-# Ignore Logs
+# ==========================
+# Data files (large)
+# ==========================
+*.npy
+*.npz
+*.nii
+*.nii.gz
+*.h5
+*.hdf5
+asl_spatial_dataset*/
+
+# ==========================
+# SLURM output
+# ==========================
 *.out
 *.err
-*.png
 slurm_logs/
-__pycache__/
 
-# Ignore Data files that aren't for the dashboard
-*.npy
-*.nii.gz
-hpc_ablation_jobs/*/validation_results/*.md
+# ==========================
+# Images / plots (generated)
+# ==========================
+*.png
+*.jpg
+*.jpeg
+*.tif
+*.tiff
 
-# models
-production_model*/
-amplitude_ablation*/
+# ==========================
+# Spreadsheets / CSV
+# ==========================
+*.xlsx
+*.xls
+*.docx
+*.csv
+*.~lock.*
+
+# ==========================
+# Results directories (generated on HPC)
+# ==========================
+results/
 invivo_results*/
 invivo_comparison*/
+invivo_predictions/
+invivo_preprocessed/
+prediction_maps/
+preprocessed_data/
+raw_invivo_data_validated/
+final_maps/
+evaluation_results/
 ls_verification/
-*.csv
+production_model_v1/
+
+# ==========================
+# Python
+# ==========================
+__pycache__/
+*.pyc
+.venv/
+*.egg-info/
+
+# ==========================
+# OS / IDE
+# ==========================
+.DS_Store
+.vscode/
+.idea/
+
+# ==========================
+# Misc
+# ==========================
+wandb/
