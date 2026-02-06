@@ -23,7 +23,7 @@ echo "Started: $(date)"
 echo "============================================"
 
 mkdir -p slurm_logs
-cd $SLURM_SUBMIT_DIR
+cd "${SLURM_SUBMIT_DIR:-.}"
 
 # --- Load Environment ---
 echo ""
