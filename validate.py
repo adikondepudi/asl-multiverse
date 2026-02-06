@@ -28,7 +28,7 @@ try:
     from asl_simulation import ASLParameters
     from enhanced_simulation import RealisticASLSimulator, SpatialPhantomGenerator
     from enhanced_asl_network import DisentangledASLNet
-    from spatial_asl_network import SpatialASLNet  # NEW: Import spatial model
+    from spatial_asl_network import SpatialASLNet, DualEncoderSpatialASLNet  # Spatial models (U-Net)
     from amplitude_aware_spatial_network import AmplitudeAwareSpatialASLNet  # Amplitude-aware model
     from utils import process_signals_dynamic, get_grid_search_initial_guess
     from multiverse_functions import fit_PCVSASL_misMatchPLD_vectInit_pep
@@ -284,33 +284,34 @@ class ASLValidator:
 
                 # Instantiate correct model class based on config
                 if model_class_name == 'AmplitudeAwareSpatialASLNet':
-                    # NOTE: Due to a bug in main.py (ResearchConfig missing FiLM fields),
-                    # all AmplitudeAwareSpatialASLNet models trained before Feb 2026 were
-                    # trained with FULL architecture regardless of config.yaml settings.
-                    # Check if checkpoint has FiLM keys to determine actual architecture.
-                    has_film_keys = any('film' in k for k in sd.keys())
+                    # Read architecture flags from config.yaml (not hardcoded defaults)
+                    use_film_at_bottleneck = training_config.get('use_film_at_bottleneck', True)
+                    use_film_at_decoder = training_config.get('use_film_at_decoder', True)
+                    use_amplitude_output_modulation = training_config.get('use_amplitude_output_modulation', True)
 
-                    if has_film_keys:
-                        # Checkpoint has FiLM layers - use full architecture
-                        model = AmplitudeAwareSpatialASLNet(
-                            n_plds=len(self.plds),
-                            features=training_config.get('hidden_sizes', [32, 64, 128, 256]),
-                            use_film_at_bottleneck=True,
-                            use_film_at_decoder=True,
-                            use_amplitude_output_modulation=True,
-                        )
-                    else:
-                        # Checkpoint doesn't have FiLM - use config settings
-                        model = AmplitudeAwareSpatialASLNet(
-                            n_plds=len(self.plds),
-                            features=training_config.get('hidden_sizes', [32, 64, 128, 256]),
-                            use_film_at_bottleneck=training_config.get('use_film_at_bottleneck', True),
-                            use_film_at_decoder=training_config.get('use_film_at_decoder', True),
-                            use_amplitude_output_modulation=training_config.get('use_amplitude_output_modulation', True),
-                        )
+                    logger.info(f"AmplitudeAware config: film_bottleneck={use_film_at_bottleneck}, "
+                               f"film_decoder={use_film_at_decoder}, output_mod={use_amplitude_output_modulation}")
+
+                    # Instantiate with config settings
+                    model = AmplitudeAwareSpatialASLNet(
+                        n_plds=len(self.plds),
+                        features=training_config.get('hidden_sizes', [32, 64, 128, 256]),
+                        use_film_at_bottleneck=use_film_at_bottleneck,
+                        use_film_at_decoder=use_film_at_decoder,
+                        use_amplitude_output_modulation=use_amplitude_output_modulation,
+                    )
+                elif model_class_name == 'DualEncoderSpatialASLNet':
+                    # DualEncoderSpatialASLNet: Y-Net with separate PCASL/VSASL streams
+                    model = DualEncoderSpatialASLNet(
+                        n_plds=len(self.plds),
+                        features=training_config.get('hidden_sizes', [32, 64, 128, 256])
+                    )
                 else:
                     # Default to SpatialASLNet
-                    model = SpatialASLNet(n_plds=len(self.plds))
+                    model = SpatialASLNet(
+                        n_plds=len(self.plds),
+                        features=training_config.get('hidden_sizes', [32, 64, 128, 256])
+                    )
 
                 try:
                     state_dict = torch.load(mp, map_location=self.device)
