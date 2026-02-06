@@ -1,0 +1,158 @@
+{
+  "timestamp": "2026-02-05T21:15:40.080934",
+  "total_experiments": 10,
+  "successful": 10,
+  "failed": 0,
+  "experiments": {
+    "00_Baseline_SpatialASL": {
+      "status": "success",
+      "output_dir": "validation_results/00_Baseline_SpatialASL",
+      "stdout": "8 - INFO - LS ATT - Samples: 20279, MAE: 37.19, Mean: 1372.00\n2026-02-05 21:06:06,189 - INFO - ============================================================\n\n--- [LLM REPORT SAVED] ---\nJSON: validation_results/00_Baseline_SpatialASL/llm_analysis_report.json\nMarkdown: validation_results/00_Baseline_SpatialASL/llm_analysis_report.md\n   > Saved interactive dashboard data to validation_results/00_Baseline_SpatialASL/interactive_plot_data.json\n\n--- [SUCCESS] Validation Finished. Check output dir. ---\n",
+      "metrics": {
+        "Spatial_SNR10": {
+          "cbf_mae": 3.4719276428222656,
+          "cbf_bias": 0.5457735657691956,
+          "att_mae": 21.37059211730957,
+          "att_bias": -5.447514057159424,
+          "cbf_win_rate": 0.8578825385867154,
+          "att_win_rate": 0.9614872528231175
+        }
+      }
+    },
+    "01_PerCurve_Norm": {
+      "status": "success",
+      "output_dir": "validation_results/01_PerCurve_Norm",
+      "stdout": "-02-05 21:07:12,905 - INFO - LS ATT - Samples: 20279, MAE: 37.19, Mean: 1372.00\n2026-02-05 21:07:12,906 - INFO - ============================================================\n\n--- [LLM REPORT SAVED] ---\nJSON: validation_results/01_PerCurve_Norm/llm_analysis_report.json\nMarkdown: validation_results/01_PerCurve_Norm/llm_analysis_report.md\n   > Saved interactive dashboard data to validation_results/01_PerCurve_Norm/interactive_plot_data.json\n\n--- [SUCCESS] Validation Finished. Check output dir. ---\n",
+      "metrics": {
+        "Spatial_SNR10": {
+          "cbf_mae": 4.6550116539001465,
+          "cbf_bias": 0.990111768245697,
+          "att_mae": 26.70747184753418,
+          "att_bias": 3.28840708732605,
+          "cbf_win_rate": 0.8240051284580108,
+          "att_win_rate": 0.9543369988658218
+        }
+      }
+    },
+    "02_AmpAware_Full": {
+      "status": "success",
+      "output_dir": "validation_results/02_AmpAware_Full",
+      "stdout": "-02-05 21:08:19,187 - INFO - LS ATT - Samples: 20279, MAE: 37.19, Mean: 1372.00\n2026-02-05 21:08:19,188 - INFO - ============================================================\n\n--- [LLM REPORT SAVED] ---\nJSON: validation_results/02_AmpAware_Full/llm_analysis_report.json\nMarkdown: validation_results/02_AmpAware_Full/llm_analysis_report.md\n   > Saved interactive dashboard data to validation_results/02_AmpAware_Full/interactive_plot_data.json\n\n--- [SUCCESS] Validation Finished. Check output dir. ---\n",
+      "metrics": {
+        "Spatial_SNR10": {
+          "cbf_mae": 0.4643266499042511,
+          "cbf_bias": 0.0307072214782238,
+          "att_mae": 20.058605194091797,
+          "att_bias": -4.645326614379883,
+          "cbf_win_rate": 0.9773164357216825,
+          "att_win_rate": 0.9647911632723507
+        }
+      }
+    },
+    "03_AmpAware_OutputMod_Only": {
+      "status": "success",
+      "output_dir": "validation_results/03_AmpAware_OutputMod_Only",
+      "stdout": "S ATT - Samples: 20279, MAE: 37.19, Mean: 1372.00\n2026-02-05 21:09:22,686 - INFO - ============================================================\n\n--- [LLM REPORT SAVED] ---\nJSON: validation_results/03_AmpAware_OutputMod_Only/llm_analysis_report.json\nMarkdown: validation_results/03_AmpAware_OutputMod_Only/llm_analysis_report.md\n   > Saved interactive dashboard data to validation_results/03_AmpAware_OutputMod_Only/interactive_plot_data.json\n\n--- [SUCCESS] Validation Finished. Check output dir. ---\n",
+      "metrics": {
+        "Spatial_SNR10": {
+          "cbf_mae": 0.49761858582496643,
+          "cbf_bias": 0.16613908112049103,
+          "att_mae": 23.31407928466797,
+          "att_bias": 1.1846932172775269,
+          "cbf_win_rate": 0.9762315696040239,
+          "att_win_rate": 0.9605503229942305
+        }
+      }
+    },
+    "04_AmpAware_FiLM_Only": {
+      "status": "success",
+      "output_dir": "validation_results/04_AmpAware_FiLM_Only",
+      "stdout": ",853 - INFO - LS ATT - Samples: 20279, MAE: 37.19, Mean: 1372.00\n2026-02-05 21:10:25,853 - INFO - ============================================================\n\n--- [LLM REPORT SAVED] ---\nJSON: validation_results/04_AmpAware_FiLM_Only/llm_analysis_report.json\nMarkdown: validation_results/04_AmpAware_FiLM_Only/llm_analysis_report.md\n   > Saved interactive dashboard data to validation_results/04_AmpAware_FiLM_Only/interactive_plot_data.json\n\n--- [SUCCESS] Validation Finished. Check output dir. ---\n",
+      "metrics": {
+        "Spatial_SNR10": {
+          "cbf_mae": 0.4609334468841553,
+          "cbf_bias": 0.047868452966213226,
+          "att_mae": 20.06642723083496,
+          "att_bias": -1.2534644603729248,
+          "cbf_win_rate": 0.9784013018393412,
+          "att_win_rate": 0.965087035849894
+        }
+      }
+    },
+    "05_AmpAware_Bottleneck_Only": {
+      "status": "success",
+      "output_dir": "validation_results/05_AmpAware_Bottleneck_Only",
+      "stdout": "TT - Samples: 20279, MAE: 37.19, Mean: 1372.00\n2026-02-05 21:11:29,546 - INFO - ============================================================\n\n--- [LLM REPORT SAVED] ---\nJSON: validation_results/05_AmpAware_Bottleneck_Only/llm_analysis_report.json\nMarkdown: validation_results/05_AmpAware_Bottleneck_Only/llm_analysis_report.md\n   > Saved interactive dashboard data to validation_results/05_AmpAware_Bottleneck_Only/interactive_plot_data.json\n\n--- [SUCCESS] Validation Finished. Check output dir. ---\n",
+      "metrics": {
+        "Spatial_SNR10": {
+          "cbf_mae": 0.462054967880249,
+          "cbf_bias": 0.056588031351566315,
+          "att_mae": 20.330276489257812,
+          "att_bias": -1.6484317779541016,
+          "cbf_win_rate": 0.9780068050692835,
+          "att_win_rate": 0.9615365649193747
+        }
+      }
+    },
+    "06_AmpAware_Physics_0p1": {
+      "status": "success",
+      "output_dir": "validation_results/06_AmpAware_Physics_0p1",
+      "stdout": " INFO - LS ATT - Samples: 20279, MAE: 37.19, Mean: 1372.00\n2026-02-05 21:12:31,839 - INFO - ============================================================\n\n--- [LLM REPORT SAVED] ---\nJSON: validation_results/06_AmpAware_Physics_0p1/llm_analysis_report.json\nMarkdown: validation_results/06_AmpAware_Physics_0p1/llm_analysis_report.md\n   > Saved interactive dashboard data to validation_results/06_AmpAware_Physics_0p1/interactive_plot_data.json\n\n--- [SUCCESS] Validation Finished. Check output dir. ---\n",
+      "metrics": {
+        "Spatial_SNR10": {
+          "cbf_mae": 0.5104349255561829,
+          "cbf_bias": 0.26446497440338135,
+          "att_mae": 19.214262008666992,
+          "att_bias": -7.321630477905273,
+          "cbf_win_rate": 0.9754425760639085,
+          "att_win_rate": 0.96533359633118
+        }
+      }
+    },
+    "07_AmpAware_Physics_0p3": {
+      "status": "success",
+      "output_dir": "validation_results/07_AmpAware_Physics_0p3",
+      "stdout": " INFO - LS ATT - Samples: 20279, MAE: 37.19, Mean: 1372.00\n2026-02-05 21:13:34,220 - INFO - ============================================================\n\n--- [LLM REPORT SAVED] ---\nJSON: validation_results/07_AmpAware_Physics_0p3/llm_analysis_report.json\nMarkdown: validation_results/07_AmpAware_Physics_0p3/llm_analysis_report.md\n   > Saved interactive dashboard data to validation_results/07_AmpAware_Physics_0p3/interactive_plot_data.json\n\n--- [SUCCESS] Validation Finished. Check output dir. ---\n",
+      "metrics": {
+        "Spatial_SNR10": {
+          "cbf_mae": 0.5279548168182373,
+          "cbf_bias": 0.2489781677722931,
+          "att_mae": 21.645532608032227,
+          "att_bias": -11.232144355773926,
+          "cbf_win_rate": 0.9745056462350214,
+          "att_win_rate": 0.9620296858819468
+        }
+      }
+    },
+    "08_AmpAware_DomainRand": {
+      "status": "success",
+      "output_dir": "validation_results/08_AmpAware_DomainRand",
+      "stdout": "3 - INFO - LS ATT - Samples: 20279, MAE: 37.19, Mean: 1372.00\n2026-02-05 21:14:37,173 - INFO - ============================================================\n\n--- [LLM REPORT SAVED] ---\nJSON: validation_results/08_AmpAware_DomainRand/llm_analysis_report.json\nMarkdown: validation_results/08_AmpAware_DomainRand/llm_analysis_report.md\n   > Saved interactive dashboard data to validation_results/08_AmpAware_DomainRand/interactive_plot_data.json\n\n--- [SUCCESS] Validation Finished. Check output dir. ---\n",
+      "metrics": {
+        "Spatial_SNR10": {
+          "cbf_mae": 0.46005335450172424,
+          "cbf_bias": 0.010890498757362366,
+          "att_mae": 18.62320899963379,
+          "att_bias": -0.9961811304092407,
+          "cbf_win_rate": 0.9777109324917402,
+          "att_win_rate": 0.9684402583953844
+        }
+      }
+    },
+    "09_AmpAware_Optimized": {
+      "status": "success",
+      "output_dir": "validation_results/09_AmpAware_Optimized",
+      "stdout": ",785 - INFO - LS ATT - Samples: 20279, MAE: 37.19, Mean: 1372.00\n2026-02-05 21:15:39,786 - INFO - ============================================================\n\n--- [LLM REPORT SAVED] ---\nJSON: validation_results/09_AmpAware_Optimized/llm_analysis_report.json\nMarkdown: validation_results/09_AmpAware_Optimized/llm_analysis_report.md\n   > Saved interactive dashboard data to validation_results/09_AmpAware_Optimized/interactive_plot_data.json\n\n--- [SUCCESS] Validation Finished. Check output dir. ---\n",
+      "metrics": {
+        "Spatial_SNR10": {
+          "cbf_mae": 0.4872784912586212,
+          "cbf_bias": 0.1485554575920105,
+          "att_mae": 18.676151275634766,
+          "att_bias": -0.7315118908882141,
+          "cbf_win_rate": 0.9754425760639085,
+          "att_win_rate": 0.9684402583953844
+        }
+      }
+    }
+  }
+}
