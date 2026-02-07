@@ -169,7 +169,7 @@ BASE_CONFIG = {
     },
 
     "simulation": {
-        "T1_artery": 1850.0,
+        "T1_artery": 1650.0,  # 3T consensus (Alsop 2015)
         "T_tau": 1800.0,
         "T2_factor": 1.0,
         "alpha_BS1": 1.0,

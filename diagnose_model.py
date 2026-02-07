@@ -149,8 +149,8 @@ def main():
         signals = np.zeros((len(plds) * 2, size, size), dtype=np.float32)
         for i in range(size):
             for j in range(size):
-                pcasl = simulator._generate_pcasl_signal(plds_arr, test_att[i,j], test_cbf[i,j], 1850, 1800, 0.85)
-                vsasl = simulator._generate_vsasl_signal(plds_arr, test_att[i,j], test_cbf[i,j], 1850, 0.56)
+                pcasl = simulator._generate_pcasl_signal(plds_arr, test_att[i,j], test_cbf[i,j], 1650, 1800, 0.85)  # T1_artery=1650: 3T consensus (Alsop 2015)
+                vsasl = simulator._generate_vsasl_signal(plds_arr, test_att[i,j], test_cbf[i,j], 1650, 0.56)  # T1_artery=1650: 3T consensus (Alsop 2015)
                 signals[:len(plds), i, j] = pcasl
                 signals[len(plds):, i, j] = vsasl
 

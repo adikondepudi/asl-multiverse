@@ -264,7 +264,7 @@ def batch_predict_nn(signals_masked: np.ndarray, subject_plds: np.ndarray, model
     }
     
     # T1 Injection
-    t1_val = config.get('T1_artery', 1850.0)
+    t1_val = config.get('T1_artery', 1650.0)  # 3T consensus (Alsop 2015)
     t1_values = np.full((resampled_signals.shape[0], 1), t1_val, dtype=np.float32)
 
     # Use dynamic feature processing - pass raw resampled signals

@@ -48,21 +48,23 @@ We scaled inputs by [0.1×, 1×, 10×] and measured if CBF predictions changed. 
 | 00 | Baseline SpatialASL | **1.00** | NO |
 | 01 | PerCurve Norm | **1.00** | NO |
 | 02 | AmpAware Full (FiLM + OutputMod) | **257.95** | YES |
-| 03 | OutputMod Only (no FiLM) | **98.53** | YES |
-| 04 | FiLM Only (no OutputMod) | **1.15** | NO |
-| 05 | Bottleneck FiLM Only | **0.78** | NO |
+| 03 | OutputMod Only (no FiLM) | **90.32** | YES |
+| 04 | FiLM Only (no OutputMod) | **40.56** | YES |
+| 05 | Bottleneck FiLM Only | **1.05** | NO |
 | 06 | Full + Physics (dc=0.1) | **92.51** | YES |
 | 07 | Full + Physics (dc=0.3) | **113.91** | YES |
-| 08 | Full + DomainRand | **169.28** | YES |
-| 09 | Optimized | **88.90** | YES |
+| 08 | Full + DomainRand | **93.51** | YES |
+| 09 | Optimized | **376.18** | YES |
 
-#### Critical Finding: Output Modulation is Essential
+#### Key Finding: Both FiLM and Output Modulation Preserve Amplitude
 
-**Exp 03 vs 04 is the key comparison:**
-- Exp 03 (Output Modulation ONLY): **98.53** - WORKS
-- Exp 04 (FiLM ONLY): **1.15** - FAILS
+**Exp 03 vs 04 comparison (corrected values from JSON):**
+- Exp 03 (Output Modulation ONLY): **90.32** - WORKS
+- Exp 04 (FiLM ONLY): **40.56** - ALSO WORKS
 
-**FiLM conditioning alone does NOT preserve amplitude.** The output modulation that directly scales CBF by extracted amplitude is the critical component.
+Both mechanisms independently preserve amplitude sensitivity. Output modulation gives ~2× higher ratios in this config, but FiLM alone is also effective. The best results come from combining both (Exp 02: 257.95×, Exp 09: 376.18×).
+
+**Note**: Original CLAUDE.md reported Exp 04 = 1.15, which was incorrect. The v1 experiments had a training bug where SLURM scripts searched for `spatial_model_*.pt` but models saved as `ensemble_model_*.pt`, causing the original sensitivity tests to run on untrained models. The `rerun_amplitude_ablation_validation.py` script fixed this by loading the correct checkpoints, producing the corrected values above.
 
 #### Validation Results (SNR=10)
 
@@ -132,14 +134,14 @@ Result:       CBF · M0 cancels out completely!
 
 **Always use `normalization_mode: "global_scale"`**
 
-### 3. Output Modulation is Critical for Amplitude-Aware
+### 3. Both FiLM and Output Modulation Preserve Amplitude
 
-FiLM alone (ratio=1.15) vs OutputMod alone (ratio=98.53):
+FiLM alone (ratio=40.56) vs OutputMod alone (ratio=90.32) — both work, best combined (376.18×):
 ```yaml
 training:
-  use_amplitude_output_modulation: true  # REQUIRED - this is the critical component
-  use_film_at_bottleneck: true           # Supplementary, not sufficient alone
-  use_film_at_decoder: true              # Supplementary, not sufficient alone
+  use_amplitude_output_modulation: true  # Effective alone (90×), best combined
+  use_film_at_bottleneck: true           # Effective alone (41×), best combined
+  use_film_at_decoder: true              # Effective alone (41×), best combined
 ```
 
 ### 4. GroupNorm over BatchNorm
@@ -172,7 +174,7 @@ Use **GroupNorm** throughout spatial models:
 |------|---------|
 | **MaskedSpatialLoss** | Supervised loss with variance penalty |
 | **BiasReducedLoss** | Addresses variance collapse (MAE + NLL) |
-| **AmplitudeAwareLoss** | For amplitude-aware architecture |
+| ~~AmplitudeAwareLoss~~ | **Dead code** — defined in `amplitude_aware_spatial_network.py` but never instantiated by `asl_trainer.py`. Training always uses `MaskedSpatialLoss`. |
 
 ---
 
@@ -267,7 +269,7 @@ data:
   pld_values: [500, 1000, 1500, 2000, 2500, 3000]
 
 simulation:
-  T1_artery: 1850.0
+  T1_artery: 1650.0  # 3T consensus (Alsop 2015); was 1850 in older code
   T_tau: 1800.0
   alpha_PCASL: 0.85
   alpha_VSASL: 0.56
@@ -290,7 +292,7 @@ noise_config:
 | Parameter | Default | Randomized Range | Unit |
 |-----------|---------|------------------|------|
 | PLDs | [500, 1000, 1500, 2000, 2500, 3000] | - | ms |
-| T1_artery | 1850 | 1550-2150 | ms |
+| T1_artery | 1650 (3T consensus) | 1550-2150 | ms |
 | T_tau (label duration) | 1800 | ±10% | ms |
 | α_PCASL | 0.85 | 0.75-0.95 | - |
 | α_VSASL | 0.56 | 0.40-0.70 | - |
@@ -323,8 +325,8 @@ noise_config:
 **Fix**: Use spatial models (SpatialASLNet achieves 84% win rate)
 
 ### AmplitudeAware model not sensitive to amplitude
-**Cause**: Output modulation disabled
-**Fix**: Set `use_amplitude_output_modulation: true` (ablation proved this is essential, not FiLM)
+**Cause**: Neither FiLM nor output modulation enabled
+**Fix**: Enable `use_amplitude_output_modulation: true` and/or FiLM flags. Both independently preserve amplitude; combining both gives best results (376×).
 
 ### Train/eval mismatch
 **Cause**: BatchNorm running statistics
@@ -356,15 +358,15 @@ noise_config:
 - Structural priors from tissue boundaries
 - Neighboring voxels share physics parameters
 
-### 2. Output Modulation for Amplitude (98× vs 1.15×)
+### 2. Amplitude-Aware Mechanisms (FiLM 41× + OutputMod 90× → Combined 376×)
 - Extract amplitude BEFORE GroupNorm destroys it
-- Direct scaling of CBF prediction by amplitude
-- FiLM alone is insufficient
+- Both FiLM and output modulation independently preserve amplitude
+- Best results from combining both mechanisms
 
 ### 3. Domain Randomization
 - Physics parameters sampled per-batch
 - Prevents overfitting to fixed acquisition parameters
-- Maintains amplitude sensitivity (169× with domain rand)
+- Maintains amplitude sensitivity (93.5× with domain rand)
 
 ### 4. Rician Noise Model
 ```python
@@ -380,6 +382,28 @@ MRI-correct physics with positive bias at low SNR.
 2. **Hybrid approach** - Spatial for CBF, potentially voxel-wise for ATT
 3. **Larger spatial context** - Current 64×64 patches may be too small
 4. **Multi-scale fusion** - Combine voxel features with spatial context
+
+---
+
+## Known Issues & Errata
+
+### V1 Training Bug (Resolved)
+Original v1 SLURM scripts searched for `spatial_model_*.pt` but models saved as `ensemble_model_*.pt`. This caused the original amplitude sensitivity tests to run on untrained/randomly initialized models. The `rerun_amplitude_ablation_validation.py` script fixed this by loading the correct checkpoints, but CLAUDE.md was not updated until Feb 2026.
+
+### LS Baseline Issues (In Progress)
+- **In-vivo LS uses `alpha_BS1=1.0`** but real Philips data has background suppression (~0.93 per pulse). This causes LS to over-predict signal by ~34% (PCASL) / ~24% (VSASL), leading to catastrophically low CBF estimates (8-14 vs expected 40-60).
+- **T1_artery was 1850ms** in code; ASL consensus (Alsop 2015) recommends **1650ms** at 3T.
+- **ATT upper bound of 6000ms** allows optimization topology trap where solver pushes ATT to non-physiological values to compensate for amplitude mismatch.
+- **Win rates against broken LS are inflated** — expect ~97% to drop significantly once LS is corrected.
+
+### V2 att_scale Legacy Bug
+9 of 11 v2 experiments use `att_scale: 0.033` (legacy from unnormalized voxel-wise targets). With z-score normalized spatial targets, should be 1.0. ATT loss effectively weighted at only 3.3% of CBF loss.
+
+### Rician Noise Applied to Difference Signals
+`noise_engine.py:106-118` applies Rician noise directly to difference signals. Physically, Rician noise should be applied to Control and Label magnitude images separately, then subtracted. `SpatialNoiseEngine.simulate_realistic_acquisition` (L474-522) has the correct implementation but is **not used** in training.
+
+### VSASL T_sat_vs Parameter Ignored
+`asl_simulation.py` VSASL JIT function receives `T_sat_vs` but never uses it. VSASL saturation recovery effects not modeled for ATT > T_sat regime.
 
 ---
 

@@ -69,7 +69,7 @@ def test_signal_model_consistency():
     plds = np.array([500, 1000, 1500, 2000, 2500], dtype=np.float64)
 
     params = {
-        'T1_artery': 1850.0,
+        'T1_artery': 1650.0,  # 3T consensus (Alsop 2015)
         'T_tau': 1800.0,
         'alpha_PCASL': 0.85,
         'alpha_VSASL': 0.56,
@@ -124,7 +124,7 @@ def test_ls_fitting_clean():
     plds = np.array([500, 1000, 1500, 2000, 2500], dtype=np.float64)
 
     params = {
-        'T1_artery': 1850.0,
+        'T1_artery': 1650.0,  # 3T consensus (Alsop 2015)
         'T_tau': 1800.0,
         'alpha_PCASL': 0.85,
         'alpha_VSASL': 0.56,
@@ -207,7 +207,7 @@ def test_ls_fitting_noisy():
     plds = np.array([500, 1000, 1500, 2000, 2500], dtype=np.float64)
 
     params = {
-        'T1_artery': 1850.0,
+        'T1_artery': 1650.0,  # 3T consensus (Alsop 2015)
         'T_tau': 1800.0,
         'alpha_PCASL': 0.85,
         'alpha_VSASL': 0.56,
@@ -347,7 +347,7 @@ def analyze_in_vivo_signal_characteristics():
     print("\n  Expected synthetic signal range (for CBF=40, ATT=1500):")
     plds = np.array([s['pld'] for s in signal_stats], dtype=np.float64)
     params = {
-        'T1_artery': 1850.0,
+        'T1_artery': 1650.0,  # 3T consensus (Alsop 2015)
         'T_tau': 1800.0,
         'alpha_PCASL': 0.85,
         'alpha_VSASL': 0.56,
@@ -376,7 +376,7 @@ def test_failure_mode_analysis():
     plds = np.array([500, 1000, 1500, 2000, 2500], dtype=np.float64)
 
     params = {
-        'T1_artery': 1850.0,
+        'T1_artery': 1650.0,  # 3T consensus (Alsop 2015)
         'T_tau': 1800.0,
         'alpha_PCASL': 0.85,
         'alpha_VSASL': 0.56,

@@ -71,7 +71,7 @@ def process_signals_dynamic(raw_signals, norm_stats, config, t1_values=None, z_v
             input_parts.append(feat_norm)
         
         elif feat_name == 't1_artery' and t1_values is not None:
-            mu = norm_stats.get('y_mean_t1', 1850.0)
+            mu = norm_stats.get('y_mean_t1', 1650.0)  # 3T consensus (Alsop 2015)
             std = norm_stats.get('y_std_t1', 200.0) + 1e-6
             input_parts.append((t1_values - mu) / std)
             
@@ -236,7 +236,7 @@ def process_signals_cpu(signals_unnorm: np.ndarray, norm_stats: dict, num_plds: 
     scalar_features_norm = (scalar_features_unnorm - s_mean) / s_std
 
     if t1_values is not None:
-        t1_mean = norm_stats.get('y_mean_t1', 1850.0)
+        t1_mean = norm_stats.get('y_mean_t1', 1650.0)  # 3T consensus (Alsop 2015)
         t1_std = norm_stats.get('y_std_t1', 200.0)
         t1_norm = (t1_values - t1_mean) / (t1_std + 1e-6)
         scalar_features_norm = np.concatenate([scalar_features_norm, t1_norm], axis=1)
@@ -259,23 +259,23 @@ def get_grid_search_initial_guess(
     initial guess for NLLS fitting.
 
     Grid bounds must match the LS optimizer bounds in fit_PCVSASL_misMatchPLD_vectInit_pep:
-    - CBF: [1, 100] ml/100g/min  (internal: [1/6000, 100/6000] ml/g/s)
-    - ATT: [100, 6000] ms
+    - CBF: [0, 200] ml/100g/min  (internal: [0/6000, 200/6000] ml/g/s)
+    - ATT: [100, 4000] ms
     """
     # --- 1. Define the search grid ---
-    # IMPORTANT: Must stay within LS optimizer bounds: CBF [1, 100], ATT [100, 6000]
-    cbf_values_grid = np.linspace(1, 100, 15)  # 15 steps for CBF, max=100 to match LS bounds
-    att_values_grid = np.linspace(100, 5500, 22) # 22 steps for ATT, within [100, 6000]
+    # IMPORTANT: Must stay within LS optimizer bounds: CBF [0, 200], ATT [100, 4000]
+    cbf_values_grid = np.linspace(1, 200, 20)  # 20 steps for CBF, extended to 200
+    att_values_grid = np.linspace(100, 4000, 22) # 22 steps for ATT, within [100, 4000]
 
     # --- 2. Pre-calculate model parameters ---
     t1_artery = asl_params['T1_artery']
     t_tau = asl_params['T_tau']
     t2_factor = asl_params.get('T2_factor', 1.0)
     alpha_bs1 = asl_params.get('alpha_BS1', 1.0)
-    t_sat_vs = asl_params.get('T_sat_vs', 2000.0) 
+    t_sat_vs = asl_params.get('T_sat_vs', 2000.0)
     alpha_pcasl = asl_params['alpha_PCASL'] * (alpha_bs1**4)
     alpha_vsasl = asl_params['alpha_VSASL'] * (alpha_bs1**3)
-    
+
     num_plds = len(plds)
     observed_pcasl = observed_signal[:num_plds]
     observed_vsasl = observed_signal[num_plds:]
@@ -283,22 +283,44 @@ def get_grid_search_initial_guess(
     best_mse = float('inf')
     best_params = [50.0 / 6000.0, 1500.0] # Default fallback
 
-    # --- 3. Iterate through the grid to find the best fit ---
-    for cbf in cbf_values_grid:
-        cbf_cgs = cbf / 6000.0  # Convert CBF to ml/g/s for the model
-        for att in att_values_grid:
-            # Predict the signal for this grid point
+    # --- 3. Multi-start: coarse ATT grid with analytic CBF solve ---
+    # For each candidate ATT, evaluate a range of CBF values and pick the best.
+    # This places the solver in the correct basin of attraction and avoids
+    # the topology trap where ATT→6000ms compensates for amplitude mismatch.
+    coarse_att_grid = np.array([500, 1000, 1500, 2000, 2500, 3000, 3500])
+
+    for att in coarse_att_grid:
+        for cbf in cbf_values_grid:
+            cbf_cgs = cbf / 6000.0
             pcasl_pred = _generate_pcasl_signal_jit(
                 plds, att, cbf_cgs, t1_artery, t_tau, alpha_pcasl, t2_factor
             )
             vsasl_pred = _generate_vsasl_signal_jit(
                 plds, att, cbf_cgs, t1_artery, alpha_vsasl, t2_factor, t_sat_vs
             )
-
-            # Calculate Mean Squared Error
             mse = np.mean((observed_pcasl - pcasl_pred)**2) + \
                   np.mean((observed_vsasl - vsasl_pred)**2)
+            if mse < best_mse:
+                best_mse = mse
+                best_params = [cbf_cgs, att]
 
+    # --- 4. Fine grid around the coarse best ---
+    coarse_cbf = best_params[0] * 6000.0  # Back to ml/100g/min
+    coarse_att = best_params[1]
+    fine_cbf_grid = np.linspace(max(0, coarse_cbf - 20), min(200, coarse_cbf + 20), 10)
+    fine_att_grid = np.linspace(max(100, coarse_att - 300), min(4000, coarse_att + 300), 10)
+
+    for cbf in fine_cbf_grid:
+        cbf_cgs = cbf / 6000.0
+        for att in fine_att_grid:
+            pcasl_pred = _generate_pcasl_signal_jit(
+                plds, att, cbf_cgs, t1_artery, t_tau, alpha_pcasl, t2_factor
+            )
+            vsasl_pred = _generate_vsasl_signal_jit(
+                plds, att, cbf_cgs, t1_artery, alpha_vsasl, t2_factor, t_sat_vs
+            )
+            mse = np.mean((observed_pcasl - pcasl_pred)**2) + \
+                  np.mean((observed_vsasl - vsasl_pred)**2)
             if mse < best_mse:
                 best_mse = mse
                 best_params = [cbf_cgs, att]

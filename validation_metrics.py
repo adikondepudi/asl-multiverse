@@ -541,3 +541,151 @@ def format_metrics_report(metrics: Dict) -> str:
     lines.append(f"\n{'='*60}\n")
 
     return '\n'.join(lines)
+
+
+def test_win_rate_significance(nn_errors: np.ndarray,
+                                ls_errors: np.ndarray,
+                                method: str = 'wilcoxon') -> Dict[str, float]:
+    """
+    Test if NN significantly beats LS using paired statistical test.
+
+    Evaluates whether the difference in absolute errors between NN and LS
+    is statistically significant, not just due to chance. This is critical
+    for publication-quality claims about model superiority.
+
+    Methods:
+    - 'wilcoxon': Wilcoxon signed-rank test (non-parametric, RECOMMENDED)
+      Does not assume normality of error differences. Robust to outliers.
+    - 'paired_t': Paired t-test (parametric)
+      Assumes error differences are approximately normal. More powerful
+      when the normality assumption holds, but can be misleading otherwise.
+
+    Effect Size (Cohen's d):
+    - |d| < 0.2:  negligible
+    - 0.2 <= |d| < 0.5: small
+    - 0.5 <= |d| < 0.8: medium
+    - |d| >= 0.8: large
+
+    Args:
+        nn_errors: (N,) Array of NN absolute errors per sample
+        ls_errors: (N,) Array of LS absolute errors per sample
+        method: 'wilcoxon' (non-parametric) or 'paired_t' (parametric)
+
+    Returns:
+        Dict with:
+        - test_statistic: The test statistic value
+        - p_value: Two-sided p-value
+        - significant: bool, True if p < 0.05
+        - effect_size: Cohen's d (positive means NN is better / lower error)
+        - win_rate: Fraction of samples where NN error < LS error
+        - n_samples: Number of valid (non-NaN) paired samples used
+        - method: The statistical test used
+        - interpretation: Human-readable summary of the result
+    """
+    # Remove NaN values (need valid pairs)
+    mask = ~np.isnan(nn_errors) & ~np.isnan(ls_errors)
+    nn_err = nn_errors[mask]
+    ls_err = ls_errors[mask]
+    n_samples = len(nn_err)
+
+    if n_samples < 10:
+        return {
+            'test_statistic': np.nan,
+            'p_value': np.nan,
+            'significant': False,
+            'effect_size': np.nan,
+            'win_rate': np.nan,
+            'n_samples': n_samples,
+            'method': method,
+            'interpretation': f'Insufficient samples ({n_samples} < 10) for statistical testing',
+        }
+
+    # Paired differences: positive means LS error > NN error (NN is better)
+    diff = ls_err - nn_err
+
+    # Win rate
+    win_rate_val = float(np.mean(nn_err < ls_err))
+
+    # Effect size: Cohen's d for paired samples
+    # d = mean(diff) / std(diff); positive d means NN is better
+    diff_mean = np.mean(diff)
+    diff_std = np.std(diff, ddof=1)
+    if diff_std > 0:
+        effect_size = float(diff_mean / diff_std)
+    else:
+        effect_size = 0.0
+
+    # Statistical test
+    try:
+        if method == 'wilcoxon':
+            # Wilcoxon signed-rank test (non-parametric)
+            # Tests H0: median of differences = 0
+            # Requires at least some non-zero differences
+            nonzero_diff = diff[diff != 0]
+            if len(nonzero_diff) < 10:
+                return {
+                    'test_statistic': np.nan,
+                    'p_value': np.nan,
+                    'significant': False,
+                    'effect_size': effect_size,
+                    'win_rate': win_rate_val,
+                    'n_samples': n_samples,
+                    'method': method,
+                    'interpretation': 'Too many tied pairs for Wilcoxon test',
+                }
+            stat, p_value = stats.wilcoxon(nn_err, ls_err, alternative='two-sided')
+        elif method == 'paired_t':
+            # Paired t-test (parametric)
+            # Tests H0: mean of differences = 0
+            stat, p_value = stats.ttest_rel(nn_err, ls_err)
+        else:
+            raise ValueError(f"Unknown method '{method}'. Use 'wilcoxon' or 'paired_t'.")
+    except Exception as e:
+        return {
+            'test_statistic': np.nan,
+            'p_value': np.nan,
+            'significant': False,
+            'effect_size': effect_size,
+            'win_rate': win_rate_val,
+            'n_samples': n_samples,
+            'method': method,
+            'interpretation': f'Statistical test failed: {str(e)}',
+        }
+
+    significant = bool(p_value < 0.05)
+
+    # Build interpretation
+    if significant:
+        if effect_size > 0:
+            direction = "NN significantly outperforms LS"
+        else:
+            direction = "LS significantly outperforms NN"
+    else:
+        direction = "No significant difference between NN and LS"
+
+    # Effect size magnitude
+    abs_d = abs(effect_size)
+    if abs_d < 0.2:
+        magnitude = "negligible"
+    elif abs_d < 0.5:
+        magnitude = "small"
+    elif abs_d < 0.8:
+        magnitude = "medium"
+    else:
+        magnitude = "large"
+
+    interpretation = (
+        f"{direction} (p={p_value:.4g}, d={effect_size:.3f} [{magnitude}], "
+        f"win_rate={win_rate_val:.1%}, n={n_samples})"
+    )
+
+    return {
+        'test_statistic': float(stat),
+        'p_value': float(p_value),
+        'significant': significant,
+        'effect_size': effect_size,
+        'win_rate': win_rate_val,
+        'n_samples': n_samples,
+        'method': method,
+        'interpretation': interpretation,
+    }

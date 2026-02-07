@@ -272,8 +272,245 @@ class SpatialPhantomGenerator:
         # Clamp to valid ranges
         cbf_map = np.clip(cbf_map, 0, 200).astype(np.float32)
         att_map = np.clip(att_map, 100, 5000).astype(np.float32)
-        
+
         return cbf_map, att_map, metadata
+
+    def generate_hard_phantom(self, difficulty: str = 'hard') -> Tuple[np.ndarray, np.ndarray, Dict]:
+        """
+        Generate a more challenging spatial phantom for validation that differentiates
+        model configurations better than standard phantoms.
+
+        Args:
+            difficulty: 'hard' or 'extreme'
+                - 'hard': More pathology, wider ATT range, more PVE, watershed zones,
+                  venous contamination
+                - 'extreme': All of 'hard' plus negative CBF artifacts, highly
+                  heterogeneous tissue with sharp boundaries, small embedded lesions
+
+        Returns:
+            cbf_map: (H, W) CBF values in ml/100g/min
+            att_map: (H, W) ATT values in ms
+            metadata: Dict with tissue labels, pathology info, and difficulty level
+        """
+        if difficulty not in ('hard', 'extreme'):
+            raise ValueError(f"difficulty must be 'hard' or 'extreme', got '{difficulty}'")
+
+        # --- Extended parameter ranges for hard phantoms ---
+        hard_tissue_cbf = {
+            'gray_matter': (50.0, 70.0),
+            'white_matter': (18.0, 28.0),
+            'csf': (0.0, 5.0),
+        }
+        hard_tissue_att = {
+            'gray_matter': (500.0, 2200.0),      # Wider than standard (was 1000-1600)
+            'white_matter': (800.0, 2800.0),      # Wider than standard (was 1200-1800)
+            'csf': (100.0, 500.0),
+        }
+
+        if difficulty == 'extreme':
+            hard_tissue_att['gray_matter'] = (400.0, 2800.0)
+            hard_tissue_att['white_matter'] = (600.0, 3200.0)
+
+        # Generate tissue segmentation
+        tissue_map = self._generate_voronoi_tissue()
+
+        # Initialize parameter maps
+        cbf_map = np.zeros((self.size, self.size), dtype=np.float32)
+        att_map = np.zeros((self.size, self.size), dtype=np.float32)
+
+        # Fill based on tissue type with higher intra-tissue variability
+        tissue_names = ['background', 'gray_matter', 'white_matter', 'csf']
+        for tissue_id, tissue_name in enumerate(tissue_names):
+            if tissue_id == 0:
+                continue
+            mask = tissue_map == tissue_id
+            cbf_range = hard_tissue_cbf[tissue_name]
+            att_range = hard_tissue_att[tissue_name]
+
+            # Higher spatial variation within tissue (sigma 5 vs 3 in standard)
+            intra_sigma = 5.0 if difficulty == 'hard' else 8.0
+            cbf_map[mask] = np.random.uniform(*cbf_range) + np.random.randn(np.sum(mask)) * intra_sigma
+            att_map[mask] = np.random.uniform(*att_range) + np.random.randn(np.sum(mask)) * 100
+
+        metadata = {'tissue_map': tissue_map, 'pathologies': [], 'difficulty': difficulty}
+
+        # --- Pathology: More frequent and more extreme ---
+        # 30% pathology rate in hard mode (vs ~10% implicit in standard)
+        pathology_prob = 0.70 if difficulty == 'hard' else 0.85
+        if np.random.rand() < pathology_prob:
+            pathology_type = np.random.choice(['tumor', 'stroke'])
+            n_lesions = np.random.randint(2, 5)  # More lesions than standard (was 1-2)
+
+            for _ in range(n_lesions):
+                cx = np.random.randint(12, self.size - 12)
+                cy = np.random.randint(12, self.size - 12)
+                radius = np.random.randint(5, 18)  # Larger range (was 5-15)
+
+                lesion_mask = self._generate_blob_mask((cy, cx), radius, irregularity=0.4)
+
+                if pathology_type == 'tumor':
+                    core_mask = self._generate_blob_mask((cy, cx), max(3, radius - 4))
+                    rim_mask = lesion_mask & ~core_mask
+
+                    # Higher CBF for hypervascular tumors (up to 150)
+                    cbf_map[rim_mask] = np.random.uniform(90.0, 150.0)
+                    att_map[rim_mask] = np.random.uniform(400.0, 1000.0)
+                    cbf_map[core_mask] = np.random.uniform(3.0, 15.0)
+                    att_map[core_mask] = np.random.uniform(2000.0, 3500.0)
+
+                elif pathology_type == 'stroke':
+                    core_mask = self._generate_blob_mask((cy, cx), max(3, radius - 5))
+                    penumbra_mask = lesion_mask & ~core_mask
+
+                    cbf_map[core_mask] = np.random.uniform(1.0, 8.0)
+                    att_map[core_mask] = np.random.uniform(2800.0, 3500.0)
+                    cbf_map[penumbra_mask] = np.random.uniform(10.0, 30.0)
+                    att_map[penumbra_mask] = np.random.uniform(2000.0, 3000.0)
+
+                metadata['pathologies'].append({
+                    'type': pathology_type,
+                    'center': (cy, cx),
+                    'radius': radius
+                })
+
+        # --- Watershed zones: thin strips of very low CBF between tissue types ---
+        # Find boundaries between tissue types
+        from scipy.ndimage import sobel
+        edges_y = sobel(tissue_map.astype(np.float32), axis=0)
+        edges_x = sobel(tissue_map.astype(np.float32), axis=1)
+        edge_magnitude = np.sqrt(edges_y**2 + edges_x**2)
+        # Dilate edges slightly to create thin strips
+        watershed_mask = gaussian_filter(edge_magnitude, sigma=0.8) > 0.3
+        # Apply watershed zones
+        cbf_map[watershed_mask] = np.random.uniform(5.0, 10.0)
+        att_map[watershed_mask] = np.random.uniform(2200.0, 3000.0)
+        metadata['has_watershed_zones'] = True
+
+        # --- Venous contamination: scattered high-CBF spots with very high ATT ---
+        n_venous_spots = np.random.randint(3, 8)
+        for _ in range(n_venous_spots):
+            vx = np.random.randint(5, self.size - 5)
+            vy = np.random.randint(5, self.size - 5)
+            vr = np.random.randint(2, 5)
+            venous_mask = self._generate_blob_mask((vy, vx), vr, irregularity=0.5)
+            cbf_map[venous_mask] = np.random.uniform(100.0, 180.0)
+            att_map[venous_mask] = np.random.uniform(3000.0, 3500.0)
+        metadata['n_venous_spots'] = n_venous_spots
+
+        # --- Extreme-only features ---
+        if difficulty == 'extreme':
+            # Negative CBF artifacts (motion-corrupted regions)
+            n_motion_artifacts = np.random.randint(1, 4)
+            for _ in range(n_motion_artifacts):
+                mx = np.random.randint(10, self.size - 10)
+                my = np.random.randint(10, self.size - 10)
+                mr = np.random.randint(3, 8)
+                motion_mask = self._generate_blob_mask((my, mx), mr, irregularity=0.6)
+                cbf_map[motion_mask] = np.random.uniform(-5.0, 0.0)
+                att_map[motion_mask] = np.random.uniform(500.0, 2000.0)
+            metadata['n_motion_artifacts'] = n_motion_artifacts
+
+            # Small embedded lesions (3-5 pixel radius) in normal tissue
+            n_small_lesions = np.random.randint(5, 12)
+            for _ in range(n_small_lesions):
+                lx = np.random.randint(8, self.size - 8)
+                ly = np.random.randint(8, self.size - 8)
+                lr = np.random.randint(3, 5)
+                small_mask = self._generate_blob_mask((ly, lx), lr, irregularity=0.2)
+                # Random lesion type
+                if np.random.rand() < 0.5:
+                    cbf_map[small_mask] = np.random.uniform(80.0, 130.0)
+                    att_map[small_mask] = np.random.uniform(500.0, 900.0)
+                else:
+                    cbf_map[small_mask] = np.random.uniform(2.0, 10.0)
+                    att_map[small_mask] = np.random.uniform(2500.0, 4000.0)
+            metadata['n_small_lesions'] = n_small_lesions
+
+            # Sharp boundaries: reduce PVE sigma for some regions to create
+            # highly heterogeneous tissue with abrupt transitions
+            # We'll apply PVE with reduced sigma and mix with sharp version
+            sharp_region_mask = np.random.rand(self.size, self.size) > 0.5
+            cbf_sharp = cbf_map.copy()
+            att_sharp = att_map.copy()
+
+        # Apply Partial Volume Effect (increased sigma for hard phantoms)
+        pve_sigma = self.pve_sigma * 1.5 if difficulty == 'hard' else self.pve_sigma * 0.5
+        cbf_map = gaussian_filter(cbf_map, sigma=pve_sigma)
+        att_map = gaussian_filter(att_map, sigma=pve_sigma)
+
+        if difficulty == 'extreme':
+            # Mix sharp and blurred regions for heterogeneous boundaries
+            cbf_map = np.where(sharp_region_mask, cbf_sharp, cbf_map)
+            att_map = np.where(sharp_region_mask, att_sharp, att_map)
+            # Light smoothing to avoid fully pixelated boundaries
+            cbf_map = gaussian_filter(cbf_map, sigma=0.3)
+            att_map = gaussian_filter(att_map, sigma=0.3)
+
+        # Clamp to valid ranges (allow negative CBF in extreme mode)
+        if difficulty == 'extreme':
+            cbf_map = np.clip(cbf_map, -10, 200).astype(np.float32)
+            att_map = np.clip(att_map, 100, 5000).astype(np.float32)
+        else:
+            cbf_map = np.clip(cbf_map, 0, 200).astype(np.float32)
+            att_map = np.clip(att_map, 100, 5000).astype(np.float32)
+
+        return cbf_map, att_map, metadata
+
+    def generate_validation_suite(self, n_per_difficulty: int = 20) -> Dict[str, List[Tuple[np.ndarray, np.ndarray, Dict]]]:
+        """
+        Generate a balanced validation suite with easy/standard/hard/extreme phantoms.
+
+        This produces a set of phantoms across a range of difficulty levels for
+        comprehensive model evaluation. Harder phantoms stress-test the model with
+        wider parameter ranges, more pathology, and challenging artifacts.
+
+        Args:
+            n_per_difficulty: Number of phantoms per difficulty level (default 20)
+
+        Returns:
+            Dict mapping difficulty level to list of (cbf_map, att_map, metadata) tuples.
+            Keys: 'easy', 'standard', 'hard', 'extreme'
+        """
+        suite = {
+            'easy': [],
+            'standard': [],
+            'hard': [],
+            'extreme': [],
+        }
+
+        logger.info(f"Generating validation suite: {n_per_difficulty} phantoms per difficulty...")
+
+        # Easy: no pathology, standard tissue ranges
+        for i in range(n_per_difficulty):
+            np.random.seed(1000 + i)  # Reproducible
+            cbf, att, meta = self.generate_phantom(include_pathology=False)
+            meta['difficulty'] = 'easy'
+            suite['easy'].append((cbf, att, meta))
+
+        # Standard: pathology possible, standard ranges (existing behavior)
+        for i in range(n_per_difficulty):
+            np.random.seed(2000 + i)
+            cbf, att, meta = self.generate_phantom(include_pathology=True)
+            meta['difficulty'] = 'standard'
+            suite['standard'].append((cbf, att, meta))
+
+        # Hard
+        for i in range(n_per_difficulty):
+            np.random.seed(3000 + i)
+            cbf, att, meta = self.generate_hard_phantom(difficulty='hard')
+            suite['hard'].append((cbf, att, meta))
+
+        # Extreme
+        for i in range(n_per_difficulty):
+            np.random.seed(4000 + i)
+            cbf, att, meta = self.generate_hard_phantom(difficulty='extreme')
+            suite['extreme'].append((cbf, att, meta))
+
+        total = sum(len(v) for v in suite.values())
+        logger.info(f"Validation suite generated: {total} total phantoms "
+                    f"({n_per_difficulty} per difficulty x 4 levels)")
+
+        return suite
 
 @dataclass
 class PhysiologicalVariation:

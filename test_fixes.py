@@ -76,7 +76,7 @@ def test_process_signals_consistency():
     norm_stats = {
         'scalar_features_mean': [0.0] * 12,
         'scalar_features_std': [1.0] * 12,
-        'y_mean_t1': 1850.0,
+        'y_mean_t1': 1650.0,  # 3T consensus (Alsop 2015)
         'y_std_t1': 100.0,
     }
 
@@ -87,7 +87,7 @@ def test_process_signals_consistency():
         'normalization_mode': 'per_curve',
     }
 
-    t1_values = np.full((n_samples, 1), 1850.0, dtype=np.float32)
+    t1_values = np.full((n_samples, 1), 1650.0, dtype=np.float32)  # 3T consensus (Alsop 2015)
 
     # Process
     processed = process_signals_dynamic(signals, norm_stats, config, t1_values=t1_values)
@@ -127,8 +127,8 @@ def test_physics_simulation():
     for cbf, att, expected_peak_idx in test_cases:
         cbf_scaled = cbf / 6000.0  # Convert to ml/g/s
 
-        pcasl = _generate_pcasl_signal_jit(plds, att, cbf_scaled, 1850.0, 1800.0, 0.85, 1.0)
-        vsasl = _generate_vsasl_signal_jit(plds, att, cbf_scaled, 1850.0, 0.56, 1.0, 0.0)
+        pcasl = _generate_pcasl_signal_jit(plds, att, cbf_scaled, 1650.0, 1800.0, 0.85, 1.0)  # T1_artery=1650: 3T consensus (Alsop 2015)
+        vsasl = _generate_vsasl_signal_jit(plds, att, cbf_scaled, 1650.0, 0.56, 1.0, 0.0)  # T1_artery=1650: 3T consensus (Alsop 2015)
 
         # Check signal is non-zero
         if np.max(pcasl) < 1e-10:
