@@ -9,27 +9,41 @@ import numba
 
 @numba.jit(nopython=True, cache=True)
 def _generate_vsasl_signal_jit(plds, att, cbf_ml_g_s, t1_artery, alpha2, T2_factor, t_sat_vs):
-    """JIT-compiled worker for VSASL signal generation (SIMPLE MODEL)."""
+    """JIT-compiled worker for VSASL signal generation.
+
+    Implements VSASL signal model with saturation recovery (Xu et al.).
+
+    When ATT <= T_sat_vs: standard VSASL model (Eqs 4 & 5).
+    When ATT > T_sat_vs: labeled blood undergoes T1 recovery during (ATT - T_sat),
+      reducing effective initial magnetization by factor SIB.
+      SIB = 1 - exp(-(ATT - T_sat_vs) / T1_artery)  (ideal saturation)
+    """
     M0_b = 1.0
     lambda_blood = 0.90
     signal = np.zeros_like(plds, dtype=np.float64)
 
-    # Calculate the base signal assuming full initial magnetization (SIB=1.0)
-    # This loop directly implements Equations 4 & 5 from the main paper.
+    # Saturation recovery factor: when ATT > T_sat_vs, blood magnetization
+    # partially recovers before entering the imaging slab.
+    # SIB=1.0 means full inversion (ATT <= T_sat), SIB<1.0 means partial recovery.
+    if att > t_sat_vs:
+        SIB = 1.0 - np.exp(-(att - t_sat_vs) / t1_artery)
+    else:
+        SIB = 1.0
+
     for i in range(plds.shape[0]):
-        # Condition 1: PLD <= ATT (Equation 4, simplified)
+        # Condition 1: PLD <= ATT (labeled blood still arriving)
         if plds[i] <= att:
-            signal[i] = (2 * M0_b * cbf_ml_g_s * alpha2 / lambda_blood *
+            signal[i] = (2 * M0_b * cbf_ml_g_s * alpha2 * SIB / lambda_blood *
                          (plds[i] / 1000.0) *
                          np.exp(-plds[i] / t1_artery) *
                          T2_factor)
-        # Condition 2: PLD > ATT (Equation 5, simplified)
+        # Condition 2: PLD > ATT (all labeled blood has arrived)
         else:
-            signal[i] = (2 * M0_b * cbf_ml_g_s * alpha2 / lambda_blood *
+            signal[i] = (2 * M0_b * cbf_ml_g_s * alpha2 * SIB / lambda_blood *
                          (att / 1000.0) *
                          np.exp(-plds[i] / t1_artery) *
                          T2_factor)
-            
+
     return signal
 
 @numba.jit(nopython=True, cache=True)
@@ -78,7 +92,7 @@ class ASLParameters:
     """ASL acquisition and physiological parameters"""
     # Physiological parameters
     CBF: float = 20.0  # ml/100g/min
-    T1_artery: float = 1850.0  # ms
+    T1_artery: float = 1650.0  # ms — 3T consensus (Alsop 2015)
     T2_factor: float = 1.0 # T2 decay effect on ASL signal (e.g., from crusher gradients or long TEs)
     alpha_BS1: float = 1.0 # Background suppression efficiency factor for the first BS pulse. Overall effect is alpha_BS1^n_bs_pulses.
 

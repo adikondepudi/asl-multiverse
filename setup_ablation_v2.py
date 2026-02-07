@@ -77,7 +77,7 @@ BASELINE_CONFIG = {
         "spike_magnitude_range": [2.0, 5.0],
     },
     "simulation": {
-        "T1_artery": 1850.0,
+        "T1_artery": 1650.0,  # 3T consensus (Alsop 2015)
         "T_tau": 1800.0,
         "alpha_PCASL": 0.85,
         "alpha_VSASL": 0.56,

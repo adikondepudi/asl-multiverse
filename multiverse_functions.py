@@ -125,7 +125,9 @@ def fit_PCVSASL_misMatchPLD_vectInit_pep(PLDTI, diff_sig, Init, T1_artery, T_tau
         Degrees of freedom
     """
     # Set bounds for optimization
-    bounds = ([1/6000, 100], [100/6000, 6000])
+    # CBF: [0, 200] ml/100g/min (internal units: ml/g/s, divide by 6000)
+    # ATT: [100, 4000] ms (physiologically reasonable; 6000ms allowed topology trap)
+    bounds = ([0/6000, 100], [200/6000, 4000])
     
     # Define residual function for optimization
     def residuals(x):

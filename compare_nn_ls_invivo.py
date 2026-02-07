@@ -1,12 +1,14 @@
 #!/usr/bin/env python3
 """
-Compare Neural Network vs Least-Squares fitting on in-vivo ASL data.
+Compare Neural Network vs Least-Squares (and optionally BASIL/Bayesian)
+fitting on in-vivo ASL data.
 
 For PhD thesis/publication: Rigorous comparison with statistical analysis.
 
 Outputs:
 - Voxel-wise LS CBF/ATT maps
-- NN vs LS comparison metrics
+- (Optional) BASIL/Bayesian CBF/ATT maps
+- NN vs LS (vs BASIL) comparison metrics
 - Statistical analysis (correlation, Bland-Altman, ICC)
 - Publication-ready figures
 """
@@ -157,13 +159,17 @@ def run_ls_fitting(signals: np.ndarray, brain_mask: np.ndarray,
     att_map = np.full((h, w, z), np.nan, dtype=np.float32)
 
     # LS parameters
+    # T1_artery: 1650ms at 3T per ASL consensus (Alsop 2015)
+    # alpha_BS1: 0.93 per-pulse BS efficiency (Garcia 2005)
+    #   Effective alpha_PCASL = 0.85 * 0.93^4 ≈ 0.635
+    #   Effective alpha_VSASL = 0.56 * 0.93^3 ≈ 0.450
     ls_params = {
-        'T1_artery': 1850.0,
+        'T1_artery': 1650.0,
         'T_tau': 1800.0,
         'alpha_PCASL': 0.85,
         'alpha_VSASL': 0.56,
         'T2_factor': 1.0,
-        'alpha_BS1': 1.0
+        'alpha_BS1': 0.93
     }
 
     # Get brain voxel indices
@@ -299,9 +305,9 @@ def save_nifti(data: np.ndarray, reference: nib.Nifti1Image, output_path: Path):
 
 
 def process_subject(subject_dir: Path, nn_results_dir: Path, output_dir: Path,
-                    n_workers: int = 4) -> Dict:
+                    n_workers: int = 4, run_basil: bool = False) -> Dict:
     """
-    Process a single subject: run LS fitting and compare with NN.
+    Process a single subject: run LS fitting (and optionally BASIL) and compare with NN.
     """
     subject_id = subject_dir.name
     print(f"\n{'='*60}")
@@ -327,6 +333,29 @@ def process_subject(subject_dir: Path, nn_results_dir: Path, output_dir: Path,
     save_nifti(ls_cbf, ref_img, subject_output / 'ls_cbf.nii.gz')
     save_nifti(ls_att, ref_img, subject_output / 'ls_att.nii.gz')
 
+    # Run BASIL fitting (optional)
+    basil_cbf = None
+    basil_att = None
+    basil_cbf_metrics = None
+    basil_att_metrics = None
+
+    if run_basil:
+        from basil_baseline import run_basil_fitting_safe
+
+        basil_output = subject_output / 'basil'
+        basil_result = run_basil_fitting_safe(
+            signals, brain_mask, plds, basil_output
+        )
+
+        if basil_result is not None:
+            basil_cbf, basil_att = basil_result
+
+            # Save BASIL results
+            save_nifti(basil_cbf, ref_img, subject_output / 'basil_cbf.nii.gz')
+            save_nifti(basil_att, ref_img, subject_output / 'basil_att.nii.gz')
+        else:
+            print("  WARNING: BASIL fitting was skipped or failed.")
+
     # Load NN results
     nn_cbf_path = nn_results_dir / subject_id / 'nn_cbf.nii.gz'
     nn_att_path = nn_results_dir / subject_id / 'nn_att.nii.gz'
@@ -338,24 +367,58 @@ def process_subject(subject_dir: Path, nn_results_dir: Path, output_dir: Path,
     nn_cbf = nib.load(nn_cbf_path).get_fdata()
     nn_att = nib.load(nn_att_path).get_fdata()
 
-    # Compute comparison metrics
+    # Compute NN vs LS comparison metrics
     cbf_metrics = compute_comparison_metrics(nn_cbf, ls_cbf, brain_mask, 'CBF')
     att_metrics = compute_comparison_metrics(nn_att, ls_att, brain_mask, 'ATT')
 
-    # Print summary
-    print(f"\n  CBF Comparison:")
+    # Print NN vs LS summary
+    print(f"\n  CBF Comparison (NN vs LS):")
     print(f"    NN:  {cbf_metrics['nn_stats']['mean']:.1f} ± {cbf_metrics['nn_stats']['std']:.1f} ml/100g/min")
     print(f"    LS:  {cbf_metrics['ls_stats']['mean']:.1f} ± {cbf_metrics['ls_stats']['std']:.1f} ml/100g/min")
     print(f"    Correlation: r={cbf_metrics['pearson_r']:.3f}")
     print(f"    ICC: {cbf_metrics['icc']:.3f}")
     print(f"    Bias: {cbf_metrics['bland_altman']['bias']:.2f} ml/100g/min")
 
-    print(f"\n  ATT Comparison:")
+    print(f"\n  ATT Comparison (NN vs LS):")
     print(f"    NN:  {att_metrics['nn_stats']['mean']:.0f} ± {att_metrics['nn_stats']['std']:.0f} ms")
     print(f"    LS:  {att_metrics['ls_stats']['mean']:.0f} ± {att_metrics['ls_stats']['std']:.0f} ms")
     print(f"    Correlation: r={att_metrics['pearson_r']:.3f}")
     print(f"    ICC: {att_metrics['icc']:.3f}")
     print(f"    Bias: {att_metrics['bland_altman']['bias']:.0f} ms")
+
+    # Compute BASIL comparison metrics if available
+    if basil_cbf is not None:
+        # NN vs BASIL
+        basil_cbf_metrics = compute_comparison_metrics(
+            nn_cbf, basil_cbf, brain_mask, 'CBF')
+        basil_att_metrics = compute_comparison_metrics(
+            nn_att, basil_att, brain_mask, 'ATT')
+
+        # LS vs BASIL
+        ls_basil_cbf_metrics = compute_comparison_metrics(
+            ls_cbf, basil_cbf, brain_mask, 'CBF')
+        ls_basil_att_metrics = compute_comparison_metrics(
+            ls_att, basil_att, brain_mask, 'ATT')
+
+        print(f"\n  CBF Comparison (NN vs BASIL):")
+        if 'error' not in basil_cbf_metrics:
+            print(f"    BASIL: {basil_cbf_metrics['ls_stats']['mean']:.1f} ± {basil_cbf_metrics['ls_stats']['std']:.1f} ml/100g/min")
+            print(f"    Correlation: r={basil_cbf_metrics['pearson_r']:.3f}")
+            print(f"    ICC: {basil_cbf_metrics['icc']:.3f}")
+            print(f"    Bias: {basil_cbf_metrics['bland_altman']['bias']:.2f} ml/100g/min")
+
+        print(f"\n  ATT Comparison (NN vs BASIL):")
+        if 'error' not in basil_att_metrics:
+            print(f"    BASIL: {basil_att_metrics['ls_stats']['mean']:.0f} ± {basil_att_metrics['ls_stats']['std']:.0f} ms")
+            print(f"    Correlation: r={basil_att_metrics['pearson_r']:.3f}")
+            print(f"    ICC: {basil_att_metrics['icc']:.3f}")
+            print(f"    Bias: {basil_att_metrics['bland_altman']['bias']:.0f} ms")
+
+        print(f"\n  CBF Comparison (LS vs BASIL):")
+        if 'error' not in ls_basil_cbf_metrics:
+            print(f"    Correlation: r={ls_basil_cbf_metrics['pearson_r']:.3f}")
+            print(f"    ICC: {ls_basil_cbf_metrics['icc']:.3f}")
+            print(f"    Bias: {ls_basil_cbf_metrics['bland_altman']['bias']:.2f} ml/100g/min")
 
     # Count LS failures
     ls_cbf_valid = ~np.isnan(ls_cbf) & brain_mask
@@ -371,6 +434,16 @@ def process_subject(subject_dir: Path, nn_results_dir: Path, output_dir: Path,
         'cbf_comparison': cbf_metrics,
         'att_comparison': att_metrics,
     }
+
+    # Add BASIL results if available
+    if basil_cbf_metrics is not None:
+        results['basil_enabled'] = True
+        results['cbf_comparison_nn_vs_basil'] = basil_cbf_metrics
+        results['att_comparison_nn_vs_basil'] = basil_att_metrics
+        results['cbf_comparison_ls_vs_basil'] = ls_basil_cbf_metrics
+        results['att_comparison_ls_vs_basil'] = ls_basil_att_metrics
+    else:
+        results['basil_enabled'] = False
 
     with open(subject_output / 'comparison_metrics.json', 'w') as f:
         json.dump(results, f, indent=2)
@@ -393,7 +466,7 @@ def aggregate_results(output_dir: Path) -> Dict:
     if not all_results:
         return {}
 
-    # Aggregate metrics
+    # Aggregate NN vs LS metrics
     cbf_correlations = [r['cbf_comparison']['pearson_r'] for r in all_results]
     cbf_iccs = [r['cbf_comparison']['icc'] for r in all_results]
     cbf_biases = [r['cbf_comparison']['bland_altman']['bias'] for r in all_results]
@@ -423,8 +496,60 @@ def aggregate_results(output_dir: Path) -> Dict:
             'std_bias': float(np.std(att_biases)),
         },
         'ls_mean_failure_rate': float(np.mean(ls_failures)),
-        'per_subject': all_results,
     }
+
+    # Aggregate BASIL metrics if available
+    basil_results = [r for r in all_results if r.get('basil_enabled', False)]
+    if basil_results:
+        def _safe_extract(results, key_path):
+            """Extract values from nested dict, skipping entries with errors."""
+            vals = []
+            for r in results:
+                obj = r
+                try:
+                    for key in key_path:
+                        obj = obj[key]
+                    vals.append(obj)
+                except (KeyError, TypeError):
+                    pass
+            return vals
+
+        nn_basil_cbf_corrs = _safe_extract(basil_results, ['cbf_comparison_nn_vs_basil', 'pearson_r'])
+        nn_basil_cbf_iccs = _safe_extract(basil_results, ['cbf_comparison_nn_vs_basil', 'icc'])
+        nn_basil_cbf_biases = _safe_extract(basil_results, ['cbf_comparison_nn_vs_basil', 'bland_altman', 'bias'])
+
+        nn_basil_att_corrs = _safe_extract(basil_results, ['att_comparison_nn_vs_basil', 'pearson_r'])
+        nn_basil_att_iccs = _safe_extract(basil_results, ['att_comparison_nn_vs_basil', 'icc'])
+        nn_basil_att_biases = _safe_extract(basil_results, ['att_comparison_nn_vs_basil', 'bland_altman', 'bias'])
+
+        ls_basil_cbf_corrs = _safe_extract(basil_results, ['cbf_comparison_ls_vs_basil', 'pearson_r'])
+        ls_basil_cbf_iccs = _safe_extract(basil_results, ['cbf_comparison_ls_vs_basil', 'icc'])
+
+        aggregate['basil'] = {
+            'n_subjects_with_basil': len(basil_results),
+            'nn_vs_basil_cbf': {
+                'mean_correlation': float(np.mean(nn_basil_cbf_corrs)) if nn_basil_cbf_corrs else None,
+                'std_correlation': float(np.std(nn_basil_cbf_corrs)) if nn_basil_cbf_corrs else None,
+                'mean_icc': float(np.mean(nn_basil_cbf_iccs)) if nn_basil_cbf_iccs else None,
+                'std_icc': float(np.std(nn_basil_cbf_iccs)) if nn_basil_cbf_iccs else None,
+                'mean_bias': float(np.mean(nn_basil_cbf_biases)) if nn_basil_cbf_biases else None,
+                'std_bias': float(np.std(nn_basil_cbf_biases)) if nn_basil_cbf_biases else None,
+            },
+            'nn_vs_basil_att': {
+                'mean_correlation': float(np.mean(nn_basil_att_corrs)) if nn_basil_att_corrs else None,
+                'std_correlation': float(np.std(nn_basil_att_corrs)) if nn_basil_att_corrs else None,
+                'mean_icc': float(np.mean(nn_basil_att_iccs)) if nn_basil_att_iccs else None,
+                'std_icc': float(np.std(nn_basil_att_iccs)) if nn_basil_att_iccs else None,
+                'mean_bias': float(np.mean(nn_basil_att_biases)) if nn_basil_att_biases else None,
+                'std_bias': float(np.std(nn_basil_att_biases)) if nn_basil_att_biases else None,
+            },
+            'ls_vs_basil_cbf': {
+                'mean_correlation': float(np.mean(ls_basil_cbf_corrs)) if ls_basil_cbf_corrs else None,
+                'mean_icc': float(np.mean(ls_basil_cbf_iccs)) if ls_basil_cbf_iccs else None,
+            },
+        }
+
+    aggregate['per_subject'] = all_results
 
     # Save aggregate results
     with open(output_dir / 'aggregate_comparison.json', 'w') as f:
@@ -445,16 +570,38 @@ def aggregate_results(output_dir: Path) -> Dict:
     print(f"  Bias: {aggregate['att']['mean_bias']:.0f} ± {aggregate['att']['std_bias']:.0f} ms")
     print(f"\nLS failure rate: {aggregate['ls_mean_failure_rate']*100:.1f}%")
 
+    if 'basil' in aggregate:
+        basil_agg = aggregate['basil']
+        print(f"\n--- BASIL Results ({basil_agg['n_subjects_with_basil']} subjects) ---")
+
+        nn_basil_cbf = basil_agg['nn_vs_basil_cbf']
+        if nn_basil_cbf.get('mean_correlation') is not None:
+            print(f"\nCBF (NN vs BASIL):")
+            print(f"  Correlation: {nn_basil_cbf['mean_correlation']:.3f} ± {nn_basil_cbf['std_correlation']:.3f}")
+            print(f"  ICC: {nn_basil_cbf['mean_icc']:.3f} ± {nn_basil_cbf['std_icc']:.3f}")
+            print(f"  Bias: {nn_basil_cbf['mean_bias']:.2f} ± {nn_basil_cbf['std_bias']:.2f} ml/100g/min")
+
+        nn_basil_att = basil_agg['nn_vs_basil_att']
+        if nn_basil_att.get('mean_correlation') is not None:
+            print(f"\nATT (NN vs BASIL):")
+            print(f"  Correlation: {nn_basil_att['mean_correlation']:.3f} ± {nn_basil_att['std_correlation']:.3f}")
+            print(f"  ICC: {nn_basil_att['mean_icc']:.3f} ± {nn_basil_att['std_icc']:.3f}")
+            print(f"  Bias: {nn_basil_att['mean_bias']:.0f} ± {nn_basil_att['std_bias']:.0f} ms")
+
     return aggregate
 
 
 def main():
-    parser = argparse.ArgumentParser(description="Compare NN vs LS on in-vivo ASL data")
+    parser = argparse.ArgumentParser(
+        description="Compare NN vs LS (vs BASIL) on in-vivo ASL data")
     parser.add_argument("invivo_dir", type=str, help="Directory with raw in-vivo data")
     parser.add_argument("nn_results_dir", type=str, help="Directory with NN predictions")
     parser.add_argument("output_dir", type=str, help="Output directory for LS results and comparison")
     parser.add_argument("--workers", type=int, default=4, help="Number of parallel workers")
     parser.add_argument("--subjects", type=str, nargs='+', help="Specific subjects to process")
+    parser.add_argument("--basil", action="store_true",
+                        help="Also run BASIL/Bayesian fitting for 3-way comparison "
+                             "(requires FSL oxford_asl on PATH)")
 
     args = parser.parse_args()
 
@@ -462,6 +609,15 @@ def main():
     nn_results_dir = Path(args.nn_results_dir)
     output_dir = Path(args.output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
+
+    # Check BASIL availability if requested
+    if args.basil:
+        from basil_baseline import check_basil_available
+        if check_basil_available():
+            print("BASIL (oxford_asl) detected - will run 3-way comparison (NN vs LS vs BASIL)")
+        else:
+            print("WARNING: --basil flag set but oxford_asl not found on PATH. "
+                  "BASIL fitting will be skipped. Install FSL to enable.")
 
     # Find subjects
     subject_dirs = sorted([d for d in invivo_dir.iterdir()
@@ -479,7 +635,8 @@ def main():
     # Process each subject
     for subject_dir in subject_dirs:
         try:
-            process_subject(subject_dir, nn_results_dir, output_dir, args.workers)
+            process_subject(subject_dir, nn_results_dir, output_dir,
+                          args.workers, run_basil=args.basil)
         except Exception as e:
             print(f"ERROR processing {subject_dir.name}: {e}")
             import traceback

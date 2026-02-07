@@ -142,7 +142,23 @@ class EnhancedASLTrainer:
         
         # Initialize Kinetic Model for DC Loss (if needed)
         pld_values = model_config.get('pld_values', [500, 1000, 1500, 2000, 2500, 3000])
-        self.kinetic_model = KineticModel(pld_values=pld_values).to(self.device)
+        domain_rand_config = model_config.get('domain_randomization', None)
+        if domain_rand_config:
+            logger.info(f"Domain Randomization Config loaded: enabled={domain_rand_config.get('enabled', False)}, "
+                        f"T1_range={domain_rand_config.get('T1_artery_range', 'default')}, "
+                        f"alpha_BS1_range={domain_rand_config.get('alpha_BS1_range', 'default')}")
+        else:
+            logger.info("Domain Randomization: not configured (domain_randomization section missing from config)")
+        self.kinetic_model = KineticModel(
+            pld_values=pld_values,
+            t1_blood=model_config.get('T1_artery', 1650.0),  # 3T consensus (Alsop 2015)
+            t_tau=model_config.get('T_tau', 1800.0),
+            alpha_pcasl=model_config.get('alpha_PCASL', 0.85),
+            alpha_vsasl=model_config.get('alpha_VSASL', 0.56),
+            alpha_bs=model_config.get('alpha_BS1', 1.0),
+            t2_factor=model_config.get('T2_factor', 1.0),
+            domain_randomization=domain_rand_config,
+        ).to(self.device)
         if hasattr(self.custom_loss_fn, 'kinetic_model'):
             self.custom_loss_fn.kinetic_model = self.kinetic_model
 
@@ -175,7 +191,7 @@ class EnhancedASLTrainer:
                 self.norm_stats_gpu[k] = torch.tensor(v, device=self.device, dtype=torch.float32)
         
         # Register T1 stats for normalization
-        self.t1_mean_gpu = torch.tensor(norm_stats.get('y_mean_t1', 1850.0), device=self.device, dtype=torch.float32)
+        self.t1_mean_gpu = torch.tensor(norm_stats.get('y_mean_t1', 1650.0), device=self.device, dtype=torch.float32)  # 3T consensus (Alsop 2015)
         self.t1_std_gpu = torch.tensor(norm_stats.get('y_std_t1', 200.0), device=self.device, dtype=torch.float32)
         
         # Register Z stats

@@ -29,7 +29,7 @@ class KineticModel(nn.Module):
     the network from overfitting to fixed parameter values. This is critical
     for generalization to real patient data where parameters vary.
     """
-    def __init__(self, pld_values, t1_blood=1850.0, t_tau=1800.0,
+    def __init__(self, pld_values, t1_blood=1650.0, t_tau=1800.0,  # t1_blood: 3T consensus (Alsop 2015)
                  alpha_pcasl=0.85, alpha_vsasl=0.56, alpha_bs=1.0,
                  t2_factor=1.0, t_sat_vs=2000.0,
                  domain_randomization: dict = None):

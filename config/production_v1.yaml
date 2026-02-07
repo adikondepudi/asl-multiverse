@@ -31,7 +31,7 @@ training:
   variance_weight: 0.1                  # Prevents mean-collapse
 
   # Target scaling
-  att_scale: 0.033                      # Normalize ATT to similar magnitude as CBF
+  att_scale: 1.0                        # With z-score normalized targets, att_scale should be 1.0
   cbf_weight: 1.0                       # Equal weighting
   att_weight: 1.0
 
@@ -103,7 +103,7 @@ noise_config:
 
 # --- PHYSICS PARAMETERS ---
 simulation:
-  T1_artery: 1850.0                     # Blood T1 at 3T (ms)
+  T1_artery: 1650.0                     # Blood T1 at 3T (ms) — 3T consensus (Alsop 2015)
   T_tau: 1800.0                         # Label duration (ms)
   alpha_PCASL: 0.85                     # PCASL labeling efficiency
   alpha_VSASL: 0.56                     # VSASL labeling efficiency

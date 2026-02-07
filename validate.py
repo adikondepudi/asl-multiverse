@@ -94,7 +94,7 @@ class ASLValidator:
         
         # 4. Load physics params from config with defaults
         self.params = ASLParameters(
-            T1_artery=self.config.get('T1_artery', 1850.0),
+            T1_artery=self.config.get('T1_artery', 1650.0),  # 3T consensus (Alsop 2015)
             T_tau=self.config.get('T_tau', 1800.0), 
             alpha_PCASL=self.config.get('alpha_PCASL', 0.85),
             alpha_VSASL=self.config.get('alpha_VSASL', 0.56),
@@ -175,6 +175,73 @@ class ASLValidator:
             "Least_Squares": ls_stats,
             "NN_vs_LS_Win_Rate": win_rate
         }
+
+    def _bootstrap_ci(self, data, n_bootstrap=1000, ci=0.95):
+        """
+        Compute bootstrap confidence interval for the mean of an array.
+
+        Args:
+            data: 1D array of per-sample values (e.g., per-voxel absolute errors)
+            n_bootstrap: Number of bootstrap resamples (default 1000)
+            ci: Confidence level (default 0.95 for 95% CI)
+
+        Returns:
+            (mean, ci_lower, ci_upper) tuple
+        """
+        data = np.asarray(data)
+        # Remove NaNs
+        data = data[~np.isnan(data)]
+        if len(data) == 0:
+            return (np.nan, np.nan, np.nan)
+
+        rng = np.random.RandomState(42)  # Reproducible
+        n = len(data)
+        boot_means = np.empty(n_bootstrap)
+        for b in range(n_bootstrap):
+            sample = data[rng.randint(0, n, size=n)]
+            boot_means[b] = np.mean(sample)
+
+        alpha = 1.0 - ci
+        ci_lower = float(np.percentile(boot_means, 100 * alpha / 2))
+        ci_upper = float(np.percentile(boot_means, 100 * (1 - alpha / 2)))
+        mean_val = float(np.mean(data))
+        return (mean_val, ci_lower, ci_upper)
+
+    def _bootstrap_ci_winrate(self, nn_errors, ls_errors, n_bootstrap=1000, ci=0.95):
+        """
+        Compute bootstrap confidence interval for win rate (fraction where NN < LS).
+
+        Args:
+            nn_errors: 1D array of NN absolute errors per voxel
+            ls_errors: 1D array of LS absolute errors per voxel (same locations)
+            n_bootstrap: Number of bootstrap resamples
+            ci: Confidence level
+
+        Returns:
+            (win_rate, ci_lower, ci_upper) tuple
+        """
+        nn_errors = np.asarray(nn_errors)
+        ls_errors = np.asarray(ls_errors)
+        # Remove pairs where either is NaN
+        valid = ~(np.isnan(nn_errors) | np.isnan(ls_errors))
+        nn_errors = nn_errors[valid]
+        ls_errors = ls_errors[valid]
+        if len(nn_errors) == 0:
+            return (np.nan, np.nan, np.nan)
+
+        nn_wins = (nn_errors < ls_errors).astype(float)
+        rng = np.random.RandomState(42)
+        n = len(nn_wins)
+        boot_rates = np.empty(n_bootstrap)
+        for b in range(n_bootstrap):
+            sample = nn_wins[rng.randint(0, n, size=n)]
+            boot_rates[b] = np.mean(sample)
+
+        alpha = 1.0 - ci
+        ci_lower = float(np.percentile(boot_rates, 100 * alpha / 2))
+        ci_upper = float(np.percentile(boot_rates, 100 * (1 - alpha / 2)))
+        win_rate = float(np.mean(nn_wins))
+        return (win_rate, ci_lower, ci_upper)
 
     def save_llm_report(self):
         """Saves the stats to JSON and Markdown for easy LLM pasting."""
@@ -591,24 +658,34 @@ class ASLValidator:
         make_plot("ATT Bias", nn_bias_att, ls_bias_att, "Error")
         make_plot("ATT CoV", nn_cov_att, ls_cov_att, "CoV (%)")
 
-    def run_spatial_validation(self):
+    def _run_spatial_at_snr(self, snr_value, n_phantoms, phantom_size=64):
         """
-        Validate spatial (U-Net) models by generating synthetic 2D phantoms
-        and comparing NN predictions to Least Squares fitting.
-        """
-        logger.info("=" * 60)
-        logger.info("SPATIAL MODEL VALIDATION")
-        logger.info("=" * 60)
+        Run spatial validation at a single SNR level.
 
-        n_phantoms = 50  # Number of test phantoms
-        phantom_size = 64
+        Args:
+            snr_value: SNR level (e.g. 3, 5, 10, 15, 25)
+            n_phantoms: Number of test phantoms to generate
+            phantom_size: Size of each phantom (default 64)
+
+        Returns:
+            dict with keys: all_nn_cbf, all_nn_att, all_true_cbf, all_true_att,
+                           all_ls_cbf, all_ls_att, all_ls_true_cbf, all_ls_true_att,
+                           all_nn_at_ls_cbf, all_nn_at_ls_att,
+                           all_smoothed_ls_cbf, all_smoothed_ls_att,
+                           all_smoothed_ls_true_cbf, all_smoothed_ls_true_att,
+                           all_nn_at_sls_cbf, all_nn_at_sls_att
+        """
+        from scipy.ndimage import gaussian_filter
 
         all_nn_cbf, all_ls_cbf = [], []
         all_nn_att, all_ls_att = [], []
         all_true_cbf, all_true_att = [], []
-        all_ls_true_cbf, all_ls_true_att = [], []  # Ground truth for LS-sampled voxels
+        all_ls_true_cbf, all_ls_true_att = [], []
+        all_nn_at_ls_cbf, all_nn_at_ls_att = [], []
+        all_smoothed_ls_cbf, all_smoothed_ls_att = [], []
+        all_smoothed_ls_true_cbf, all_smoothed_ls_true_att = [], []
+        all_nn_at_sls_cbf, all_nn_at_sls_att = [], []
 
-        # Use SpatialPhantomGenerator to match training data distribution
         phantom_gen = SpatialPhantomGenerator(size=phantom_size, pve_sigma=1.0)
 
         for phantom_idx in range(n_phantoms):
@@ -617,7 +694,6 @@ class ASLValidator:
             true_cbf_map, true_att_map, metadata = phantom_gen.generate_phantom(include_pathology=True)
 
             # Create brain mask from non-zero CBF regions
-            # (CSF has CBF 0-5, so threshold at 1 to include most tissue)
             mask = (true_cbf_map > 1.0).astype(np.float32)
 
             # Generate clean signals for each voxel
@@ -637,48 +713,43 @@ class ASLValidator:
                         signals[:len(self.plds), i, j] = pcasl
                         signals[len(self.plds):, i, j] = vsasl
 
-            # Add noise (SNR ~10)
+            # Add noise at the specified SNR level
             ref_signal = self.simulator._compute_reference_signal()
-            noise_sd = ref_signal / 10.0
-            noise = noise_sd * np.random.randn(*signals.shape).astype(np.float32)
+            noise_sd = ref_signal / snr_value
+            # Use a different random seed per SNR to get independent noise realizations
+            # but reproducible across runs: seed = phantom_idx * 1000 + int(snr_value * 10)
+            noise_rng = np.random.RandomState(phantom_idx * 1000 + int(snr_value * 10))
+            noise = noise_sd * noise_rng.randn(*signals.shape).astype(np.float32)
             noisy_signals = signals + noise
 
             # Scale signals (matching SpatialDataset M0 normalization)
             noisy_signals_scaled = noisy_signals * 100.0
 
             # Apply normalization matching training config
-            # CRITICAL: Z-score normalization DESTROYS CBF information!
-            # Use global_scale mode to preserve amplitude (CBF) information.
             normalization_mode = self.config.get('normalization_mode', 'per_curve')
             global_scale_factor = self.config.get('global_scale_factor', 1.0)
 
             if normalization_mode == 'global_scale':
-                # Global scaling: preserves CBF-proportional amplitude
                 noisy_signals_normalized = noisy_signals_scaled * global_scale_factor
             else:
-                # Per-pixel z-score (LEGACY - destroys CBF info!)
                 temporal_mean = np.mean(noisy_signals_scaled, axis=0, keepdims=True)
                 temporal_std = np.std(noisy_signals_scaled, axis=0, keepdims=True) + 1e-6
                 noisy_signals_normalized = (noisy_signals_scaled - temporal_mean) / temporal_std
 
             # --- NN Inference ---
-            # Ensure float32 dtype to match model weights
             input_tensor = torch.from_numpy(noisy_signals_normalized[np.newaxis, ...]).float().to(self.device)
 
             with torch.no_grad():
                 nn_cbf_maps, nn_att_maps = [], []
                 for model in self.models:
                     cbf_pred, att_pred, _, _ = model(input_tensor)
-                    # Model outputs NORMALIZED predictions - denormalize to raw units
                     cbf_denorm = cbf_pred * self.norm_stats['y_std_cbf'] + self.norm_stats['y_mean_cbf']
                     att_denorm = att_pred * self.norm_stats['y_std_att'] + self.norm_stats['y_mean_att']
-                    # Apply physical constraints
                     cbf_denorm = torch.clamp(cbf_denorm, min=0.0, max=200.0)
                     att_denorm = torch.clamp(att_denorm, min=0.0, max=5000.0)
                     nn_cbf_maps.append(cbf_denorm.cpu().numpy())
                     nn_att_maps.append(att_denorm.cpu().numpy())
 
-                # Ensemble average
                 nn_cbf = np.mean(nn_cbf_maps, axis=0)[0, 0]  # (H, W)
                 nn_att = np.mean(nn_att_maps, axis=0)[0, 0]
 
@@ -686,9 +757,8 @@ class ASLValidator:
             ls_cbf = np.full((phantom_size, phantom_size), np.nan)
             ls_att = np.full((phantom_size, phantom_size), np.nan)
 
-            # Sample subset of brain voxels for LS (full grid too slow)
             brain_indices = np.argwhere(mask > 0)
-            sample_indices = brain_indices[::10]  # Every 10th voxel
+            sample_indices = brain_indices[::10]
 
             ls_params = {
                 'T1_artery': self.params.T1_artery,
@@ -715,6 +785,40 @@ class ASLValidator:
                 except Exception:
                     pass
 
+            # --- Smoothed-LS Inference ---
+            smoothed_signals = np.zeros_like(noisy_signals)
+            smooth_sigma = 2.0
+            for ch in range(noisy_signals.shape[0]):
+                smoothed_signals[ch] = gaussian_filter(noisy_signals[ch], sigma=smooth_sigma)
+
+            sls_cbf = np.full((phantom_size, phantom_size), np.nan)
+            sls_att = np.full((phantom_size, phantom_size), np.nan)
+
+            for idx in sample_indices:
+                i, j = idx
+                voxel_signal = smoothed_signals[:, i, j]
+                try:
+                    init_guess = get_grid_search_initial_guess(voxel_signal, self.plds, ls_params)
+                    signal_reshaped = voxel_signal.reshape((len(self.plds), 2), order='F')
+                    beta, _, _, _ = fit_PCVSASL_misMatchPLD_vectInit_pep(
+                        pldti, signal_reshaped, init_guess, **ls_params
+                    )
+                    sls_cbf[i, j] = beta[0] * 6000.0
+                    sls_att[i, j] = beta[1]
+                except Exception:
+                    pass
+
+            # Collect smoothed-LS values at sampled voxels
+            for idx in sample_indices:
+                i, j = idx
+                if not np.isnan(sls_cbf[i, j]):
+                    all_smoothed_ls_cbf.append(sls_cbf[i, j])
+                    all_smoothed_ls_att.append(sls_att[i, j])
+                    all_smoothed_ls_true_cbf.append(true_cbf_map[i, j])
+                    all_smoothed_ls_true_att.append(true_att_map[i, j])
+                    all_nn_at_sls_cbf.append(nn_cbf[i, j])
+                    all_nn_at_sls_att.append(nn_att[i, j])
+
             # Collect brain voxel values for statistics
             brain_mask_bool = mask > 0
             all_nn_cbf.extend(nn_cbf[brain_mask_bool].flatten())
@@ -722,7 +826,7 @@ class ASLValidator:
             all_true_cbf.extend(true_cbf_map[brain_mask_bool].flatten())
             all_true_att.extend(true_att_map[brain_mask_bool].flatten())
 
-            # For LS, only use sampled voxels (with corresponding ground truth)
+            # For LS, only use sampled voxels
             for idx in sample_indices:
                 i, j = idx
                 if not np.isnan(ls_cbf[i, j]):
@@ -730,70 +834,263 @@ class ASLValidator:
                     all_ls_att.append(ls_att[i, j])
                     all_ls_true_cbf.append(true_cbf_map[i, j])
                     all_ls_true_att.append(true_att_map[i, j])
+                    all_nn_at_ls_cbf.append(nn_cbf[i, j])
+                    all_nn_at_ls_att.append(nn_att[i, j])
 
             if phantom_idx == 0:
-                # Log first phantom stats for debugging
-                logger.info(f"Phantom 0 - NN CBF: mean={nn_cbf[brain_mask_bool].mean():.2f}, "
+                logger.info(f"  Phantom 0 (SNR={snr_value}) - NN CBF: mean={nn_cbf[brain_mask_bool].mean():.2f}, "
                            f"std={nn_cbf[brain_mask_bool].std():.2f}")
-                logger.info(f"Phantom 0 - True CBF: mean={true_cbf_map[brain_mask_bool].mean():.2f}, "
+                logger.info(f"  Phantom 0 (SNR={snr_value}) - True CBF: mean={true_cbf_map[brain_mask_bool].mean():.2f}, "
                            f"std={true_cbf_map[brain_mask_bool].std():.2f}")
-                logger.info(f"Phantom 0 - NN ATT: mean={nn_att[brain_mask_bool].mean():.2f}, "
+                logger.info(f"  Phantom 0 (SNR={snr_value}) - NN ATT: mean={nn_att[brain_mask_bool].mean():.2f}, "
                            f"std={nn_att[brain_mask_bool].std():.2f}")
-                logger.info(f"Phantom 0 - True ATT: mean={true_att_map[brain_mask_bool].mean():.2f}, "
+                logger.info(f"  Phantom 0 (SNR={snr_value}) - True ATT: mean={true_att_map[brain_mask_bool].mean():.2f}, "
                            f"std={true_att_map[brain_mask_bool].std():.2f}")
 
-        # Convert to arrays
-        all_nn_cbf = np.array(all_nn_cbf)
-        all_nn_att = np.array(all_nn_att)
-        all_true_cbf = np.array(all_true_cbf)
-        all_true_att = np.array(all_true_att)
-        all_ls_cbf = np.array(all_ls_cbf)
-        all_ls_att = np.array(all_ls_att)
-        all_ls_true_cbf = np.array(all_ls_true_cbf)
-        all_ls_true_att = np.array(all_ls_true_att)
+        return {
+            'all_nn_cbf': np.array(all_nn_cbf),
+            'all_nn_att': np.array(all_nn_att),
+            'all_true_cbf': np.array(all_true_cbf),
+            'all_true_att': np.array(all_true_att),
+            'all_ls_cbf': np.array(all_ls_cbf),
+            'all_ls_att': np.array(all_ls_att),
+            'all_ls_true_cbf': np.array(all_ls_true_cbf),
+            'all_ls_true_att': np.array(all_ls_true_att),
+            'all_nn_at_ls_cbf': np.array(all_nn_at_ls_cbf),
+            'all_nn_at_ls_att': np.array(all_nn_at_ls_att),
+            'all_smoothed_ls_cbf': np.array(all_smoothed_ls_cbf),
+            'all_smoothed_ls_att': np.array(all_smoothed_ls_att),
+            'all_smoothed_ls_true_cbf': np.array(all_smoothed_ls_true_cbf),
+            'all_smoothed_ls_true_att': np.array(all_smoothed_ls_true_att),
+            'all_nn_at_sls_cbf': np.array(all_nn_at_sls_cbf),
+            'all_nn_at_sls_att': np.array(all_nn_at_sls_att),
+        }
 
-        # Compute metrics
+    def _compute_snr_metrics_with_ci(self, snr_value, results):
+        """
+        Compute metrics with bootstrap CIs for a single SNR level's results.
+
+        Args:
+            snr_value: The SNR value (for labeling)
+            results: Dict returned by _run_spatial_at_snr
+
+        Returns:
+            Dict of metrics with CIs
+        """
+        all_nn_cbf = results['all_nn_cbf']
+        all_nn_att = results['all_nn_att']
+        all_true_cbf = results['all_true_cbf']
+        all_true_att = results['all_true_att']
+        all_nn_at_ls_cbf = results['all_nn_at_ls_cbf']
+        all_nn_at_ls_att = results['all_nn_at_ls_att']
+        all_ls_cbf = results['all_ls_cbf']
+        all_ls_att = results['all_ls_att']
+        all_ls_true_cbf = results['all_ls_true_cbf']
+        all_ls_true_att = results['all_ls_true_att']
+
+        # Per-voxel absolute errors for bootstrap
+        nn_cbf_errors = np.abs(all_nn_cbf - all_true_cbf)
+        nn_att_errors = np.abs(all_nn_att - all_true_att)
+
+        # NN metrics with CIs (full brain)
+        nn_cbf_mae_mean, nn_cbf_mae_lo, nn_cbf_mae_hi = self._bootstrap_ci(nn_cbf_errors)
+        nn_att_mae_mean, nn_att_mae_lo, nn_att_mae_hi = self._bootstrap_ci(nn_att_errors)
+        nn_cbf_bias = float(np.mean(all_nn_cbf - all_true_cbf))
+        nn_att_bias = float(np.mean(all_nn_att - all_true_att))
+
+        metrics = {
+            'snr': snr_value,
+            'nn_cbf_mae': nn_cbf_mae_mean,
+            'nn_cbf_mae_ci': [nn_cbf_mae_lo, nn_cbf_mae_hi],
+            'nn_cbf_bias': nn_cbf_bias,
+            'nn_att_mae': nn_att_mae_mean,
+            'nn_att_mae_ci': [nn_att_mae_lo, nn_att_mae_hi],
+            'nn_att_bias': nn_att_bias,
+        }
+
+        # LS metrics with CIs (at spatially matched voxels)
+        if len(all_ls_cbf) > 0:
+            ls_cbf_errors = np.abs(all_ls_cbf - all_ls_true_cbf)
+            ls_att_errors = np.abs(all_ls_att - all_ls_true_att)
+            ls_cbf_mae_mean, ls_cbf_mae_lo, ls_cbf_mae_hi = self._bootstrap_ci(ls_cbf_errors)
+            ls_att_mae_mean, ls_att_mae_lo, ls_att_mae_hi = self._bootstrap_ci(ls_att_errors)
+
+            metrics['ls_cbf_mae'] = ls_cbf_mae_mean
+            metrics['ls_cbf_mae_ci'] = [ls_cbf_mae_lo, ls_cbf_mae_hi]
+            metrics['ls_att_mae'] = ls_att_mae_mean
+            metrics['ls_att_mae_ci'] = [ls_att_mae_lo, ls_att_mae_hi]
+
+            # Win rate with CIs (at matched voxels)
+            nn_matched_cbf_errors = np.abs(all_nn_at_ls_cbf - all_ls_true_cbf)
+            nn_matched_att_errors = np.abs(all_nn_at_ls_att - all_ls_true_att)
+
+            cbf_wr, cbf_wr_lo, cbf_wr_hi = self._bootstrap_ci_winrate(
+                nn_matched_cbf_errors, ls_cbf_errors)
+            att_wr, att_wr_lo, att_wr_hi = self._bootstrap_ci_winrate(
+                nn_matched_att_errors, ls_att_errors)
+
+            metrics['cbf_win_rate'] = cbf_wr
+            metrics['cbf_win_rate_ci'] = [cbf_wr_lo, cbf_wr_hi]
+            metrics['att_win_rate'] = att_wr
+            metrics['att_win_rate_ci'] = [att_wr_lo, att_wr_hi]
+            metrics['n_ls_samples'] = len(all_ls_cbf)
+
+        metrics['n_nn_voxels'] = len(all_nn_cbf)
+
+        return metrics
+
+    def run_spatial_validation(self, multi_snr=True):
+        """
+        Validate spatial (U-Net) models by generating synthetic 2D phantoms
+        and comparing NN predictions to Least Squares fitting.
+
+        Args:
+            multi_snr: If True (default), run validation at SNR = [3, 5, 10, 15, 25]
+                      and produce a multi-SNR summary. If False, run only at SNR=10
+                      (backwards-compatible behavior).
+        """
         logger.info("=" * 60)
-        logger.info("SPATIAL VALIDATION RESULTS")
+        logger.info("SPATIAL MODEL VALIDATION")
         logger.info("=" * 60)
 
-        # NN Metrics (full brain)
-        nn_cbf_mae = np.mean(np.abs(all_nn_cbf - all_true_cbf))
-        nn_cbf_bias = np.mean(all_nn_cbf - all_true_cbf)
-        nn_att_mae = np.mean(np.abs(all_nn_att - all_true_att))
-        nn_att_bias = np.mean(all_nn_att - all_true_att)
+        phantom_size = 64
 
-        logger.info(f"NN CBF - MAE: {nn_cbf_mae:.2f}, Bias: {nn_cbf_bias:.2f}")
-        logger.info(f"NN ATT - MAE: {nn_att_mae:.2f}, Bias: {nn_att_bias:.2f}")
+        if multi_snr:
+            snr_values = [3, 5, 10, 15, 25]
+            n_phantoms_multi = 20  # Reduced for multi-SNR to keep runtime reasonable
+        else:
+            snr_values = [10]
+            n_phantoms_multi = 50  # Full count for single-SNR
 
-        # Diagnostic: Check if NN is predicting constant values
-        logger.info(f"NN CBF Predictions - mean: {all_nn_cbf.mean():.2f}, std: {all_nn_cbf.std():.2f}")
-        logger.info(f"NN ATT Predictions - mean: {all_nn_att.mean():.2f}, std: {all_nn_att.std():.2f}")
-        logger.info(f"True CBF Range - mean: {all_true_cbf.mean():.2f}, std: {all_true_cbf.std():.2f}")
-        logger.info(f"True ATT Range - mean: {all_true_att.mean():.2f}, std: {all_true_att.std():.2f}")
+        multi_snr_results = {}
 
-        # LS Metrics (sampled voxels - need to match indices for fair comparison)
-        if len(all_ls_cbf) > 0 and len(all_ls_true_cbf) > 0:
-            # Compute LS metrics against ground truth
-            ls_cbf_mae = np.nanmean(np.abs(all_ls_cbf - all_ls_true_cbf))
-            ls_att_mae = np.nanmean(np.abs(all_ls_att - all_ls_true_att))
-            logger.info(f"LS CBF - Samples: {len(all_ls_cbf)}, MAE: {ls_cbf_mae:.2f}, Mean: {np.nanmean(all_ls_cbf):.2f}")
-            logger.info(f"LS ATT - Samples: {len(all_ls_att)}, MAE: {ls_att_mae:.2f}, Mean: {np.nanmean(all_ls_att):.2f}")
+        for snr_val in snr_values:
+            n_phantoms = n_phantoms_multi if multi_snr else 50
+            # For SNR=10 in multi-SNR mode, use full 50 phantoms for backward-compatible report
+            if multi_snr and snr_val == 10:
+                n_phantoms = 50
 
-        # Log to LLM report
-        self._log_llm_metrics("Spatial_SNR10", all_nn_cbf[:len(all_ls_cbf)],
-                              all_ls_cbf, all_true_cbf[:len(all_ls_cbf)], "CBF")
-        self._log_llm_metrics("Spatial_SNR10", all_nn_att[:len(all_ls_att)],
-                              all_ls_att, all_true_att[:len(all_ls_att)], "ATT")
+            logger.info("-" * 40)
+            logger.info(f"Running spatial validation at SNR={snr_val} with {n_phantoms} phantoms...")
+            logger.info("-" * 40)
+
+            results = self._run_spatial_at_snr(snr_val, n_phantoms, phantom_size)
+            metrics = self._compute_snr_metrics_with_ci(snr_val, results)
+            multi_snr_results[snr_val] = metrics
+
+            # --- Log detailed results for this SNR ---
+            logger.info(f"--- SNR={snr_val} RESULTS ---")
+
+            # NN metrics with CIs
+            logger.info(f"  NN CBF - MAE: {metrics['nn_cbf_mae']:.2f} "
+                        f"[{metrics['nn_cbf_mae_ci'][0]:.2f}, {metrics['nn_cbf_mae_ci'][1]:.2f}], "
+                        f"Bias: {metrics['nn_cbf_bias']:.2f}")
+            logger.info(f"  NN ATT - MAE: {metrics['nn_att_mae']:.2f} "
+                        f"[{metrics['nn_att_mae_ci'][0]:.2f}, {metrics['nn_att_mae_ci'][1]:.2f}], "
+                        f"Bias: {metrics['nn_att_bias']:.2f}")
+
+            if 'ls_cbf_mae' in metrics:
+                logger.info(f"  LS CBF - MAE: {metrics['ls_cbf_mae']:.2f} "
+                            f"[{metrics['ls_cbf_mae_ci'][0]:.2f}, {metrics['ls_cbf_mae_ci'][1]:.2f}]")
+                logger.info(f"  LS ATT - MAE: {metrics['ls_att_mae']:.2f} "
+                            f"[{metrics['ls_att_mae_ci'][0]:.2f}, {metrics['ls_att_mae_ci'][1]:.2f}]")
+                logger.info(f"  CBF Win Rate: {metrics['cbf_win_rate']:.1%} "
+                            f"[{metrics['cbf_win_rate_ci'][0]:.1%}, {metrics['cbf_win_rate_ci'][1]:.1%}]")
+                logger.info(f"  ATT Win Rate: {metrics['att_win_rate']:.1%} "
+                            f"[{metrics['att_win_rate_ci'][0]:.1%}, {metrics['att_win_rate_ci'][1]:.1%}]")
+                logger.info(f"  LS samples: {metrics['n_ls_samples']}, NN voxels: {metrics['n_nn_voxels']}")
+
+            # --- For SNR=10, log to LLM report for backwards compatibility ---
+            if snr_val == 10:
+                all_nn_at_ls_cbf = results['all_nn_at_ls_cbf']
+                all_nn_at_ls_att = results['all_nn_at_ls_att']
+                all_ls_cbf = results['all_ls_cbf']
+                all_ls_att = results['all_ls_att']
+                all_ls_true_cbf = results['all_ls_true_cbf']
+                all_ls_true_att = results['all_ls_true_att']
+
+                self._log_llm_metrics("Spatial_SNR10", all_nn_at_ls_cbf,
+                                      all_ls_cbf, all_ls_true_cbf, "CBF")
+                self._log_llm_metrics("Spatial_SNR10", all_nn_at_ls_att,
+                                      all_ls_att, all_ls_true_att, "ATT")
+
+                # Smoothed-LS comparison
+                all_smoothed_ls_cbf = results['all_smoothed_ls_cbf']
+                all_smoothed_ls_att = results['all_smoothed_ls_att']
+                all_smoothed_ls_true_cbf = results['all_smoothed_ls_true_cbf']
+                all_smoothed_ls_true_att = results['all_smoothed_ls_true_att']
+                all_nn_at_sls_cbf = results['all_nn_at_sls_cbf']
+                all_nn_at_sls_att = results['all_nn_at_sls_att']
+
+                if len(all_smoothed_ls_cbf) > 0:
+                    self._log_llm_metrics("Spatial_SNR10_SmoothedLS", all_nn_at_sls_cbf,
+                                          all_smoothed_ls_cbf, all_smoothed_ls_true_cbf, "CBF")
+                    self._log_llm_metrics("Spatial_SNR10_SmoothedLS", all_nn_at_sls_att,
+                                          all_smoothed_ls_att, all_smoothed_ls_true_att, "ATT")
+
+        # --- Multi-SNR Summary Table ---
+        if multi_snr and len(snr_values) > 1:
+            logger.info("")
+            logger.info("=" * 80)
+            logger.info("MULTI-SNR SUMMARY TABLE")
+            logger.info("=" * 80)
+            header = (f"{'SNR':>5} | {'NN CBF MAE':>20} | {'LS CBF MAE':>20} | "
+                      f"{'CBF WinRate':>20} | {'NN ATT MAE':>20} | {'LS ATT MAE':>20} | "
+                      f"{'ATT WinRate':>20}")
+            logger.info(header)
+            logger.info("-" * len(header))
+
+            for snr_val in snr_values:
+                m = multi_snr_results[snr_val]
+                nn_cbf_str = f"{m['nn_cbf_mae']:.2f} [{m['nn_cbf_mae_ci'][0]:.2f},{m['nn_cbf_mae_ci'][1]:.2f}]"
+                nn_att_str = f"{m['nn_att_mae']:.2f} [{m['nn_att_mae_ci'][0]:.2f},{m['nn_att_mae_ci'][1]:.2f}]"
+
+                if 'ls_cbf_mae' in m:
+                    ls_cbf_str = f"{m['ls_cbf_mae']:.2f} [{m['ls_cbf_mae_ci'][0]:.2f},{m['ls_cbf_mae_ci'][1]:.2f}]"
+                    ls_att_str = f"{m['ls_att_mae']:.2f} [{m['ls_att_mae_ci'][0]:.2f},{m['ls_att_mae_ci'][1]:.2f}]"
+                    cbf_wr_str = f"{m['cbf_win_rate']:.1%} [{m['cbf_win_rate_ci'][0]:.1%},{m['cbf_win_rate_ci'][1]:.1%}]"
+                    att_wr_str = f"{m['att_win_rate']:.1%} [{m['att_win_rate_ci'][0]:.1%},{m['att_win_rate_ci'][1]:.1%}]"
+                else:
+                    ls_cbf_str = "N/A"
+                    ls_att_str = "N/A"
+                    cbf_wr_str = "N/A"
+                    att_wr_str = "N/A"
+
+                logger.info(f"{snr_val:>5} | {nn_cbf_str:>20} | {ls_cbf_str:>20} | "
+                            f"{cbf_wr_str:>20} | {nn_att_str:>20} | {ls_att_str:>20} | "
+                            f"{att_wr_str:>20}")
+
+            logger.info("=" * 80)
+
+            # --- Save multi-SNR results to JSON ---
+            multi_snr_json = {}
+            for snr_val, m in multi_snr_results.items():
+                # Convert all values to JSON-safe types
+                snr_key = str(snr_val)
+                multi_snr_json[snr_key] = {}
+                for k, v in m.items():
+                    if isinstance(v, (np.floating, np.integer)):
+                        multi_snr_json[snr_key][k] = float(v)
+                    elif isinstance(v, np.ndarray):
+                        multi_snr_json[snr_key][k] = v.tolist()
+                    elif isinstance(v, list):
+                        multi_snr_json[snr_key][k] = [float(x) if isinstance(x, (np.floating, np.integer)) else x for x in v]
+                    else:
+                        multi_snr_json[snr_key][k] = v
+
+            json_path = self.output_dir / "multi_snr_results.json"
+            with open(json_path, 'w') as f:
+                json.dump(multi_snr_json, f, indent=4)
+            logger.info(f"Saved multi-SNR results to {json_path}")
 
         logger.info("=" * 60)
 
-    def run_phase_3(self):
+    def run_phase_3(self, multi_snr=True):
         logger.info("--- Phase 3: Comprehensive Stats ---")
 
         # Handle spatial models with dedicated validation
         if hasattr(self, 'is_spatial') and self.is_spatial:
-            self.run_spatial_validation()
+            self.run_spatial_validation(multi_snr=multi_snr)
             self.save_llm_report()
             self.save_plot_data_json()
             return
@@ -812,8 +1109,8 @@ class ASLValidator:
             self.simulator._generate_vsasl_signal(self.plds, a, c, self.params.T1_artery, self.params.alpha_VSASL)
         ]), 10.0) for c, a in zip(t_cbf, t_att)]
         sigs = np.array(sigs)
-        nn_c, nn_a = self.run_nn_inference(sigs, np.full(n, 1850.0))
-        ls_c, ls_a = self.run_ls_inference(sigs, 1850.0)
+        nn_c, nn_a = self.run_nn_inference(sigs, np.full(n, self.params.T1_artery))  # 3T consensus (Alsop 2015)
+        ls_c, ls_a = self.run_ls_inference(sigs, self.params.T1_artery)
 
         # Diagnostic output
         logger.info(f"Scenario A (Fixed CBF=60, Varying ATT):")
@@ -837,8 +1134,8 @@ class ASLValidator:
             self.simulator._generate_vsasl_signal(self.plds, a, c, self.params.T1_artery, self.params.alpha_VSASL)
         ]), 10.0) for c, a in zip(t_cbf, t_att)]
         sigs = np.array(sigs)
-        nn_c, nn_a = self.run_nn_inference(sigs, np.full(n, 1850.0))
-        ls_c, ls_a = self.run_ls_inference(sigs, 1850.0)
+        nn_c, nn_a = self.run_nn_inference(sigs, np.full(n, self.params.T1_artery))  # 3T consensus (Alsop 2015)
+        ls_c, ls_a = self.run_ls_inference(sigs, self.params.T1_artery)
 
         # --- NEW: Log Stats ---
         self._log_llm_metrics("B_FixedATT_VarCBF", nn_c, ls_c, t_cbf, "CBF")
@@ -856,9 +1153,9 @@ class ASLValidator:
                 self.simulator._generate_vsasl_signal(self.plds, a, c, self.params.T1_artery, self.params.alpha_VSASL)
             ]), snr) for c, a in zip(t_cbf, t_att)]
             sigs = np.array(sigs)
-            nn_c, nn_a = self.run_nn_inference(sigs, np.full(n, 1850.0))
-            ls_c, ls_a = self.run_ls_inference(sigs, 1850.0)
-            
+            nn_c, nn_a = self.run_nn_inference(sigs, np.full(n, self.params.T1_artery))  # 3T consensus (Alsop 2015)
+            ls_c, ls_a = self.run_ls_inference(sigs, self.params.T1_artery)
+
             # --- NEW: Log Stats ---
             self._log_llm_metrics(label, nn_c, ls_c, t_cbf, "CBF")
             self._log_llm_metrics(label, nn_a, ls_a, t_att, "ATT")
@@ -874,12 +1171,14 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser()
     parser.add_argument("--run_dir", type=str, required=True)
     parser.add_argument("--output_dir", type=str, default="validation_results")
+    parser.add_argument("--no-multi-snr", action="store_true", default=False,
+                        help="Disable multi-SNR validation curve (only run SNR=10)")
     args = parser.parse_args()
-    
+
     try:
         val = ASLValidator(args.run_dir, args.output_dir)
         val.run_phase_1()
-        val.run_phase_3()
+        val.run_phase_3(multi_snr=not args.no_multi_snr)
         print("\n--- [SUCCESS] Validation Finished. Check output dir. ---")
     except KeyboardInterrupt:
         print("\n--- [CANCELLED] User stopped the script. ---")

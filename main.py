@@ -58,7 +58,7 @@ class ResearchConfig:
     loss_weight_att: float = 1.0
     loss_log_var_reg_lambda: float = 0.0
     pld_values: List[int] = field(default_factory=lambda: list(range(500, 3001, 500)))
-    T1_artery: float = 1850.0; T2_factor: float = 1.0; alpha_BS1: float = 1.0
+    T1_artery: float = 1650.0; T2_factor: float = 1.0; alpha_BS1: float = 1.0  # T1_artery: 3T consensus (Alsop 2015)
     alpha_PCASL: float = 0.85; alpha_VSASL: float = 0.56; T_tau: float = 1800.0
     training_noise_levels: List[float] = field(default_factory=lambda: [3.0, 5.0, 10.0, 15.0, 20.0])
     wandb_project: str = "asl-multiverse-project"
@@ -100,6 +100,10 @@ class ResearchConfig:
     variance_weight: float = 0.1  # Anti-mean-collapse: penalize low prediction variance
     # noise_config: dict for NoiseInjector configuration (snr_range, physio, drift, spikes, etc.)
     noise_config: Optional[Dict[str, Any]] = None
+
+    # Domain randomization: physics parameter variation during training
+    # Loaded from simulation.domain_randomization section in YAML configs
+    domain_randomization: Optional[Dict[str, Any]] = None
 
     # AmplitudeAwareSpatialASLNet configuration
     use_film_at_bottleneck: bool = True   # FiLM conditioning at bottleneck
@@ -516,6 +520,11 @@ if __name__ == "__main__":
                           f"encoder={config_obj.encoder_type}, "
                           f"noise_type={config_obj.noise_type}, "
                           f"norm_mode={config_obj.normalization_mode}")
+        if config_obj.domain_randomization:
+            script_logger.info(f"Domain Randomization: enabled={config_obj.domain_randomization.get('enabled', False)}, "
+                              f"keys={list(config_obj.domain_randomization.keys())}")
+        else:
+            script_logger.info("Domain Randomization: not configured")
     except FeatureConfigError as e:
         script_logger.error(f"CONFIG VALIDATION FAILED: {e}")
         sys.exit(1)

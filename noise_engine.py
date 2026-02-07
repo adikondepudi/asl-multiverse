@@ -43,6 +43,12 @@ class NoiseInjector:
         self.motion_shift_range = self.config.get('motion_shift_range', [1, 4])  # pixels
         self.motion_rotate_range = self.config.get('motion_rotate_range', [-3, 3])  # degrees
 
+        # Static tissue fraction for realistic Rician noise simulation.
+        # In ASL, Rician noise applies to Control and Label magnitude images separately,
+        # not to the difference signal. The static tissue signal (~5% of M0 after
+        # background suppression) determines the noise floor for each image.
+        self.static_tissue_fraction = self.config.get('static_tissue_fraction', 0.05)
+
     def apply_noise(self, signals: Union[torch.Tensor, np.ndarray], ref_signal: float, pld_scaling: dict) -> Union[torch.Tensor, np.ndarray]:
         """
         Apply noise to ASL signals.
@@ -104,18 +110,41 @@ class NoiseInjector:
 
         if 'thermal' in self.components:
             if self.noise_type == 'rician':
-                # Rician noise: magnitude of complex signal with Gaussian noise
-                # S_noisy = sqrt((S + N_real)^2 + N_imag^2)
-                # This creates the positive bias seen in real MRI magnitude images
+                # Physically correct Rician noise for ASL difference signals:
+                # 1. Simulate Control image = static_tissue + difference_signal
+                # 2. Simulate Label image = static_tissue
+                # 3. Apply Rician noise to each independently
+                # 4. Subtract to get noisy difference
+                # This creates the correct bias structure at low SNR.
+                # noise_sigma = ref_signal / snr, so ref_signal = noise_sigma * snr
+                # static_tissue ≈ 5% of M0 (after background suppression)
+                static_tissue = noise_sigma * snr * self.static_tissue_fraction
+
                 if is_torch:
-                    noise_real = torch.randn_like(signals) * noise_sigma * s_vec
-                    noise_imag = torch.randn_like(signals) * noise_sigma * s_vec
-                    # Apply Rician formula - this replaces additive noise
-                    signals = torch.sqrt((signals + noise_real)**2 + noise_imag**2)
+                    # Control = static + difference
+                    control = signals + static_tissue
+                    label = torch.full_like(signals, static_tissue.item() if isinstance(static_tissue, torch.Tensor) else float(static_tissue))
+
+                    noise_real_c = torch.randn_like(signals) * noise_sigma * s_vec
+                    noise_imag_c = torch.randn_like(signals) * noise_sigma * s_vec
+                    noise_real_l = torch.randn_like(signals) * noise_sigma * s_vec
+                    noise_imag_l = torch.randn_like(signals) * noise_sigma * s_vec
+
+                    control_noisy = torch.sqrt((control + noise_real_c)**2 + noise_imag_c**2)
+                    label_noisy = torch.sqrt((label + noise_real_l)**2 + noise_imag_l**2)
+                    signals = control_noisy - label_noisy
                 else:
-                    noise_real = np.random.randn(*signals.shape) * noise_sigma * s_vec
-                    noise_imag = np.random.randn(*signals.shape) * noise_sigma * s_vec
-                    signals = np.sqrt((signals + noise_real)**2 + noise_imag**2)
+                    control = signals + static_tissue
+                    label = np.full_like(signals, static_tissue)
+
+                    noise_real_c = np.random.randn(*signals.shape) * noise_sigma * s_vec
+                    noise_imag_c = np.random.randn(*signals.shape) * noise_sigma * s_vec
+                    noise_real_l = np.random.randn(*signals.shape) * noise_sigma * s_vec
+                    noise_imag_l = np.random.randn(*signals.shape) * noise_sigma * s_vec
+
+                    control_noisy = np.sqrt((control + noise_real_c)**2 + noise_imag_c**2)
+                    label_noisy = np.sqrt((label + noise_real_l)**2 + noise_imag_l**2)
+                    signals = control_noisy - label_noisy
                 # For Rician, we don't add to total_noise since we modified signals directly
             else:
                 # Standard Gaussian additive noise (legacy behavior)
@@ -207,30 +236,34 @@ class NoiseInjector:
 
         if 'thermal' in self.components:
             if self.noise_type == 'rician':
-                # Rician noise: S_noisy = sqrt((S + N_real)^2 + N_imag^2)
-                # This correctly simulates the Rician bias at low SNR
-                noise_real = torch.randn_like(signals) * noise_sigma * s_vec
-                noise_imag = torch.randn_like(signals) * noise_sigma * s_vec
+                # Physically correct Rician noise: apply to Control/Label separately
+                static_tissue = ref_signal * self.static_tissue_fraction
+                control = signals + static_tissue
+                label = torch.full_like(signals, static_tissue)
+
+                noise_real_c = torch.randn_like(signals) * noise_sigma * s_vec
+                noise_imag_c = torch.randn_like(signals) * noise_sigma * s_vec
+                noise_real_l = torch.randn_like(signals) * noise_sigma * s_vec
+                noise_imag_l = torch.randn_like(signals) * noise_sigma * s_vec
 
                 # Optionally apply spatial correlation for more realistic noise
                 if self.spatial_noise_sigma > 0:
-                    # Use average pooling + upsampling as differentiable approximation
-                    # of Gaussian blur for spatial correlation
-                    kernel_size = max(3, int(self.spatial_noise_sigma * 2 + 1))
-                    if kernel_size % 2 == 0:
-                        kernel_size += 1
-                    padding = kernel_size // 2
-
-                    # Simple spatial smoothing via conv
                     blur = torch.nn.AvgPool2d(3, stride=1, padding=1)
-                    noise_real = blur(noise_real)
-                    noise_imag = blur(noise_imag)
+                    noise_real_c = blur(noise_real_c)
+                    noise_imag_c = blur(noise_imag_c)
+                    noise_real_l = blur(noise_real_l)
+                    noise_imag_l = blur(noise_imag_l)
 
                     # Rescale to maintain target SNR
-                    noise_real = noise_real * (noise_sigma * s_vec) / (noise_real.std(dim=(2, 3), keepdim=True) + 1e-6)
-                    noise_imag = noise_imag * (noise_sigma * s_vec) / (noise_imag.std(dim=(2, 3), keepdim=True) + 1e-6)
+                    target_scale = noise_sigma * s_vec
+                    noise_real_c = noise_real_c * target_scale / (noise_real_c.std(dim=(2, 3), keepdim=True) + 1e-6)
+                    noise_imag_c = noise_imag_c * target_scale / (noise_imag_c.std(dim=(2, 3), keepdim=True) + 1e-6)
+                    noise_real_l = noise_real_l * target_scale / (noise_real_l.std(dim=(2, 3), keepdim=True) + 1e-6)
+                    noise_imag_l = noise_imag_l * target_scale / (noise_imag_l.std(dim=(2, 3), keepdim=True) + 1e-6)
 
-                signals = torch.sqrt((signals + noise_real)**2 + noise_imag**2)
+                control_noisy = torch.sqrt((control + noise_real_c)**2 + noise_imag_c**2)
+                label_noisy = torch.sqrt((label + noise_real_l)**2 + noise_imag_l**2)
+                signals = control_noisy - label_noisy
             else:
                 # Gaussian noise (legacy)
                 noise = torch.randn_like(signals) * noise_sigma * s_vec
@@ -287,24 +320,36 @@ class NoiseInjector:
 
         if 'thermal' in self.components:
             if self.noise_type == 'rician':
-                noise_real = np.random.randn(B, C, H, W) * noise_sigma * s_vec
-                noise_imag = np.random.randn(B, C, H, W) * noise_sigma * s_vec
+                # Physically correct: apply Rician noise to Control/Label separately
+                static_tissue = ref_signal * self.static_tissue_fraction
+                control = output + static_tissue
+                label = np.full_like(output, static_tissue)
+
+                noise_real_c = np.random.randn(B, C, H, W) * noise_sigma * s_vec
+                noise_imag_c = np.random.randn(B, C, H, W) * noise_sigma * s_vec
+                noise_real_l = np.random.randn(B, C, H, W) * noise_sigma * s_vec
+                noise_imag_l = np.random.randn(B, C, H, W) * noise_sigma * s_vec
 
                 # Apply spatial correlation
                 if self.spatial_noise_sigma > 0:
                     for b in range(B):
                         for c in range(C):
-                            noise_real[b, c] = gaussian_filter(noise_real[b, c], sigma=self.spatial_noise_sigma)
-                            noise_imag[b, c] = gaussian_filter(noise_imag[b, c], sigma=self.spatial_noise_sigma)
+                            noise_real_c[b, c] = gaussian_filter(noise_real_c[b, c], sigma=self.spatial_noise_sigma)
+                            noise_imag_c[b, c] = gaussian_filter(noise_imag_c[b, c], sigma=self.spatial_noise_sigma)
+                            noise_real_l[b, c] = gaussian_filter(noise_real_l[b, c], sigma=self.spatial_noise_sigma)
+                            noise_imag_l[b, c] = gaussian_filter(noise_imag_l[b, c], sigma=self.spatial_noise_sigma)
 
                     # Rescale to maintain target SNR
                     for b in range(B):
-                        real_std = noise_real[b].std(axis=(1, 2), keepdims=True) + 1e-6
-                        imag_std = noise_imag[b].std(axis=(1, 2), keepdims=True) + 1e-6
-                        noise_real[b] = noise_real[b] * (noise_sigma[b] * s_vec[0]) / real_std
-                        noise_imag[b] = noise_imag[b] * (noise_sigma[b] * s_vec[0]) / imag_std
+                        target_scale = noise_sigma[b] * s_vec[0]
+                        noise_real_c[b] = noise_real_c[b] * target_scale / (noise_real_c[b].std(axis=(1, 2), keepdims=True) + 1e-6)
+                        noise_imag_c[b] = noise_imag_c[b] * target_scale / (noise_imag_c[b].std(axis=(1, 2), keepdims=True) + 1e-6)
+                        noise_real_l[b] = noise_real_l[b] * target_scale / (noise_real_l[b].std(axis=(1, 2), keepdims=True) + 1e-6)
+                        noise_imag_l[b] = noise_imag_l[b] * target_scale / (noise_imag_l[b].std(axis=(1, 2), keepdims=True) + 1e-6)
 
-                output = np.sqrt((output + noise_real)**2 + noise_imag**2)
+                control_noisy = np.sqrt((control + noise_real_c)**2 + noise_imag_c**2)
+                label_noisy = np.sqrt((label + noise_real_l)**2 + noise_imag_l**2)
+                output = control_noisy - label_noisy
             else:
                 noise = np.random.randn(B, C, H, W) * noise_sigma * s_vec
                 output = output + noise

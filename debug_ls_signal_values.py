@@ -17,7 +17,7 @@ def calculate_expected_signal(cbf_ml_100g_min: float, att_ms: float, plds_ms: np
     """Calculate expected ΔM/M0 signal for given CBF and ATT."""
 
     params = {
-        'T1_artery': 1850.0,
+        'T1_artery': 1650.0,  # 3T consensus (Alsop 2015)
         'T_tau': 1800.0,
         'alpha_PCASL': 0.85,
         'alpha_VSASL': 0.56,

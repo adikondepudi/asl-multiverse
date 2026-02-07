@@ -29,8 +29,8 @@ training:
   dc_weight: 0.1                  # ENABLE physics loss for CBF self-supervision
   variance_weight: 0.1            # Prevents variance collapse
 
-  # Target scaling (same as production)
-  att_scale: 0.033
+  # Target scaling
+  att_scale: 1.0  # With z-score normalized targets, att_scale should be 1.0
   cbf_weight: 1.0
   att_weight: 1.0
 
@@ -94,7 +94,7 @@ noise_config:
 
 # --- PHYSICS PARAMETERS ---
 simulation:
-  T1_artery: 1850.0
+  T1_artery: 1650.0  # 3T consensus (Alsop 2015)
   T_tau: 1800.0
   alpha_PCASL: 0.85
   alpha_VSASL: 0.56
