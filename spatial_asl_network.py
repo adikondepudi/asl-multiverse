@@ -201,6 +201,159 @@ class DoubleConv(nn.Module):
         return self.double_conv(x)
 
 
+class SimpleCNN(nn.Module):
+    """
+    Simple 3-layer CNN without U-Net skip connections (ablation baseline).
+
+    Tests whether the U-Net encoder-decoder structure with skip connections
+    provides meaningful multi-scale information, or whether a plain CNN with
+    spatial context is sufficient.
+
+    Architecture: 3 conv layers with GroupNorm and ReLU, no pooling/upsampling.
+    This means the model operates entirely at the original resolution.
+
+    Input: (Batch, N_plds * 2, Height, Width) - PCASL + VSASL channels
+    Output: CBF_map, ATT_map, log_var_cbf, log_var_att (same as SpatialASLNet)
+    """
+    def __init__(self, n_plds=6, features=[32, 64, 128, 256], **kwargs):
+        super().__init__()
+        in_channels = n_plds * 2
+        # Use first two feature sizes from the features list
+        h0 = features[0] if len(features) > 0 else 32
+        h1 = features[1] if len(features) > 1 else 64
+
+        self.conv1 = nn.Conv2d(in_channels, h0, kernel_size=3, padding=1, bias=False)
+        self.gn1 = nn.GroupNorm(min(8, h0), h0)
+        self.conv2 = nn.Conv2d(h0, h1, kernel_size=3, padding=1, bias=False)
+        self.gn2 = nn.GroupNorm(min(8, h1), h1)
+        self.conv3 = nn.Conv2d(h1, 2, kernel_size=1)
+
+        self._init_weights()
+
+    def _init_weights(self):
+        for m in self.modules():
+            if isinstance(m, nn.Conv2d):
+                nn.init.kaiming_normal_(m.weight, mode='fan_out', nonlinearity='relu')
+                if m.bias is not None:
+                    nn.init.constant_(m.bias, 0)
+            elif isinstance(m, nn.GroupNorm):
+                nn.init.constant_(m.weight, 1)
+                nn.init.constant_(m.bias, 0)
+        # Small init for output layer
+        nn.init.normal_(self.conv3.weight, mean=0, std=0.01)
+        nn.init.constant_(self.conv3.bias, 0)
+
+    def forward(self, x):
+        x = F.relu(self.gn1(self.conv1(x)))
+        x = F.relu(self.gn2(self.conv2(x)))
+        out = self.conv3(x)
+
+        cbf_norm = out[:, 0:1, :, :]
+        att_norm = out[:, 1:2, :, :]
+        zero_log = torch.zeros_like(cbf_norm) - 5.0
+        return cbf_norm, att_norm, zero_log, zero_log
+
+
+class CapacityMatchedSpatialASLNet(nn.Module):
+    """
+    SpatialASLNet with extra capacity to match AmplitudeAwareSpatialASLNet parameter count,
+    but WITHOUT FiLM or output modulation mechanisms.
+
+    This ablation isolates the question: does AmplitudeAware's performance advantage come from
+    the FiLM mechanism (amplitude-aware conditioning) or simply from having ~108K extra parameters?
+
+    Extra capacity is added as additional Conv+GroupNorm+ReLU layers in the decoder path:
+    - decoder1: extra 1x1 Conv (128 ch) -> +16,640 params
+    - decoder2: extra DoubleConv (64 ch) -> +73,984 params
+    - decoder3: extra DoubleConv (32 ch) -> +18,560 params
+    Total extra: ~109,184 params (target: ~108,673 to match AmplitudeAware)
+
+    Input/Output: Same as SpatialASLNet.
+    """
+    def __init__(self, n_plds=6, features=[32, 64, 128, 256], **kwargs):
+        super().__init__()
+        in_channels = n_plds * 2
+
+        # Encoder (identical to SpatialASLNet)
+        self.encoder1 = DoubleConv(in_channels, features[0])
+        self.pool1 = nn.MaxPool2d(2)
+        self.encoder2 = DoubleConv(features[0], features[1])
+        self.pool2 = nn.MaxPool2d(2)
+        self.encoder3 = DoubleConv(features[1], features[2])
+        self.pool3 = nn.MaxPool2d(2)
+        self.encoder4 = DoubleConv(features[2], features[3])
+
+        # Decoder (identical to SpatialASLNet)
+        self.up1 = nn.ConvTranspose2d(features[3], features[2], kernel_size=2, stride=2)
+        self.decoder1 = DoubleConv(features[3], features[2])
+        self.up2 = nn.ConvTranspose2d(features[2], features[1], kernel_size=2, stride=2)
+        self.decoder2 = DoubleConv(features[2], features[1])
+        self.up3 = nn.ConvTranspose2d(features[1], features[0], kernel_size=2, stride=2)
+        self.decoder3 = DoubleConv(features[1], features[0])
+
+        # Extra capacity layers (NO amplitude awareness, just more parameters)
+        ng2 = min(8, features[2])
+        self.extra_conv1 = nn.Sequential(
+            nn.Conv2d(features[2], features[2], kernel_size=1, bias=False),
+            nn.GroupNorm(ng2, features[2]),
+            nn.ReLU(inplace=True),
+        )
+        self.extra_conv2 = DoubleConv(features[1], features[1])
+        self.extra_conv3 = DoubleConv(features[0], features[0])
+
+        # Output Head
+        self.out_conv = nn.Conv2d(features[0], 2, kernel_size=1)
+
+        self._init_weights()
+
+    def _init_weights(self):
+        for m in self.modules():
+            if isinstance(m, nn.Conv2d) or isinstance(m, nn.ConvTranspose2d):
+                nn.init.kaiming_normal_(m.weight, mode='fan_out', nonlinearity='relu')
+                if m.bias is not None:
+                    nn.init.constant_(m.bias, 0)
+            elif isinstance(m, (nn.GroupNorm, nn.BatchNorm2d)):
+                nn.init.constant_(m.weight, 1)
+                nn.init.constant_(m.bias, 0)
+        nn.init.normal_(self.out_conv.weight, mean=0, std=0.01)
+        nn.init.constant_(self.out_conv.bias, 0)
+
+    def forward(self, x):
+        # Encoder
+        e1 = self.encoder1(x)
+        e2 = self.encoder2(self.pool1(e1))
+        e3 = self.encoder3(self.pool2(e2))
+        e4 = self.encoder4(self.pool3(e3))
+
+        # Decoder with skip connections + extra capacity
+        d1 = self.up1(e4)
+        diffY = e3.size()[2] - d1.size()[2]
+        diffX = e3.size()[3] - d1.size()[3]
+        d1 = F.pad(d1, [diffX // 2, diffX - diffX // 2, diffY // 2, diffY - diffY // 2])
+        d1 = self.decoder1(torch.cat([e3, d1], dim=1))
+        d1 = self.extra_conv1(d1)  # Extra capacity at level 1
+
+        d2 = self.up2(d1)
+        diffY = e2.size()[2] - d2.size()[2]
+        diffX = e2.size()[3] - d2.size()[3]
+        d2 = F.pad(d2, [diffX // 2, diffX - diffX // 2, diffY // 2, diffY - diffY // 2])
+        d2 = self.decoder2(torch.cat([e2, d2], dim=1))
+        d2 = self.extra_conv2(d2)  # Extra capacity at level 2
+
+        d3 = self.up3(d2)
+        diffY = e1.size()[2] - d3.size()[2]
+        diffX = e1.size()[3] - d3.size()[3]
+        d3 = F.pad(d3, [diffX // 2, diffX - diffX // 2, diffY // 2, diffY - diffY // 2])
+        d3 = self.decoder3(torch.cat([e1, d3], dim=1))
+        d3 = self.extra_conv3(d3)  # Extra capacity at level 3
+
+        out = self.out_conv(d3)
+        cbf_norm = out[:, 0:1, :, :]
+        att_norm = out[:, 1:2, :, :]
+        zero_log = torch.zeros_like(cbf_norm) - 5.0
+        return cbf_norm, att_norm, zero_log, zero_log
+
+
 class SpatialASLNet(nn.Module):
     """
     U-Net architecture for Spatio-Temporal ASL Processing.
@@ -316,7 +469,9 @@ class SpatialASLNet(nn.Module):
 
         # Return 4 values to match existing trainer signature
         # (cbf, att, log_var_cbf, log_var_att)
-        # Placeholder log_var for compatibility
+        # Placeholder log_var for compatibility (hardcoded, never learned)
+        # TODO: Replace with learned uncertainty head if calibrated uncertainty is needed.
+        # Current value exp(-5.0) ~ 0.0067 variance is arbitrary.
         zero_log = torch.zeros_like(cbf_norm) - 5.0
 
         return cbf_norm, att_norm, zero_log, zero_log
@@ -798,6 +953,12 @@ def denormalize_spatial_predictions(pred_cbf_norm: torch.Tensor,
 class BiasReducedLoss(nn.Module):
     """
     Bias-Reduced Loss Function for Quantitative MRI Parameter Estimation.
+
+    WARNING: DEAD CODE - This class is defined but never imported or instantiated.
+    Training always uses MaskedSpatialLoss (for spatial models) or CustomLoss
+    (for voxel-wise models). Kept for reference only.
+
+    TODO: Either integrate into training pipeline or remove entirely.
 
     Standard L1/L2 losses encourage the network to predict the conditional mean,
     leading to variance collapse (smoothed outputs) at low SNR. This loss addresses

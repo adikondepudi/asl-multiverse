@@ -455,6 +455,124 @@ class SpatialValidator:
         return metrics
 
 
+def run_smoothed_ls(signals: np.ndarray, plds: np.ndarray, asl_params: dict,
+                    sigmas: list = None, brain_mask: np.ndarray = None,
+                    subsample: int = 10) -> Dict:
+    """
+    Run LS fitting on Gaussian-smoothed input signals at multiple sigma values.
+
+    Spatial smoothing reduces noise before LS fitting, providing a stronger
+    baseline for comparison against spatial NN models which implicitly
+    denoise through their receptive field.
+
+    Args:
+        signals: (N_plds*2, H, W) input signals (PCASL + VSASL)
+        plds: PLD values in ms
+        asl_params: Dict with physics parameters for LS fitting
+        sigmas: List of Gaussian smoothing sigma values (default [0, 1.0, 2.0, 3.0])
+        brain_mask: (H, W) binary brain mask
+        subsample: Subsample factor for voxels (default 10 = every 10th voxel)
+
+    Returns:
+        Dict mapping sigma -> {'cbf': (H,W), 'att': (H,W)} fitted parameter maps
+    """
+    from scipy.ndimage import gaussian_filter
+    from utils import get_grid_search_initial_guess
+    from multiverse_functions import fit_PCVSASL_misMatchPLD_vectInit_pep
+
+    if sigmas is None:
+        sigmas = [0.0, 1.0, 2.0, 3.0]
+
+    num_plds = len(plds)
+    h, w = signals.shape[1], signals.shape[2]
+
+    if brain_mask is None:
+        mean_signal = np.mean(np.abs(signals), axis=0)
+        brain_mask = (mean_signal > np.percentile(mean_signal, 5)).astype(np.float32)
+
+    pldti = np.column_stack([plds, plds])
+    results = {}
+
+    for sigma in sigmas:
+        logger.info(f"Running smoothed-LS with sigma={sigma}")
+
+        # Apply Gaussian smoothing to each time frame
+        if sigma > 0:
+            smoothed = np.zeros_like(signals)
+            for t in range(signals.shape[0]):
+                smoothed[t] = gaussian_filter(signals[t], sigma=sigma)
+        else:
+            smoothed = signals.copy()
+
+        cbf_map = np.full((h, w), np.nan)
+        att_map = np.full((h, w), np.nan)
+
+        brain_indices = np.argwhere(brain_mask > 0.5)
+        sample_indices = brain_indices[::subsample]
+
+        for idx in sample_indices:
+            i, j = idx
+            voxel_signal = smoothed[:, i, j]
+
+            try:
+                init_guess = get_grid_search_initial_guess(voxel_signal, plds, asl_params)
+                signal_reshaped = voxel_signal.reshape((num_plds, 2), order='F')
+                beta, _, _, _ = fit_PCVSASL_misMatchPLD_vectInit_pep(
+                    pldti, signal_reshaped, init_guess,
+                    asl_params['T1_artery'], asl_params['T_tau'],
+                    asl_params.get('T2_factor', 1.0), asl_params.get('alpha_BS1', 1.0),
+                    asl_params['alpha_PCASL'], asl_params['alpha_VSASL']
+                )
+                cbf_map[i, j] = beta[0] * 6000.0  # Convert back to ml/100g/min
+                att_map[i, j] = beta[1]
+            except Exception:
+                continue
+
+        results[f'sigma_{sigma}'] = {'cbf': cbf_map, 'att': att_map}
+        valid = ~np.isnan(cbf_map)
+        logger.info(f"  sigma={sigma}: {valid.sum()} valid voxels fitted")
+
+    return results
+
+
+def compute_statistical_significance(nn_pred: np.ndarray, ls_pred: np.ndarray,
+                                     ground_truth: np.ndarray,
+                                     parameter_name: str = 'CBF') -> Dict:
+    """
+    Test if NN significantly beats LS using paired statistical tests.
+
+    Wraps validation_metrics.test_win_rate_significance() and adds it
+    to the validation pipeline.
+
+    Args:
+        nn_pred: (N,) NN predictions (flattened, brain voxels only)
+        ls_pred: (N,) LS predictions (flattened, brain voxels only)
+        ground_truth: (N,) Ground truth values (flattened, brain voxels only)
+        parameter_name: 'CBF' or 'ATT' for reporting
+
+    Returns:
+        Dict with statistical test results
+    """
+    from validation_metrics import test_win_rate_significance
+
+    # Compute absolute errors
+    nn_errors = np.abs(nn_pred - ground_truth)
+    ls_errors = np.abs(ls_pred - ground_truth)
+
+    # Run both tests
+    wilcoxon_result = test_win_rate_significance(nn_errors, ls_errors, method='wilcoxon')
+    paired_t_result = test_win_rate_significance(nn_errors, ls_errors, method='paired_t')
+
+    logger.info(f"\n{parameter_name} Statistical Significance:")
+    logger.info(f"  Wilcoxon: {wilcoxon_result['interpretation']}")
+    logger.info(f"  Paired-t: {paired_t_result['interpretation']}")
+
+    return {
+        'wilcoxon': wilcoxon_result,
+        'paired_t': paired_t_result,
+    }
+
+
 def main():
     parser = argparse.ArgumentParser(description="Validate SpatialASLNet models")
     parser.add_argument('--run_dir', type=str, required=True,

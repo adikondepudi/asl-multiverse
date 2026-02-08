@@ -20,7 +20,7 @@ from dataclasses import dataclass, asdict, field
 warnings.filterwarnings('ignore', category=UserWarning)
 
 from enhanced_asl_network import DisentangledASLNet, PhysicsInformedASLProcessor, CustomLoss
-from spatial_asl_network import SpatialASLNet, SpatialDataset, MaskedSpatialLoss
+from spatial_asl_network import SpatialASLNet, SimpleCNN, CapacityMatchedSpatialASLNet, SpatialDataset, MaskedSpatialLoss
 from amplitude_aware_spatial_network import AmplitudeAwareSpatialASLNet
 from asl_simulation import ASLParameters
 from enhanced_simulation import RealisticASLSimulator
@@ -190,7 +190,7 @@ def run_comprehensive_asl_research(config: ResearchConfig, stage: int, output_di
     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
     
     # === 1. DATA LOADING STRATEGY ===
-    is_spatial_model = config.model_class_name in ["SpatialASLNet", "AmplitudeAwareSpatialASLNet"]
+    is_spatial_model = config.model_class_name in ["SpatialASLNet", "AmplitudeAwareSpatialASLNet", "SimpleCNN", "CapacityMatchedSpatialASLNet"]
     train_loader = None
     val_loader = None
     loss_function = None
@@ -395,7 +395,23 @@ def run_comprehensive_asl_research(config: ResearchConfig, stage: int, output_di
     model_creation_config = asdict(config)
     
     def create_model_closure(**kwargs):
-        if config.model_class_name == "SpatialASLNet":
+        if config.model_class_name == "SimpleCNN":
+            features = sorted(kwargs.get('hidden_sizes', [32, 64]))
+            return SimpleCNN(
+                n_plds=num_plds,
+                features=features,
+                **kwargs
+            )
+        elif config.model_class_name == "CapacityMatchedSpatialASLNet":
+            features = sorted(kwargs.get('hidden_sizes', [256, 128, 64]))
+            while len(features) < 4:
+                features.insert(0, max(1, features[0] // 2))
+            return CapacityMatchedSpatialASLNet(
+                n_plds=num_plds,
+                features=features,
+                **kwargs
+            )
+        elif config.model_class_name == "SpatialASLNet":
             # Map MLP 'hidden_sizes' to U-Net 'features'
             # 1. Sort ascending (U-Net encoders expand: 32 -> 64 -> ...)
             features = sorted(kwargs.get('hidden_sizes', [256, 128, 64]))
@@ -509,6 +525,23 @@ if __name__ == "__main__":
     
     # DEFENSIVE: Validate config before any processing
     try:
+        # att_scale legacy bug check: with z-score normalized spatial targets, att_scale should be 1.0
+        # Legacy value of 0.033 was for unnormalized voxel-wise targets and causes ATT loss
+        # to be weighted at only 3.3% of CBF loss.
+        if hasattr(config_obj, 'att_scale') and config_obj.att_scale < 0.5:
+            script_logger.warning(
+                f"att_scale={config_obj.att_scale} with normalized targets — likely legacy bug. "
+                f"Should be 1.0 for z-score normalized spatial targets."
+            )
+
+        # T1_artery sanity check: 3T consensus (Alsop 2015) is 1650 ms
+        if hasattr(config_obj, 'T1_artery'):
+            if not (1500 <= config_obj.T1_artery <= 2000):
+                script_logger.warning(
+                    f"T1_artery={config_obj.T1_artery} ms outside expected range [1500, 2000]. "
+                    f"3T consensus (Alsop 2015) is 1650 ms."
+                )
+
         FeatureRegistry.validate_active_features(config_obj.active_features)
         FeatureRegistry.validate_noise_components(config_obj.data_noise_components)
         FeatureRegistry.validate_plds(config_obj.pld_values)
@@ -523,6 +556,12 @@ if __name__ == "__main__":
         if config_obj.domain_randomization:
             script_logger.info(f"Domain Randomization: enabled={config_obj.domain_randomization.get('enabled', False)}, "
                               f"keys={list(config_obj.domain_randomization.keys())}")
+            # Warn if domain randomization is enabled but dc_weight=0.0
+            # Domain randomization changes physics parameters per-batch, but without
+            # physics loss (dc_weight), the kinetic model is never invoked during training.
+            if config_obj.domain_randomization.get('enabled', False) and config_obj.dc_weight == 0.0:
+                script_logger.info("Note: Domain randomization enabled with dc_weight=0.0 -- "
+                                   "randomization affects data generation only (not physics loss).")
         else:
             script_logger.info("Domain Randomization: not configured")
     except FeatureConfigError as e:

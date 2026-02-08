@@ -130,8 +130,9 @@ class NoiseInjector:
                     noise_real_l = torch.randn_like(signals) * noise_sigma * s_vec
                     noise_imag_l = torch.randn_like(signals) * noise_sigma * s_vec
 
-                    control_noisy = torch.sqrt((control + noise_real_c)**2 + noise_imag_c**2)
-                    label_noisy = torch.sqrt((label + noise_real_l)**2 + noise_imag_l**2)
+                    # Epsilon guard prevents NaN from sqrt of negative values due to float precision
+                    control_noisy = torch.sqrt(torch.clamp((control + noise_real_c)**2 + noise_imag_c**2, min=1e-12))
+                    label_noisy = torch.sqrt(torch.clamp((label + noise_real_l)**2 + noise_imag_l**2, min=1e-12))
                     signals = control_noisy - label_noisy
                 else:
                     control = signals + static_tissue
@@ -142,8 +143,9 @@ class NoiseInjector:
                     noise_real_l = np.random.randn(*signals.shape) * noise_sigma * s_vec
                     noise_imag_l = np.random.randn(*signals.shape) * noise_sigma * s_vec
 
-                    control_noisy = np.sqrt((control + noise_real_c)**2 + noise_imag_c**2)
-                    label_noisy = np.sqrt((label + noise_real_l)**2 + noise_imag_l**2)
+                    # Epsilon guard prevents NaN from sqrt of negative values due to float precision
+                    control_noisy = np.sqrt(np.maximum((control + noise_real_c)**2 + noise_imag_c**2, 1e-12))
+                    label_noisy = np.sqrt(np.maximum((label + noise_real_l)**2 + noise_imag_l**2, 1e-12))
                     signals = control_noisy - label_noisy
                 # For Rician, we don't add to total_noise since we modified signals directly
             else:
@@ -261,8 +263,9 @@ class NoiseInjector:
                     noise_real_l = noise_real_l * target_scale / (noise_real_l.std(dim=(2, 3), keepdim=True) + 1e-6)
                     noise_imag_l = noise_imag_l * target_scale / (noise_imag_l.std(dim=(2, 3), keepdim=True) + 1e-6)
 
-                control_noisy = torch.sqrt((control + noise_real_c)**2 + noise_imag_c**2)
-                label_noisy = torch.sqrt((label + noise_real_l)**2 + noise_imag_l**2)
+                # Epsilon guard prevents NaN from sqrt of negative values due to float precision
+                control_noisy = torch.sqrt(torch.clamp((control + noise_real_c)**2 + noise_imag_c**2, min=1e-12))
+                label_noisy = torch.sqrt(torch.clamp((label + noise_real_l)**2 + noise_imag_l**2, min=1e-12))
                 signals = control_noisy - label_noisy
             else:
                 # Gaussian noise (legacy)
@@ -347,8 +350,9 @@ class NoiseInjector:
                         noise_real_l[b] = noise_real_l[b] * target_scale / (noise_real_l[b].std(axis=(1, 2), keepdims=True) + 1e-6)
                         noise_imag_l[b] = noise_imag_l[b] * target_scale / (noise_imag_l[b].std(axis=(1, 2), keepdims=True) + 1e-6)
 
-                control_noisy = np.sqrt((control + noise_real_c)**2 + noise_imag_c**2)
-                label_noisy = np.sqrt((label + noise_real_l)**2 + noise_imag_l**2)
+                # Epsilon guard prevents NaN from sqrt of negative values due to float precision
+                control_noisy = np.sqrt(np.maximum((control + noise_real_c)**2 + noise_imag_c**2, 1e-12))
+                label_noisy = np.sqrt(np.maximum((label + noise_real_l)**2 + noise_imag_l**2, 1e-12))
                 output = control_noisy - label_noisy
             else:
                 noise = np.random.randn(B, C, H, W) * noise_sigma * s_vec
@@ -395,8 +399,9 @@ class SpatialNoiseEngine:
         # Rician: magnitude of complex signal with Gaussian real/imag noise
         noise_real = np.random.normal(0, sigma, signal.shape)
         noise_imag = np.random.normal(0, sigma, signal.shape)
-        
-        noisy_signal = np.sqrt((signal + noise_real)**2 + noise_imag**2)
+
+        # Epsilon guard prevents NaN from sqrt of negative values due to float precision
+        noisy_signal = np.sqrt(np.maximum((signal + noise_real)**2 + noise_imag**2, 1e-12))
         
         return noisy_signal.astype(np.float32)
     
@@ -438,8 +443,8 @@ class SpatialNoiseEngine:
         noise_real = noise_real * (sigma / (np.std(noise_real) + 1e-10))
         noise_imag = noise_imag * (sigma / (np.std(noise_imag) + 1e-10))
         
-        # Rician combination
-        noisy_signal = np.sqrt((signal + noise_real)**2 + noise_imag**2)
+        # Rician combination (epsilon guard prevents NaN from float precision)
+        noisy_signal = np.sqrt(np.maximum((signal + noise_real)**2 + noise_imag**2, 1e-12))
         
         return noisy_signal.astype(np.float32)
     

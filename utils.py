@@ -265,7 +265,6 @@ def get_grid_search_initial_guess(
     # --- 1. Define the search grid ---
     # IMPORTANT: Must stay within LS optimizer bounds: CBF [0, 200], ATT [100, 4000]
     cbf_values_grid = np.linspace(1, 200, 20)  # 20 steps for CBF, extended to 200
-    att_values_grid = np.linspace(100, 4000, 22) # 22 steps for ATT, within [100, 4000]
 
     # --- 2. Pre-calculate model parameters ---
     t1_artery = asl_params['T1_artery']
@@ -283,11 +282,8 @@ def get_grid_search_initial_guess(
     best_mse = float('inf')
     best_params = [50.0 / 6000.0, 1500.0] # Default fallback
 
-    # --- 3. Multi-start: coarse ATT grid with analytic CBF solve ---
-    # For each candidate ATT, evaluate a range of CBF values and pick the best.
-    # This places the solver in the correct basin of attraction and avoids
-    # the topology trap where ATT→6000ms compensates for amplitude mismatch.
-    coarse_att_grid = np.array([500, 1000, 1500, 2000, 2500, 3000, 3500])
+    # --- 3. Expanded coarse ATT grid (15 points for better coverage) ---
+    coarse_att_grid = np.linspace(200, 3500, 15)
 
     for att in coarse_att_grid:
         for cbf in cbf_values_grid:
@@ -326,3 +322,140 @@ def get_grid_search_initial_guess(
                 best_params = [cbf_cgs, att]
 
     return best_params
+
+
+def get_multi_start_initial_guesses(
+    observed_signal: np.ndarray,
+    plds: np.ndarray,
+    asl_params: dict,
+    n_candidates: int = 5
+) -> list:
+    """
+    Multi-start grid search returning top-N candidate initial guesses.
+
+    Expands the ATT grid to 15 points and returns the top candidates
+    ranked by residual. This allows running NLLS from multiple starting
+    points and selecting the result with lowest residual, avoiding
+    local minima traps.
+
+    Args:
+        observed_signal: Combined [PCASL, VSASL] signal vector
+        plds: PLD values in ms
+        asl_params: Dict with physics parameters
+        n_candidates: Number of top candidates to return (default 5)
+
+    Returns:
+        List of [cbf_cgs, att] pairs, sorted by ascending MSE
+    """
+    cbf_values_grid = np.linspace(1, 200, 20)
+
+    t1_artery = asl_params['T1_artery']
+    t_tau = asl_params['T_tau']
+    t2_factor = asl_params.get('T2_factor', 1.0)
+    alpha_bs1 = asl_params.get('alpha_BS1', 1.0)
+    t_sat_vs = asl_params.get('T_sat_vs', 2000.0)
+    alpha_pcasl = asl_params['alpha_PCASL'] * (alpha_bs1**4)
+    alpha_vsasl = asl_params['alpha_VSASL'] * (alpha_bs1**3)
+
+    num_plds = len(plds)
+    observed_pcasl = observed_signal[:num_plds]
+    observed_vsasl = observed_signal[num_plds:]
+
+    # Collect all candidates with their MSE
+    candidates = []
+
+    coarse_att_grid = np.linspace(200, 3500, 15)
+
+    for att in coarse_att_grid:
+        best_mse_for_att = float('inf')
+        best_cbf_for_att = 50.0 / 6000.0
+
+        for cbf in cbf_values_grid:
+            cbf_cgs = cbf / 6000.0
+            pcasl_pred = _generate_pcasl_signal_jit(
+                plds, att, cbf_cgs, t1_artery, t_tau, alpha_pcasl, t2_factor
+            )
+            vsasl_pred = _generate_vsasl_signal_jit(
+                plds, att, cbf_cgs, t1_artery, alpha_vsasl, t2_factor, t_sat_vs
+            )
+            mse = np.mean((observed_pcasl - pcasl_pred)**2) + \
+                  np.mean((observed_vsasl - vsasl_pred)**2)
+            if mse < best_mse_for_att:
+                best_mse_for_att = mse
+                best_cbf_for_att = cbf_cgs
+
+        candidates.append((best_mse_for_att, [best_cbf_for_att, att]))
+
+    # Sort by MSE and return top-N
+    candidates.sort(key=lambda x: x[0])
+    return [c[1] for c in candidates[:n_candidates]]
+
+
+def fit_multi_start_ls(
+    observed_signal: np.ndarray,
+    plds: np.ndarray,
+    asl_params: dict,
+    n_starts: int = 5
+) -> tuple:
+    """
+    Multi-start NLLS fitting. Runs fit_PCVSASL_misMatchPLD_vectInit_pep from
+    multiple initial guesses and returns the result with lowest residual.
+
+    This avoids local minima traps, especially the topology trap where the
+    solver pushes ATT to high values to compensate for amplitude mismatch.
+
+    Args:
+        observed_signal: Combined [PCASL, VSASL] signal vector
+        plds: PLD values in ms
+        asl_params: Dict with physics parameters
+        n_starts: Number of starting points to try (default 5)
+
+    Returns:
+        Tuple of (beta, conintval, rmse, df) from the best fit
+    """
+    from multiverse_functions import fit_PCVSASL_misMatchPLD_vectInit_pep
+
+    # Get multiple initial guesses
+    init_guesses = get_multi_start_initial_guesses(
+        observed_signal, plds, asl_params, n_candidates=n_starts
+    )
+
+    num_plds = len(plds)
+    pldti = np.column_stack([plds, plds])
+    signal_reshaped = observed_signal.reshape((num_plds, 2), order='F')
+
+    best_result = None
+    best_rmse = float('inf')
+
+    for init_guess in init_guesses:
+        try:
+            beta, conintval, rmse, df = fit_PCVSASL_misMatchPLD_vectInit_pep(
+                pldti, signal_reshaped, init_guess,
+                asl_params['T1_artery'],
+                asl_params['T_tau'],
+                asl_params.get('T2_factor', 1.0),
+                asl_params.get('alpha_BS1', 1.0),
+                asl_params['alpha_PCASL'],
+                asl_params['alpha_VSASL']
+            )
+            if rmse < best_rmse:
+                best_rmse = rmse
+                best_result = (beta, conintval, rmse, df)
+        except Exception:
+            continue
+
+    if best_result is None:
+        # Fallback: single start with default guess
+        default_init = [50.0 / 6000.0, 1500.0]
+        beta, conintval, rmse, df = fit_PCVSASL_misMatchPLD_vectInit_pep(
+            pldti, signal_reshaped, default_init,
+            asl_params['T1_artery'],
+            asl_params['T_tau'],
+            asl_params.get('T2_factor', 1.0),
+            asl_params.get('alpha_BS1', 1.0),
+            asl_params['alpha_PCASL'],
+            asl_params['alpha_VSASL']
+        )
+        best_result = (beta, conintval, rmse, df)
+
+    return best_result

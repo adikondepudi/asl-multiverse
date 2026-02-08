@@ -1,0 +1,67 @@
+# Ablation: Capacity-matched U-Net (same params as AmplitudeAware, NO FiLM/output modulation)
+#
+# CRITICAL ABLATION: Isolates whether AmplitudeAwareSpatialASLNet's performance gain
+# (CBF MAE 0.46 vs 3.47 for baseline) comes from:
+#   (a) The FiLM mechanism and amplitude-aware conditioning, OR
+#   (b) Simply having ~108K extra parameters
+#
+# Evidence motivating this: The amplitude auditor found that a model with 0.36
+# sensitivity ratio performs equally well as models with 90+ ratios, suggesting
+# the architectural capacity (not amplitude sensitivity) may be the real driver.
+#
+# Expected outcomes:
+#   If CapacityMatched ~ AmplitudeAware -> Extra capacity is the driver (FiLM is cosmetic)
+#   If AmplitudeAware >> CapacityMatched -> FiLM mechanism genuinely helps
+#   If CapacityMatched ~ Baseline -> Extra params alone don't help; need FiLM
+#
+# Parameter counts:
+#   SpatialASLNet:            1,929,634 (baseline)
+#   CapacityMatchedSpatialASLNet: 2,038,818 (+109,184)
+#   AmplitudeAwareSpatialASLNet:  2,038,307 (+108,673)
+
+training:
+  model_class_name: "CapacityMatchedSpatialASLNet"
+  hidden_sizes: [32, 64, 128, 256]
+
+  # Same loss config as baseline SpatialASLNet and AmplitudeAware experiments
+  loss_type: "l1"
+  att_scale: 1.0
+  cbf_weight: 1.0
+  att_weight: 1.0
+  dc_weight: 0.0
+  variance_weight: 0.1
+
+  learning_rate: 0.001
+  n_ensembles: 3
+  training_epochs: 50
+  batch_size: 16
+  early_stopping_patience: 15
+
+data:
+  dataset_path: "asl_spatial_dataset_100k"
+  pld_values: [500, 1000, 1500, 2000, 2500, 3000]
+  noise_type: "rician"
+  data_noise_components: ["thermal"]
+  normalization_mode: "global_scale"
+  global_scale_factor: 1.0
+
+simulation:
+  T1_artery: 1650.0
+  T_tau: 1800.0
+  alpha_PCASL: 0.85
+  alpha_VSASL: 0.56
+  domain_randomization:
+    enabled: true
+    T1_artery_range: [1550.0, 2150.0]
+    alpha_PCASL_range: [0.75, 0.95]
+    alpha_VSASL_range: [0.40, 0.70]
+    alpha_BS1_range: [0.85, 1.0]
+    T_tau_perturb: 0.10
+
+noise_config:
+  snr_range: [5, 30]
+
+_experiment:
+  name: ablation_capacity_matched
+  description: U-Net with same param count as AmplitudeAware but NO FiLM/output modulation
+  hypothesis: Isolates whether FiLM mechanism or extra capacity drives performance gain

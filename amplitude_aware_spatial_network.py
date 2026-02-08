@@ -382,7 +382,9 @@ class AmplitudeAwareSpatialASLNet(nn.Module):
 
         att_pred = att_spatial
 
-        # Placeholder uncertainties
+        # Placeholder uncertainties (hardcoded, never learned)
+        # TODO: Replace with learned uncertainty head if calibrated uncertainty is needed.
+        # Current value exp(-5.0) ~ 0.0067 variance is arbitrary.
         cbf_logvar = torch.zeros_like(cbf_pred) - 5.0
         att_logvar = torch.zeros_like(att_pred) - 5.0
 
@@ -402,6 +404,12 @@ class AmplitudeAwareSpatialASLNet(nn.Module):
 class AmplitudeAwareLoss(nn.Module):
     """
     Loss function for amplitude-aware network.
+
+    WARNING: DEAD CODE - This class is defined but never instantiated.
+    Training always uses MaskedSpatialLoss from spatial_asl_network.py
+    (see asl_trainer.py and main.py). Kept for reference only.
+
+    TODO: Either integrate into training pipeline or remove entirely.
 
     Combines:
     1. Supervised loss on CBF/ATT predictions (normalized space)

@@ -205,7 +205,7 @@ def generate_uniform_phantom(cbf_value: float, att_value: float,
     from asl_simulation import ASLParameters, ASLSimulator
 
     params = ASLParameters(
-        T1_artery=config.get('T1_artery', 1650.0)  # 3T consensus (Alsop 2015),
+        T1_artery=config.get('T1_artery', 1650.0),  # 3T consensus (Alsop 2015)
         T_tau=config.get('T_tau', 1800.0),
         alpha_PCASL=config.get('alpha_PCASL', 0.85),
         alpha_VSASL=config.get('alpha_VSASL', 0.56),

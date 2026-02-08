@@ -102,7 +102,15 @@ class EnhancedASLTrainer:
             logger.info(f"Ablation Config - Global Scale Factor: {self.global_scale_factor}")
         
         logger.info("Initializing models (Float32)...")
-        self.models = [model_class(**model_config).to(self.device) for _ in range(n_ensembles)]
+        # Use different random seeds per ensemble member for weight initialization diversity.
+        # This ensures ensemble members explore different regions of the loss landscape.
+        base_seed = model_config.get('random_seed', 42)
+        self.models = []
+        for i in range(n_ensembles):
+            torch.manual_seed(base_seed + i * 1000)
+            self.models.append(model_class(**model_config).to(self.device))
+        # Restore non-deterministic state for training
+        torch.manual_seed(int(time.time()))
 
         # torch.compile: ~20-30% speedup on PyTorch 2.0+ (A100 benefits most)
         if self.use_compile and hasattr(torch, 'compile'):
@@ -245,7 +253,8 @@ class EnhancedASLTrainer:
                 temporal_std = signals.std(dim=1, keepdim=True) + 1e-6  # (B, 1, H, W)
                 normalized_signals = (signals - temporal_mean) / temporal_std
 
-            return normalized_signals
+            # Clamp to prevent extreme values from corrupting training
+            return torch.clamp(normalized_signals, -15.0, 15.0)
 
         # For 1D models, check if noise is configured
         if self.noise_scale_vec_gpu is None:
@@ -357,7 +366,9 @@ class EnhancedASLTrainer:
             self.optimizers = [torch.optim.AdamW(m.parameters(), lr=self.lr_base, weight_decay=self.weight_decay) for m in self.models]
         
         total_steps = steps_per_epoch * n_epochs
-        self.schedulers = [torch.optim.lr_scheduler.OneCycleLR(opt, max_lr=[pg['lr'] for pg in opt.param_groups], total_steps=total_steps) for opt in self.optimizers]
+        # pct_start=0.05: 5% warmup phase prevents early training instability
+        # (default is 0.3 which is too long for ASL training)
+        self.schedulers = [torch.optim.lr_scheduler.OneCycleLR(opt, max_lr=[pg['lr'] for pg in opt.param_groups], total_steps=total_steps, pct_start=0.05) for opt in self.optimizers]
         
         patience_counters = [0] * self.n_ensembles; self.overall_best_val_losses = [float('inf')] * self.n_ensembles
         models_save_dir = output_dir / 'trained_models'
@@ -458,21 +469,35 @@ class EnhancedASLTrainer:
             
             for model_idx, model in enumerate(models):
                 optimizers[model_idx].zero_grad(set_to_none=False)
-                
+
                 with torch.amp.autocast(device_type=self.device.type, dtype=torch.float16):
                     outputs = model(processed_signals)
                     outputs_f32 = tuple(o.float() if isinstance(o, torch.Tensor) else o for o in outputs)
-                    
+
+                    # NaN guard on model outputs
+                    if any(torch.isnan(o).any() or torch.isinf(o).any()
+                           for o in outputs_f32 if isinstance(o, torch.Tensor)):
+                        if model_idx == 0:
+                            logger.warning(f"NaN/Inf in model output at step {self.global_step}, skipping batch for model {model_idx}")
+                        continue
+
                     if isinstance(target_for_loss, dict):
                         # Unpack for MaskedSpatialLoss: cbf, att, mask
-                        loss_dict = self.custom_loss_fn(outputs_f32[0], outputs_f32[1], 
-                                                        target_for_loss['cbf'], target_for_loss['att'], 
+                        loss_dict = self.custom_loss_fn(outputs_f32[0], outputs_f32[1],
+                                                        target_for_loss['cbf'], target_for_loss['att'],
                                                         target_for_loss['mask'], processed_signals)
                         loss = loss_dict['total_loss']
                         comps = loss_dict
                     else:
                         loss, comps = self.custom_loss_fn(model_outputs=outputs_f32, targets=target_for_loss, global_epoch=epoch)
-                
+
+                # NaN/Inf loss guard: skip batch to prevent gradient corruption
+                if torch.isnan(loss) or torch.isinf(loss):
+                    if model_idx == 0:
+                        logger.warning(f"NaN/Inf loss at step {self.global_step}, skipping batch for model {model_idx}")
+                    optimizers[model_idx].zero_grad()
+                    continue
+
                 self.scaler.scale(loss).backward()
                 self.scaler.unscale_(optimizers[model_idx])
                 torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)

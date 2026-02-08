@@ -67,42 +67,67 @@ def generate_and_save_chunk(args):
 def generate_spatial_chunk(args):
     """
     Worker function to generate one chunk of SPATIAL (2D) ASL data.
-    
-    Output format: 
+
+    Output format:
         signals: (batch_per_chunk, 2*n_plds, H, W) - PCASL + VSASL channels
         targets: (batch_per_chunk, 2, H, W) - CBF and ATT maps
+
+    Domain randomization: physics parameters are sampled per-phantom to prevent
+    overfitting to fixed acquisition parameters. This is critical because when
+    dc_weight=0.0, the KineticModel (which does domain randomization at training
+    time) is never called.
     """
     chunk_id, samples_per_chunk, plds, output_dir, config_dict, size = args
-    
+
     np.random.seed(int(time.time()) + chunk_id * 1000)
-    
+
     asl_params = ASLParameters(**{k:v for k,v in config_dict.items() if k in ASLParameters.__annotations__})
     simulator = RealisticASLSimulator(params=asl_params)
     phantom_gen = SpatialPhantomGenerator(size=size, pve_sigma=1.0)
-    
+
+    # Domain randomization ranges (per-phantom sampling)
+    domain_rand = config_dict.get('domain_randomization', {})
+    use_domain_rand = domain_rand.get('enabled', False)
+    if use_domain_rand:
+        t1_range = domain_rand.get('T1_artery_range', [1550.0, 2150.0])
+        alpha_pcasl_range = domain_rand.get('alpha_PCASL_range', [0.75, 0.95])
+        alpha_vsasl_range = domain_rand.get('alpha_VSASL_range', [0.40, 0.70])
+        alpha_bs1_range = domain_rand.get('alpha_BS1_range', [0.85, 1.0])
+        t_tau_perturb = domain_rand.get('T_tau_perturb', 0.10)
+
     n_plds = len(plds)
     signals_batch = []
     targets_batch = []
-    
+
     # Pre-compute physics constants for vectorized signal generation
     plds_bc = plds[:, np.newaxis, np.newaxis].astype(np.float32)
-    t1_b = asl_params.T1_artery
-    tau = asl_params.T_tau
     lambda_b = 0.90
-    t2_f = asl_params.T2_factor
-    alpha_p = asl_params.alpha_PCASL * (asl_params.alpha_BS1**4)
-    alpha_v = asl_params.alpha_VSASL * (asl_params.alpha_BS1**3)
     
     for _ in range(samples_per_chunk):
         # Generate phantom
         cbf_map, att_map, _ = phantom_gen.generate_phantom(include_pathology=True)
-        
+
+        # Sample physics parameters per-phantom (domain randomization)
+        if use_domain_rand:
+            t1_b = np.random.uniform(*t1_range)
+            alpha_bs1 = np.random.uniform(*alpha_bs1_range)
+            alpha_p = np.random.uniform(*alpha_pcasl_range) * (alpha_bs1**4)
+            alpha_v = np.random.uniform(*alpha_vsasl_range) * (alpha_bs1**3)
+            tau = asl_params.T_tau * (1 + np.random.uniform(-t_tau_perturb, t_tau_perturb))
+        else:
+            t1_b = asl_params.T1_artery
+            alpha_p = asl_params.alpha_PCASL * (asl_params.alpha_BS1**4)
+            alpha_v = asl_params.alpha_VSASL * (asl_params.alpha_BS1**3)
+            tau = asl_params.T_tau
+        t2_f = asl_params.T2_factor
+        t_sat_vs = asl_params.T_sat_vs
+
         # Vectorized signal generation using NumPy broadcasting
         att_bc = att_map[np.newaxis, :, :].astype(np.float32)
         # CRITICAL: Convert CBF from ml/100g/min to ml/g/s (divide by 6000)
         # This matches asl_simulation.py physics equations
         cbf_bc = (cbf_map / 6000.0)[np.newaxis, :, :].astype(np.float32)
-        
+
         # --- PCASL Signal ---
         mask_arrived = (plds_bc >= att_bc)
         mask_transit = (plds_bc < att_bc) & (plds_bc >= (att_bc - tau))
@@ -120,14 +145,21 @@ def generate_spatial_chunk(args):
         pcasl_sig[mask_transit] = sig_p_transit[mask_transit]
         
         # --- VSASL Signal ---
+        # SIB (Saturation-Inversion-Balance) factor: when ATT > T_sat_vs,
+        # labeled blood partially recovers before entering imaging slab.
+        # SIB=1.0 means full inversion; SIB<1.0 means partial recovery.
+        sib = np.where(att_bc > t_sat_vs,
+                       1.0 - np.exp(-(att_bc - t_sat_vs) / t1_b),
+                       1.0)
+
         mask_vs_arrived = (plds_bc > att_bc)
-        
-        sig_v_early = (2 * alpha_v * cbf_bc * (plds_bc / 1000.0) *
+
+        sig_v_early = (2 * alpha_v * cbf_bc * sib * (plds_bc / 1000.0) *
                       np.exp(-plds_bc / t1_b) * t2_f) / lambda_b
-        
-        sig_v_late = (2 * alpha_v * cbf_bc * (att_bc / 1000.0) *
+
+        sig_v_late = (2 * alpha_v * cbf_bc * sib * (att_bc / 1000.0) *
                      np.exp(-plds_bc / t1_b) * t2_f) / lambda_b
-        
+
         vsasl_sig = np.where(mask_vs_arrived, sig_v_late, sig_v_early)
         
         # Stack: (2*n_plds, H, W)
@@ -163,22 +195,55 @@ if __name__ == '__main__':
     parser.add_argument("--spatial", action='store_true', help="Generate 2D spatial data instead of 1D voxels.")
     parser.add_argument("--image-size", type=int, default=64, help="Image size for spatial mode (default: 64).")
     parser.add_argument("--spatial-chunk-size", type=int, default=500, help="Samples per chunk in spatial mode.")
-    
+
+    # Domain randomization: vary physics parameters per-phantom for robustness
+    parser.add_argument("--domain-rand", action='store_true',
+                        help="Enable domain randomization of physics parameters per-phantom.")
+    parser.add_argument("--config", type=str, default=None,
+                        help="YAML config file to load domain_randomization settings from.")
+
     args = parser.parse_args()
 
     output_path = Path(args.output_dir)
     output_path.mkdir(parents=True, exist_ok=True)
-    
+
     # Use CLI PLDs or FeatureRegistry default
     if args.pld_values is not None:
         plds_np = np.array(args.pld_values)
     else:
         plds_np = np.array(FeatureRegistry.DEFAULT_PLDS)
-    
+
     print(f"Using PLDs: {plds_np}")
-    
+
     # Use FeatureRegistry default physics
     sim_config = FeatureRegistry.DEFAULT_PHYSICS.copy()
+
+    # Load domain randomization config from YAML if provided
+    if args.config:
+        import yaml
+        with open(args.config, 'r') as f:
+            yaml_config = yaml.safe_load(f) or {}
+        # Look for domain_randomization in simulation section or top-level
+        dr_config = None
+        if 'simulation' in yaml_config and 'domain_randomization' in yaml_config['simulation']:
+            dr_config = yaml_config['simulation']['domain_randomization']
+        elif 'domain_randomization' in yaml_config:
+            dr_config = yaml_config['domain_randomization']
+        if dr_config:
+            sim_config['domain_randomization'] = dr_config
+            print(f"Domain randomization loaded from config: {dr_config}")
+
+    # Enable domain randomization via CLI flag (uses default ranges)
+    if args.domain_rand and 'domain_randomization' not in sim_config:
+        sim_config['domain_randomization'] = {
+            'enabled': True,
+            'T1_artery_range': [1550.0, 2150.0],
+            'alpha_PCASL_range': [0.75, 0.95],
+            'alpha_VSASL_range': [0.40, 0.70],
+            'alpha_BS1_range': [0.85, 1.0],
+            'T_tau_perturb': 0.10,
+        }
+        print("Domain randomization enabled with default ranges.")
     
     if args.spatial:
         # Spatial mode: Generate 2D slices
