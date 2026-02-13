@@ -4,8 +4,8 @@ from typing import Optional, Dict
 import multiprocessing as mp
 import time
 import torch
-from asl_simulation import _generate_pcasl_signal_jit, _generate_vsasl_signal_jit
-from feature_registry import FeatureRegistry
+from simulation.asl_simulation import _generate_pcasl_signal_jit, _generate_vsasl_signal_jit
+from utils.feature_registry import FeatureRegistry
 
 def process_signals_dynamic(raw_signals, norm_stats, config, t1_values=None, z_values=None):
     """

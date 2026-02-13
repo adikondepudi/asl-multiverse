@@ -12,8 +12,8 @@ import os
 import argparse
 import time
 
-from asl_simulation import ASLParameters
-from enhanced_simulation import RealisticASLSimulator, PhysiologicalVariation, SpatialPhantomGenerator
+from simulation.asl_simulation import ASLParameters
+from simulation.enhanced_simulation import RealisticASLSimulator, PhysiologicalVariation, SpatialPhantomGenerator
 
 
 def generate_and_save_chunk(args):

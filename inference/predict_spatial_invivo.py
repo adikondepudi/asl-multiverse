@@ -24,8 +24,8 @@ from tqdm import tqdm
 from typing import Dict, List, Tuple, Optional
 
 import yaml
-from spatial_asl_network import SpatialASLNet
-from amplitude_aware_spatial_network import AmplitudeAwareSpatialASLNet
+from models.spatial_asl_network import SpatialASLNet
+from models.amplitude_aware_spatial_network import AmplitudeAwareSpatialASLNet
 
 
 def find_and_sort_files_by_pld(subject_dir: Path, pattern: str) -> List[Path]:

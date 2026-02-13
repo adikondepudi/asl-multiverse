@@ -97,8 +97,8 @@ class SpatialValidator:
 
     def _load_ensemble(self) -> List[torch.nn.Module]:
         """Load trained spatial models (SpatialASLNet or AmplitudeAwareSpatialASLNet)."""
-        from spatial_asl_network import SpatialASLNet
-        from amplitude_aware_spatial_network import AmplitudeAwareSpatialASLNet
+        from models.spatial_asl_network import SpatialASLNet
+        from models.amplitude_aware_spatial_network import AmplitudeAwareSpatialASLNet
 
         # Find model files
         models_dir = self.run_dir / 'trained_models'
@@ -477,8 +477,8 @@ def run_smoothed_ls(signals: np.ndarray, plds: np.ndarray, asl_params: dict,
         Dict mapping sigma -> {'cbf': (H,W), 'att': (H,W)} fitted parameter maps
     """
     from scipy.ndimage import gaussian_filter
-    from utils import get_grid_search_initial_guess
-    from multiverse_functions import fit_PCVSASL_misMatchPLD_vectInit_pep
+    from utils.helpers import get_grid_search_initial_guess
+    from baselines.multiverse_functions import fit_PCVSASL_misMatchPLD_vectInit_pep
 
     if sigmas is None:
         sigmas = [0.0, 1.0, 2.0, 3.0]
@@ -553,7 +553,7 @@ def compute_statistical_significance(nn_pred: np.ndarray, ls_pred: np.ndarray,
     Returns:
         Dict with statistical test results
     """
-    from validation_metrics import test_win_rate_significance
+    from validation.validation_metrics import test_win_rate_significance
 
     # Compute absolute errors
     nn_errors = np.abs(nn_pred - ground_truth)

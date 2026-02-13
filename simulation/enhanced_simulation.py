@@ -3,8 +3,8 @@ import numpy as np
 from typing import Dict, List, Tuple, Optional, Union
 from dataclasses import dataclass
 from scipy.ndimage import gaussian_filter
-from asl_simulation import ASLSimulator, ASLParameters
-from noise_engine import SpatialNoiseEngine
+from simulation.asl_simulation import ASLSimulator, ASLParameters
+from simulation.noise_engine import SpatialNoiseEngine
 import multiprocessing as mp
 from tqdm import tqdm
 import logging

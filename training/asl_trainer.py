@@ -11,10 +11,10 @@ import time
 import traceback
 from pathlib import Path
 
-from enhanced_asl_network import CustomLoss, DisentangledASLNet
-from spatial_asl_network import KineticModel
-from feature_registry import FeatureRegistry
-from noise_engine import NoiseInjector
+from models.enhanced_asl_network import CustomLoss, DisentangledASLNet
+from models.spatial_asl_network import KineticModel
+from utils.feature_registry import FeatureRegistry
+from simulation.noise_engine import NoiseInjector
 
 import logging
 logger = logging.getLogger(__name__)

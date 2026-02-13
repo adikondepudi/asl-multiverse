@@ -25,14 +25,14 @@ except ImportError as e:
 # --- 2. Custom Imports ---
 try:
     import yaml
-    from asl_simulation import ASLParameters
-    from enhanced_simulation import RealisticASLSimulator, SpatialPhantomGenerator
-    from enhanced_asl_network import DisentangledASLNet
-    from spatial_asl_network import SpatialASLNet, DualEncoderSpatialASLNet  # Spatial models (U-Net)
-    from amplitude_aware_spatial_network import AmplitudeAwareSpatialASLNet  # Amplitude-aware model
-    from utils import process_signals_dynamic, get_grid_search_initial_guess
-    from multiverse_functions import fit_PCVSASL_misMatchPLD_vectInit_pep
-    from feature_registry import FeatureRegistry, validate_signals, validate_norm_stats
+    from simulation.asl_simulation import ASLParameters
+    from simulation.enhanced_simulation import RealisticASLSimulator, SpatialPhantomGenerator
+    from models.enhanced_asl_network import DisentangledASLNet
+    from models.spatial_asl_network import SpatialASLNet, DualEncoderSpatialASLNet  # Spatial models (U-Net)
+    from models.amplitude_aware_spatial_network import AmplitudeAwareSpatialASLNet  # Amplitude-aware model
+    from utils.helpers import process_signals_dynamic, get_grid_search_initial_guess
+    from baselines.multiverse_functions import fit_PCVSASL_misMatchPLD_vectInit_pep
+    from utils.feature_registry import FeatureRegistry, validate_signals, validate_norm_stats
     print("--- [DEBUG] Custom ASL modules imported successfully. ---")
 except ImportError as e:
     print(f"!!! [CRITICAL ERROR] Could not import project files: {e}")
