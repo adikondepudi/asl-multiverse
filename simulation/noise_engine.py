@@ -123,7 +123,7 @@ class NoiseInjector:
                 if is_torch:
                     # Control = static + difference
                     control = signals + static_tissue
-                    label = torch.full_like(signals, static_tissue.item() if isinstance(static_tissue, torch.Tensor) else float(static_tissue))
+                    label = static_tissue.expand_as(signals)
 
                     noise_real_c = torch.randn_like(signals) * noise_sigma * s_vec
                     noise_imag_c = torch.randn_like(signals) * noise_sigma * s_vec
