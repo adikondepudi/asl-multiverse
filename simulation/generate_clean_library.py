@@ -145,12 +145,10 @@ def generate_spatial_chunk(args):
         pcasl_sig[mask_transit] = sig_p_transit[mask_transit]
         
         # --- VSASL Signal ---
-        # SIB (Saturation-Inversion-Balance) factor: when ATT > T_sat_vs,
-        # labeled blood partially recovers before entering imaging slab.
-        # SIB=1.0 means full inversion; SIB<1.0 means partial recovery.
-        sib = np.where(att_bc > t_sat_vs,
-                       1.0 - np.exp(-(att_bc - t_sat_vs) / t1_b),
-                       1.0)
+        # SIB: saturation recovery factor (Qin et al. MRM 2022)
+        # Constant correction for blood magnetization recovery during T_sat.
+        # Independent of ATT — all blood starts from zero at saturation pulse.
+        sib = 1.0 - np.exp(-t_sat_vs / t1_b)
 
         mask_vs_arrived = (plds_bc > att_bc)
 

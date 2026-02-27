@@ -24,7 +24,7 @@ from tqdm import tqdm
 from typing import Dict, List, Tuple, Optional
 
 import yaml
-from models.spatial_asl_network import SpatialASLNet
+from models.spatial_asl_network import SpatialASLNet, DualEncoderSpatialASLNet, CapacityMatchedSpatialASLNet
 from models.amplitude_aware_spatial_network import AmplitudeAwareSpatialASLNet
 
 
@@ -129,6 +129,12 @@ def load_spatial_model(model_dir: Path, device: torch.device) -> Tuple[List[torc
                     use_film_at_decoder=training_config.get('use_film_at_decoder', True),
                     use_amplitude_output_modulation=training_config.get('use_amplitude_output_modulation', True),
                 )
+        elif model_class_name == 'DualEncoderSpatialASLNet':
+            features = training_config.get('hidden_sizes', [32, 64, 128, 256])
+            model = DualEncoderSpatialASLNet(n_plds=n_plds, features=features)
+        elif model_class_name == 'CapacityMatchedSpatialASLNet':
+            features = training_config.get('hidden_sizes', [32, 64, 128, 256])
+            model = CapacityMatchedSpatialASLNet(n_plds=n_plds, features=features)
         else:
             model = SpatialASLNet(n_plds=n_plds)
 

@@ -65,6 +65,7 @@ class FeatureRegistry:
     DEFAULT_PHYSICS: Dict[str, float] = {
         'T1_artery': 1650.0,  # 3T consensus (Alsop 2015)
         'T_tau': 1800.0,
+        'T_sat_vs': 2000.0,   # VSASL saturation delay (ms)
         'alpha_PCASL': 0.85,
         'alpha_VSASL': 0.56,
         'T2_factor': 1.0,

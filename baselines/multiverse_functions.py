@@ -4,8 +4,9 @@ import numpy as np
 from scipy.optimize import least_squares
 from scipy.stats import t
 
-def fun_PCVSASL_misMatchPLD_vect_pep(beta, PLDTI, T1_artery, T_tau, T2_factor, 
-                                    alpha_BS1, alpha_PCASL, alpha_VSASL):
+def fun_PCVSASL_misMatchPLD_vect_pep(beta, PLDTI, T1_artery, T_tau, T2_factor,
+                                    alpha_BS1, alpha_PCASL, alpha_VSASL,
+                                    T_sat_vs=2000.0):
     """
     Calculate combined PCASL and VSASL signal for different PLDs/TIs.
     
@@ -73,22 +74,27 @@ def fun_PCVSASL_misMatchPLD_vect_pep(beta, PLDTI, T1_artery, T_tau, T2_factor,
         diff_sig[index_0, 0] = 0
     
     # VSASL calculations
+    # SIB: saturation recovery factor (Qin et al. MRM 2022)
+    # Constant correction for blood magnetization recovery during T_sat
+    SIB = 1.0 - np.exp(-T_sat_vs / T1_artery)
+
     index_1_v = ATT <= TI
-    
+
     # VSASL: TI >= ATT
     if np.any(index_1_v):
-        diff_sig[index_1_v, 1] = (2 * M0_b * CBF * alpha2 / lambda_blood * ATT / 1000 *
+        diff_sig[index_1_v, 1] = (2 * M0_b * CBF * alpha2 * SIB / lambda_blood * ATT / 1000 *
                                  np.exp(-TI[index_1_v]/T1_artery) * T2_factor)
-    
+
     # VSASL: TI < ATT
     if np.any(~index_1_v):
-        diff_sig[~index_1_v, 1] = (2 * M0_b * CBF * alpha2 / lambda_blood * TI[~index_1_v] / 1000 *
+        diff_sig[~index_1_v, 1] = (2 * M0_b * CBF * alpha2 * SIB / lambda_blood * TI[~index_1_v] / 1000 *
                                   np.exp(-TI[~index_1_v]/T1_artery) * T2_factor)
     
     return diff_sig
 
 def fit_PCVSASL_misMatchPLD_vectInit_pep(PLDTI, diff_sig, Init, T1_artery, T_tau, T2_factor,
-                                        alpha_BS1, alpha_PCASL, alpha_VSASL):
+                                        alpha_BS1, alpha_PCASL, alpha_VSASL,
+                                        T_sat_vs=2000.0):
     """
     Fit combined PCASL and VSASL data to estimate CBF and ATT.
     
@@ -132,7 +138,8 @@ def fit_PCVSASL_misMatchPLD_vectInit_pep(PLDTI, diff_sig, Init, T1_artery, T_tau
     # Define residual function for optimization
     def residuals(x):
         model_sig = fun_PCVSASL_misMatchPLD_vect_pep(x, PLDTI, T1_artery, T_tau, T2_factor,
-                                                    alpha_BS1, alpha_PCASL, alpha_VSASL)
+                                                    alpha_BS1, alpha_PCASL, alpha_VSASL,
+                                                    T_sat_vs)
         return (model_sig - diff_sig).ravel()
     
     # Perform optimization

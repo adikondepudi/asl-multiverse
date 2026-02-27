@@ -11,24 +11,22 @@ import numba
 def _generate_vsasl_signal_jit(plds, att, cbf_ml_g_s, t1_artery, alpha2, T2_factor, t_sat_vs):
     """JIT-compiled worker for VSASL signal generation.
 
-    Implements VSASL signal model with saturation recovery (Xu et al.).
+    Implements VSASL signal model with saturation recovery (Qin et al. MRM 2022).
 
-    When ATT <= T_sat_vs: standard VSASL model (Eqs 4 & 5).
-    When ATT > T_sat_vs: labeled blood undergoes T1 recovery during (ATT - T_sat),
-      reducing effective initial magnetization by factor SIB.
-      SIB = 1 - exp(-(ATT - T_sat_vs) / T1_artery)  (ideal saturation)
+    SIB = 1 - exp(-T_sat / T1_blood) is a CONSTANT correction factor representing
+    how much blood magnetization has recovered during the saturation delay T_sat.
+    The non-selective saturation zeroes all magnetization; after T_sat seconds of
+    T1 recovery, blood magnetization reaches SIB fraction of equilibrium.
+    This factor is independent of ATT.
     """
     M0_b = 1.0
     lambda_blood = 0.90
     signal = np.zeros_like(plds, dtype=np.float64)
 
-    # Saturation recovery factor: when ATT > T_sat_vs, blood magnetization
-    # partially recovers before entering the imaging slab.
-    # SIB=1.0 means full inversion (ATT <= T_sat), SIB<1.0 means partial recovery.
-    if att > t_sat_vs:
-        SIB = 1.0 - np.exp(-(att - t_sat_vs) / t1_artery)
-    else:
-        SIB = 1.0
+    # Saturation recovery factor: constant for a given T_sat and T1.
+    # SIB = fraction of equilibrium magnetization recovered during T_sat.
+    # Reference: Qin Q, et al. Magn Reson Med. 2022;88(4):1528-1547.
+    SIB = 1.0 - np.exp(-t_sat_vs / t1_artery)
 
     for i in range(plds.shape[0]):
         # Condition 1: PLD <= ATT (labeled blood still arriving)

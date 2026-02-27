@@ -36,7 +36,7 @@ from baselines.multiverse_functions import fit_PCVSASL_misMatchPLD_vectInit_pep
 
 # ── Physics constants (match training configs) ──────────────────────────────
 PLDS = np.array([500, 1000, 1500, 2000, 2500, 3000], dtype=np.float64)
-T1_ARTERY = 1850.0  # All trained models used this
+T1_ARTERY = 1650.0  # Matches training data (FeatureRegistry.DEFAULT_PHYSICS)
 T_TAU = 1800.0
 ALPHA_PCASL = 0.85
 ALPHA_VSASL = 0.56
@@ -286,6 +286,7 @@ def ls_inference(clean_signals_1d, snr, n_realizations, rng):
         'T1_artery': T1_ARTERY, 'T_tau': T_TAU,
         'alpha_PCASL': ALPHA_PCASL, 'alpha_VSASL': ALPHA_VSASL,
         'T2_factor': T2_FACTOR, 'alpha_BS1': ALPHA_BS1,
+        'T_sat_vs': T_SAT_VS,
     }
 
     tasks = []
