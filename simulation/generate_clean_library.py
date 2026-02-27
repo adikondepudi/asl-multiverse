@@ -182,7 +182,7 @@ def generate_spatial_chunk(args):
 
 
 if __name__ == '__main__':
-    from feature_registry import FeatureRegistry
+    from utils.feature_registry import FeatureRegistry
     
     parser = argparse.ArgumentParser(description="Generate a large offline dataset for ASL training.")
     parser.add_argument("output_dir", type=str, help="Directory to save the dataset chunks.")
