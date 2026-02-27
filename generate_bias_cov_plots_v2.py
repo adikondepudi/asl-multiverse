@@ -49,22 +49,52 @@ MASK_RADIUS = 28
 # ── Model registry ──────────────────────────────────────────────────────────
 MODELS = [
     {
-        'name': 'Spatial U-Net (Exp 00)',
-        'dir': 'amplitude_ablation_v1/00_Baseline_SpatialASL',
+        'name': 'CapacityMatched (Exp 21)',
+        'dir': 'amplitude_ablation_v3/21_CapacityMatched',
         'color': '#1f77b4',
         'marker': 'o',
     },
     {
-        'name': 'Amplitude-Aware (Exp 02)',
-        'dir': 'amplitude_ablation_v1/02_AmpAware_Full',
+        'name': 'DualEncoder (Exp 22)',
+        'dir': 'amplitude_ablation_v3/22_DualEncoder',
+        'color': '#ff7f0e',
+        'marker': 'D',
+    },
+    {
+        'name': 'HuberLoss (Exp 23)',
+        'dir': 'amplitude_ablation_v3/23_HuberLoss',
         'color': '#d62728',
         'marker': 's',
     },
     {
-        'name': 'ATT-Rebalanced (Exp 14)',
-        'dir': 'amplitude_ablation_v2/14_ATT_Rebalanced',
+        'name': 'ATT Weight 3 (Exp 24)',
+        'dir': 'amplitude_ablation_v3/24_ATT_Weight3',
         'color': '#2ca02c',
         'marker': '^',
+    },
+    {
+        'name': 'CBF Priority (Exp 25)',
+        'dir': 'amplitude_ablation_v3/25_CBF_Priority',
+        'color': '#9467bd',
+        'marker': 'v',
+    },
+    {
+        'name': 'Physics (Exp 26)',
+        'dir': 'amplitude_ablation_v3/26_PhysicsRevised',
+        'color': '#8c564b',
+        'marker': 'P',
+    },
+    {
+        'name': 'AggressiveNoise (Exp 27)',
+        'dir': 'amplitude_ablation_v3/27_AggressiveNoise',
+        'color': '#e377c2',
+        'marker': '*',
+    },
+    {
+        'name': 'MoreData (Exp 28)',
+        'dir': 'amplitude_ablation_v3/28_MoreData100k',
+        'color': '#17becf',
+        'marker': 'X',
     },
 ]
 
