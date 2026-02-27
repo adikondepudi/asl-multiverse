@@ -97,7 +97,7 @@ class SpatialValidator:
 
     def _load_ensemble(self) -> List[torch.nn.Module]:
         """Load trained spatial models (SpatialASLNet or AmplitudeAwareSpatialASLNet)."""
-        from models.spatial_asl_network import SpatialASLNet
+        from models.spatial_asl_network import SpatialASLNet, DualEncoderSpatialASLNet, CapacityMatchedSpatialASLNet
         from models.amplitude_aware_spatial_network import AmplitudeAwareSpatialASLNet
 
         # Find model files
@@ -145,6 +145,10 @@ class SpatialValidator:
                     use_film_at_decoder=use_film_at_decoder,
                     use_amplitude_output_modulation=use_amplitude_output_modulation
                 )
+            elif model_class_name == "DualEncoderSpatialASLNet":
+                model = DualEncoderSpatialASLNet(n_plds=len(self.plds), features=features)
+            elif model_class_name == "CapacityMatchedSpatialASLNet":
+                model = CapacityMatchedSpatialASLNet(n_plds=len(self.plds), features=features)
             else:
                 # Default to SpatialASLNet
                 model = SpatialASLNet(n_plds=len(self.plds), features=features)

@@ -28,7 +28,7 @@ try:
     from simulation.asl_simulation import ASLParameters
     from simulation.enhanced_simulation import RealisticASLSimulator, SpatialPhantomGenerator
     from models.enhanced_asl_network import DisentangledASLNet
-    from models.spatial_asl_network import SpatialASLNet, DualEncoderSpatialASLNet  # Spatial models (U-Net)
+    from models.spatial_asl_network import SpatialASLNet, DualEncoderSpatialASLNet, CapacityMatchedSpatialASLNet  # Spatial models (U-Net)
     from models.amplitude_aware_spatial_network import AmplitudeAwareSpatialASLNet  # Amplitude-aware model
     from utils.helpers import process_signals_dynamic, get_grid_search_initial_guess
     from baselines.multiverse_functions import fit_PCVSASL_misMatchPLD_vectInit_pep
@@ -370,6 +370,11 @@ class ASLValidator:
                 elif model_class_name == 'DualEncoderSpatialASLNet':
                     # DualEncoderSpatialASLNet: Y-Net with separate PCASL/VSASL streams
                     model = DualEncoderSpatialASLNet(
+                        n_plds=len(self.plds),
+                        features=training_config.get('hidden_sizes', [32, 64, 128, 256])
+                    )
+                elif model_class_name == 'CapacityMatchedSpatialASLNet':
+                    model = CapacityMatchedSpatialASLNet(
                         n_plds=len(self.plds),
                         features=training_config.get('hidden_sizes', [32, 64, 128, 256])
                     )

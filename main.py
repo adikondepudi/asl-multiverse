@@ -20,7 +20,7 @@ from dataclasses import dataclass, asdict, field
 warnings.filterwarnings('ignore', category=UserWarning)
 
 from models.enhanced_asl_network import DisentangledASLNet, PhysicsInformedASLProcessor, CustomLoss
-from models.spatial_asl_network import SpatialASLNet, SimpleCNN, CapacityMatchedSpatialASLNet, SpatialDataset, MaskedSpatialLoss
+from models.spatial_asl_network import SpatialASLNet, SimpleCNN, CapacityMatchedSpatialASLNet, DualEncoderSpatialASLNet, SpatialDataset, MaskedSpatialLoss
 from models.amplitude_aware_spatial_network import AmplitudeAwareSpatialASLNet
 from simulation.asl_simulation import ASLParameters
 from simulation.enhanced_simulation import RealisticASLSimulator
@@ -190,7 +190,7 @@ def run_comprehensive_asl_research(config: ResearchConfig, stage: int, output_di
     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
     
     # === 1. DATA LOADING STRATEGY ===
-    is_spatial_model = config.model_class_name in ["SpatialASLNet", "AmplitudeAwareSpatialASLNet", "SimpleCNN", "CapacityMatchedSpatialASLNet"]
+    is_spatial_model = config.model_class_name in ["SpatialASLNet", "AmplitudeAwareSpatialASLNet", "SimpleCNN", "CapacityMatchedSpatialASLNet", "DualEncoderSpatialASLNet"]
     train_loader = None
     val_loader = None
     loss_function = None
@@ -422,6 +422,15 @@ def run_comprehensive_asl_research(config: ResearchConfig, stage: int, output_di
                 features.insert(0, max(1, features[0] // 2))
 
             return SpatialASLNet(
+                n_plds=num_plds,
+                features=features,
+                **kwargs
+            )
+        elif config.model_class_name == "DualEncoderSpatialASLNet":
+            features = sorted(kwargs.get('hidden_sizes', [256, 128, 64]))
+            while len(features) < 4:
+                features.insert(0, max(1, features[0] // 2))
+            return DualEncoderSpatialASLNet(
                 n_plds=num_plds,
                 features=features,
                 **kwargs
