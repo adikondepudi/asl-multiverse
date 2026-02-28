@@ -5,7 +5,7 @@
 #SBATCH --nodes=1
 #SBATCH --mem=64G
 #SBATCH --cpus-per-task=8
-#SBATCH --time=2:00:00
+#SBATCH --time=4:00:00
 #SBATCH --output=amplitude_ablation_v4/A_Baseline_SpatialASL/slurm_%j.out
 #SBATCH --error=amplitude_ablation_v4/A_Baseline_SpatialASL/slurm_%j.err
 

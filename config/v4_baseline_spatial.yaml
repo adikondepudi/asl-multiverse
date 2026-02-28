@@ -25,7 +25,7 @@ training:
   # Training parameters
   learning_rate: 0.001
   n_ensembles: 3
-  training_epochs: 50
+  n_epochs: 50
   batch_size: 16
   early_stopping_patience: 15
 
