@@ -145,10 +145,10 @@ def generate_spatial_chunk(args):
         pcasl_sig[mask_transit] = sig_p_transit[mask_transit]
         
         # --- VSASL Signal ---
-        # SIB: saturation recovery factor (Qin et al. MRM 2022)
-        # Constant correction for blood magnetization recovery during T_sat.
-        # Independent of ATT — all blood starts from zero at saturation pulse.
-        sib = 1.0 - np.exp(-t_sat_vs / t1_b)
+        # SIB: assume full magnetization recovery (SIB = 1.0).
+        # Theoretical equation gives ~0.7, but fresh blood inflow raises
+        # effective SIB to ~0.9 in practice. Using 1.0 per Dr. Xu.
+        sib = 1.0
 
         mask_vs_arrived = (plds_bc > att_bc)
 

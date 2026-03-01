@@ -121,9 +121,10 @@ class KineticModel(nn.Module):
         pcasl_sig = (term3_p * mask_arrived) + (term2_p * mask_transit)
 
         # --- VSASL GENERATION ---
-        # SIB: saturation recovery factor (Qin et al. MRM 2022)
-        # Constant correction for blood magnetization recovery during T_sat
-        SIB = 1.0 - torch.exp(-self.t_sat_vs / t1_blood)
+        # SIB: assume full magnetization recovery (SIB = 1.0).
+        # Theoretical equation gives ~0.7, but fresh blood inflow raises
+        # effective SIB to ~0.9. Using 1.0 per Dr. Xu.
+        SIB = 1.0
 
         # Condition 1: PLD <= ATT (vascular signal)
         term1_v = (2 * alpha_vsasl * f * SIB * (pld_exp / 1000.0) *

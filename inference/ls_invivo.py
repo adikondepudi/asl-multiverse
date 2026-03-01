@@ -32,23 +32,15 @@ from utils.helpers import get_grid_search_initial_guess
 warnings.filterwarnings('ignore')
 
 # Physics parameters — must match training data generation (FeatureRegistry defaults)
+# NOTE: ALPHA_BS1 default changed from 1.0 to 0.93 for in-vivo data which has
+# background suppression. Use --alpha-bs1 CLI arg to override.
 T1_ARTERY = 1650.0
 T_TAU = 1800.0
 ALPHA_PCASL = 0.85
 ALPHA_VSASL = 0.56
-ALPHA_BS1 = 1.0
+ALPHA_BS1 = 0.93
 T2_FACTOR = 1.0
 T_SAT_VS = 2000.0
-
-LS_PARAMS = {
-    'T1_artery': T1_ARTERY,
-    'T_tau': T_TAU,
-    'T2_factor': T2_FACTOR,
-    'alpha_BS1': ALPHA_BS1,
-    'alpha_PCASL': ALPHA_PCASL,
-    'alpha_VSASL': ALPHA_VSASL,
-    'T_sat_vs': T_SAT_VS,
-}
 
 
 def find_and_sort_files_by_pld(subject_dir: Path, pattern: str) -> List[Path]:
@@ -243,7 +235,22 @@ def main():
                         help="Specific subjects to process (default: all)")
     parser.add_argument("--n-workers", type=int, default=8,
                         help="Number of parallel workers for fitting")
+    parser.add_argument("--alpha-bs1", type=float, default=ALPHA_BS1,
+                        help="Background suppression efficiency (default: 0.93). "
+                             "Use 1.0 for no BS, 0.85-0.95 for typical in-vivo BS.")
     args = parser.parse_args()
+
+    # Build LS_PARAMS with CLI-overridable alpha_BS1
+    global LS_PARAMS
+    LS_PARAMS = {
+        'T1_artery': T1_ARTERY,
+        'T_tau': T_TAU,
+        'T2_factor': T2_FACTOR,
+        'alpha_BS1': args.alpha_bs1,
+        'alpha_PCASL': ALPHA_PCASL,
+        'alpha_VSASL': ALPHA_VSASL,
+        'T_sat_vs': T_SAT_VS,
+    }
 
     invivo_dir = Path(args.invivo_dir)
     output_dir = Path(args.output_dir)
@@ -257,7 +264,7 @@ def main():
 
     print(f"Found {len(subject_dirs)} subjects")
     print(f"Physics: T1={T1_ARTERY}, T_tau={T_TAU}, alpha_PCASL={ALPHA_PCASL}, "
-          f"alpha_VSASL={ALPHA_VSASL}, alpha_BS1={ALPHA_BS1}")
+          f"alpha_VSASL={ALPHA_VSASL}, alpha_BS1={args.alpha_bs1}")
 
     for subject_dir in subject_dirs:
         try:

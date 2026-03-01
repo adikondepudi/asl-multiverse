@@ -13,20 +13,21 @@ def _generate_vsasl_signal_jit(plds, att, cbf_ml_g_s, t1_artery, alpha2, T2_fact
 
     Implements VSASL signal model with saturation recovery (Qin et al. MRM 2022).
 
-    SIB = 1 - exp(-T_sat / T1_blood) is a CONSTANT correction factor representing
-    how much blood magnetization has recovered during the saturation delay T_sat.
-    The non-selective saturation zeroes all magnetization; after T_sat seconds of
-    T1 recovery, blood magnetization reaches SIB fraction of equilibrium.
+    SIB is set to 1.0 (full magnetization recovery assumed). The theoretical
+    equation SIB = 1 - exp(-T_sat / T1_blood) gives ~0.7 for T_sat=2s, but
+    measurements show ~0.9 due to fresh unsaturated blood inflow mixing with
+    saturated blood. Using 1.0 is a better approximation per Dr. Xu.
     This factor is independent of ATT.
     """
     M0_b = 1.0
     lambda_blood = 0.90
     signal = np.zeros_like(plds, dtype=np.float64)
 
-    # Saturation recovery factor: constant for a given T_sat and T1.
-    # SIB = fraction of equilibrium magnetization recovered during T_sat.
-    # Reference: Qin Q, et al. Magn Reson Med. 2022;88(4):1528-1547.
-    SIB = 1.0 - np.exp(-t_sat_vs / t1_artery)
+    # Saturation recovery factor: assume full recovery (SIB = 1.0).
+    # Theoretical: SIB = 1 - exp(-T_sat/T1) ≈ 0.7, but in practice fresh
+    # unsaturated blood inflow raises effective SIB to ~0.9. Using 1.0
+    # is a better approximation and matches Dr. Xu's reference implementation.
+    SIB = 1.0
 
     for i in range(plds.shape[0]):
         # Condition 1: PLD <= ATT (labeled blood still arriving)

@@ -1,26 +1,31 @@
 #!/bin/bash
-#SBATCH --job-name=v4-orchestrator
+#SBATCH --job-name=v5-orchestrator
 #SBATCH --partition=cpu
 #SBATCH --nodes=1
 #SBATCH --cpus-per-task=2
 #SBATCH --mem=8G
 #SBATCH --time=1:00:00
-#SBATCH --output=amplitude_ablation_v4/orchestrator_%j.out
-#SBATCH --error=amplitude_ablation_v4/orchestrator_%j.err
+#SBATCH --output=amplitude_ablation_v5/orchestrator_%j.out
+#SBATCH --error=amplitude_ablation_v5/orchestrator_%j.err
 
 # =============================================================================
-# V4 SIB-CORRECTED RETRAINING PIPELINE
+# V5 EXPANDED-RANGE RETRAINING PIPELINE
 # =============================================================================
+# Fixes from v4:
+#   1. Expanded training CBF/ATT ranges (GM: 30-90/500-2500, WM: 10-40/800-3000)
+#      to eliminate CBF bias dip at ATT > 1800ms and CBF regression to mean
+#   2. global_scale_factor = 10.0 for both experiments (v4 Baseline had 1.0)
+#
 # Runs the full pipeline:
-#   1. Generate spatial training data (100k samples, constant SIB)
+#   1. Generate spatial training data (100k samples, expanded ranges)
 #   2. Train Baseline SpatialASLNet (50 epochs, 3 ensembles)
 #   3. Train AmplitudeAwareSpatialASLNet (100 epochs, 3 ensembles)
 #   4. Generate bias/CoV plots comparing both models vs LS
 #
 # Usage:
-#   sbatch amplitude_ablation_v4/run_v4_pipeline.sh             # Full pipeline
-#   sbatch amplitude_ablation_v4/run_v4_pipeline.sh --train-only  # Skip data gen
-#   sbatch amplitude_ablation_v4/run_v4_pipeline.sh --plots-only  # Skip data+training
+#   sbatch amplitude_ablation_v5/run_v5_pipeline.sh             # Full pipeline
+#   sbatch amplitude_ablation_v5/run_v5_pipeline.sh --train-only  # Skip data gen
+#   sbatch amplitude_ablation_v5/run_v5_pipeline.sh --plots-only  # Skip data+training
 #
 # Estimated time: ~10-12 hours total
 #   Data generation: ~2-4 hours (CPU)
@@ -48,7 +53,7 @@ for arg in "$@"; do
 done
 
 echo "============================================"
-echo "V4 SIB-CORRECTED RETRAINING PIPELINE"
+echo "V5 EXPANDED-RANGE RETRAINING PIPELINE"
 echo "============================================"
 echo "Started: $(date)"
 echo "Train only: ${TRAIN_ONLY}"
@@ -61,16 +66,16 @@ cd $SLURM_SUBMIT_DIR
 source /cm/shared/apps/anaconda3/2023.09/etc/profile.d/conda.sh
 conda activate asl_multiverse
 
-DATASET_DIR="asl_spatial_dataset_v4"
+DATASET_DIR="asl_spatial_dataset_v5"
 
 # =============================================================================
 # STEP 1: DATA GENERATION
 # =============================================================================
 if [ "$TRAIN_ONLY" = false ] && [ "$PLOTS_ONLY" = false ]; then
     echo ""
-    echo "[1/4] Submitting data generation (100k spatial samples)..."
+    echo "[1/4] Submitting data generation (100k spatial samples, expanded ranges)..."
 
-    DATA_JOB=$(sbatch --parsable amplitude_ablation_v4/generate_data.slurm)
+    DATA_JOB=$(sbatch --parsable amplitude_ablation_v5/generate_data.slurm)
     echo "  Data generation job: ${DATA_JOB}"
     TRAIN_DEP="--dependency=afterok:${DATA_JOB}"
 else
@@ -94,10 +99,10 @@ if [ "$PLOTS_ONLY" = false ]; then
     echo ""
     echo "[2/4] Submitting training jobs..."
 
-    JOB_A=$(sbatch --parsable ${TRAIN_DEP} amplitude_ablation_v4/A_Baseline_SpatialASL/run.slurm)
+    JOB_A=$(sbatch --parsable ${TRAIN_DEP} amplitude_ablation_v5/A_Baseline_SpatialASL/run.slurm)
     echo "  A_Baseline_SpatialASL -> Job ${JOB_A}"
 
-    JOB_B=$(sbatch --parsable ${TRAIN_DEP} amplitude_ablation_v4/B_AmplitudeAware/run.slurm)
+    JOB_B=$(sbatch --parsable ${TRAIN_DEP} amplitude_ablation_v5/B_AmplitudeAware/run.slurm)
     echo "  B_AmplitudeAware      -> Job ${JOB_B}"
 
     PLOT_DEP="--dependency=afterok:${JOB_A}:${JOB_B}"
@@ -107,7 +112,7 @@ else
 
     # Verify models exist
     for exp in A_Baseline_SpatialASL B_AmplitudeAware; do
-        MODEL_DIR="amplitude_ablation_v4/${exp}/trained_models"
+        MODEL_DIR="amplitude_ablation_v5/${exp}/trained_models"
         if [ ! -d "$MODEL_DIR" ] || [ -z "$(ls -A $MODEL_DIR 2>/dev/null)" ]; then
             echo "ERROR: No trained models in ${MODEL_DIR}"
             echo "Run without --plots-only to train first."
@@ -124,7 +129,7 @@ fi
 echo ""
 echo "[3/4] Submitting bias/CoV plot generation..."
 
-PLOT_JOB=$(sbatch --parsable ${PLOT_DEP} amplitude_ablation_v4/generate_plots.slurm)
+PLOT_JOB=$(sbatch --parsable ${PLOT_DEP} amplitude_ablation_v5/generate_plots.slurm)
 echo "  Bias/CoV plots -> Job ${PLOT_JOB}"
 
 # =============================================================================
@@ -153,7 +158,7 @@ echo "Monitor:  squeue -u \$USER"
 echo ""
 echo "Output locations:"
 echo "  Dataset:  ${DATASET_DIR}/"
-echo "  Models A: amplitude_ablation_v4/A_Baseline_SpatialASL/trained_models/"
-echo "  Models B: amplitude_ablation_v4/B_AmplitudeAware/trained_models/"
-echo "  Plots:    bias_cov_results_v4/"
+echo "  Models A: amplitude_ablation_v5/A_Baseline_SpatialASL/trained_models/"
+echo "  Models B: amplitude_ablation_v5/B_AmplitudeAware/trained_models/"
+echo "  Plots:    bias_cov_results_v5/"
 echo "============================================"

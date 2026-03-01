@@ -74,9 +74,10 @@ def fun_PCVSASL_misMatchPLD_vect_pep(beta, PLDTI, T1_artery, T_tau, T2_factor,
         diff_sig[index_0, 0] = 0
     
     # VSASL calculations
-    # SIB: saturation recovery factor (Qin et al. MRM 2022)
-    # Constant correction for blood magnetization recovery during T_sat
-    SIB = 1.0 - np.exp(-T_sat_vs / T1_artery)
+    # SIB: assume full magnetization recovery (SIB = 1.0).
+    # Theoretical equation gives ~0.7, but fresh blood inflow raises
+    # effective SIB to ~0.9. Using 1.0 per Dr. Xu.
+    SIB = 1.0
 
     index_1_v = ATT <= TI
 

@@ -33,9 +33,11 @@ class SpatialPhantomGenerator:
     """
 
     # Tissue CBF values (ml/100g/min)
+    # Ranges expanded in v5 to cover full evaluation range and prevent
+    # regression-to-mean (v4 had GM 50-70 / WM 18-28 → NN predicted ~50 for all CBF)
     TISSUE_CBF = {
-        'gray_matter': (50.0, 70.0),
-        'white_matter': (18.0, 28.0),
+        'gray_matter': (30.0, 90.0),
+        'white_matter': (10.0, 40.0),
         'csf': (0.0, 5.0),
         'tumor_hyper': (90.0, 150.0),  # Hypervascular tumor
         'tumor_hypo': (5.0, 20.0),     # Hypoperfused tumor core
@@ -44,10 +46,11 @@ class SpatialPhantomGenerator:
     }
 
     # Tissue ATT values (ms)
-    # NOTE: ATT values constrained to max PLD (3000ms) for detectability
+    # Ranges expanded in v5 to cover full evaluation range (500-3000ms) and
+    # prevent CBF bias dip at ATT > 1800ms (v4 had GM 1000-1600 / WM 1200-1800)
     TISSUE_ATT = {
-        'gray_matter': (1000.0, 1600.0),
-        'white_matter': (1200.0, 1800.0),
+        'gray_matter': (500.0, 2500.0),
+        'white_matter': (800.0, 3000.0),
         'csf': (100.0, 500.0),
         'tumor_hyper': (500.0, 1000.0),   # Fast transit (neovascularization)
         'tumor_hypo': (1800.0, 2500.0),   # Slow transit
@@ -676,9 +679,12 @@ class RealisticASLSimulator(ASLSimulator):
                 alpha_v = self.params.alpha_VSASL * (self.params.alpha_BS1**3)
                 m0_scale = 1.0
             # --- 1. Generate Parameter Maps (The "Phantom") ---
-            # Background (Gray Matter-ish)
-            cbf_map = np.random.normal(50, 5, (size, size))
-            att_map = np.random.normal(1200, 100, (size, size))
+            # Background (Gray Matter-ish) — sample uniformly across expanded range
+            # then add spatial variation, matching SpatialPhantomGenerator.TISSUE_CBF/ATT
+            cbf_center = np.random.uniform(30, 90)
+            att_center = np.random.uniform(500, 2500)
+            cbf_map = np.random.normal(cbf_center, 8, (size, size))
+            att_map = np.random.normal(att_center, 200, (size, size))
             
             # Add Pathology Blobs
             num_blobs = np.random.randint(1, 4)
