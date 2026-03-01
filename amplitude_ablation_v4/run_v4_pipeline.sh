@@ -22,10 +22,10 @@
 #   sbatch amplitude_ablation_v4/run_v4_pipeline.sh --train-only  # Skip data gen
 #   sbatch amplitude_ablation_v4/run_v4_pipeline.sh --plots-only  # Skip data+training
 #
-# Estimated time: ~6-8 hours total
+# Estimated time: ~10-12 hours total
 #   Data generation: ~2-4 hours (CPU)
 #   Baseline training: ~1-2 hours (GPU)
-#   AmplitudeAware training: ~2-4 hours (GPU)
+#   AmplitudeAware training: ~6-7 hours (GPU)
 #   Bias/CoV plots: ~1-2 hours (CPU+GPU)
 # =============================================================================
 
@@ -123,40 +123,6 @@ fi
 # =============================================================================
 echo ""
 echo "[3/4] Submitting bias/CoV plot generation..."
-
-cat > amplitude_ablation_v4/generate_plots.slurm << 'EOF'
-#!/bin/bash
-#SBATCH --job-name=v4-plots
-#SBATCH --partition=gpu
-#SBATCH --gres=gpu:1
-#SBATCH --nodes=1
-#SBATCH --cpus-per-task=8
-#SBATCH --mem=64G
-#SBATCH --time=4:00:00
-#SBATCH --output=amplitude_ablation_v4/plots_%j.out
-#SBATCH --error=amplitude_ablation_v4/plots_%j.err
-
-source /cm/shared/apps/anaconda3/2023.09/etc/profile.d/conda.sh
-conda activate asl_multiverse
-cd $SLURM_SUBMIT_DIR
-
-echo "============================================"
-echo "GENERATING BIAS/COV PLOTS (v4)"
-echo "Started: $(date)"
-echo "============================================"
-
-python generate_bias_cov_plots_v2.py \
-    --output-dir bias_cov_results_v4 \
-    --snr 3.0 5.0 10.0 \
-    --n-phantoms 10 --n-ls-realizations 1000 \
-    --models "Baseline SpatialASLNet:amplitude_ablation_v4/A_Baseline_SpatialASL" \
-             "AmplitudeAware:amplitude_ablation_v4/B_AmplitudeAware"
-
-echo "============================================"
-echo "PLOTS COMPLETE"
-echo "Finished: $(date)"
-echo "============================================"
-EOF
 
 PLOT_JOB=$(sbatch --parsable ${PLOT_DEP} amplitude_ablation_v4/generate_plots.slurm)
 echo "  Bias/CoV plots -> Job ${PLOT_JOB}"

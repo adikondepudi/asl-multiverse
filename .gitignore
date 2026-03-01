@@ -45,6 +45,10 @@ slurm_logs/
 # ==========================
 # Generated results (HPC output)
 # ==========================
+bias_cov_results_v*/
+bias_cov_results_v*.zip
+corrected_validation/
+meeting_*/
 **/validation_results/
 **/amplitude_sensitivity.json
 **/norm_stats.json

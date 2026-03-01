@@ -5,7 +5,7 @@
 #SBATCH --nodes=1
 #SBATCH --mem=64G
 #SBATCH --cpus-per-task=8
-#SBATCH --time=4:00:00
+#SBATCH --time=8:00:00
 #SBATCH --output=amplitude_ablation_v4/B_AmplitudeAware/slurm_%j.out
 #SBATCH --error=amplitude_ablation_v4/B_AmplitudeAware/slurm_%j.err
 
@@ -19,6 +19,9 @@ echo "Started: $(date)"
 echo "Host: $(hostname)"
 echo "GPU: $(nvidia-smi --query-gpu=name --format=csv,noheader 2>/dev/null || echo 'N/A')"
 echo "============================================"
+
+# --- COPY CONFIG (plot script reads config.yaml from run dir) ---
+cp config/v4_amplitude_aware.yaml amplitude_ablation_v4/B_AmplitudeAware/config.yaml
 
 # --- TRAINING ---
 python main.py config/v4_amplitude_aware.yaml \

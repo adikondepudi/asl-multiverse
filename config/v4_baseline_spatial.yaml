@@ -29,8 +29,8 @@ training:
   batch_size: 16
   early_stopping_patience: 15
 
-  # U-Net feature dimensions
-  features: [32, 64, 128, 256]
+  # U-Net feature dimensions (maps to ResearchConfig.hidden_sizes)
+  hidden_sizes: [32, 64, 128, 256]
 
 data:
   use_offline_dataset: true

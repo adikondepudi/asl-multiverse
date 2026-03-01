@@ -20,6 +20,9 @@ echo "Host: $(hostname)"
 echo "GPU: $(nvidia-smi --query-gpu=name --format=csv,noheader 2>/dev/null || echo 'N/A')"
 echo "============================================"
 
+# --- COPY CONFIG (plot script reads config.yaml from run dir) ---
+cp config/v4_baseline_spatial.yaml amplitude_ablation_v4/A_Baseline_SpatialASL/config.yaml
+
 # --- TRAINING ---
 python main.py config/v4_baseline_spatial.yaml \
     --stage 2 --output-dir amplitude_ablation_v4/A_Baseline_SpatialASL
