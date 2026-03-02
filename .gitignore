@@ -84,6 +84,14 @@ __pycache__/
 .idea/
 
 # ==========================
+# Data directories
+# ==========================
+data/
+Multiverse/
+asl_offline_dataset_*/
+
+# ==========================
 # Misc
 # ==========================
 wandb/
+*.zip

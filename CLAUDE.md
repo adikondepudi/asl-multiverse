@@ -182,10 +182,10 @@ asl-multiverse/
 python -m simulation.generate_clean_library <output_dir> --spatial --total_samples 100000
 
 # Train spatial model
-python main.py config/spatial_mae_loss.yaml --stage 2 --output-dir ./results/run
+python main.py config/v5_baseline_spatial.yaml --stage 2 --output-dir ./results/run
 
 # Train amplitude-aware model
-python main.py config/amplitude_aware_spatial.yaml --stage 2 --output-dir ./results/amp_aware
+python main.py config/v5_amplitude_aware.yaml --stage 2 --output-dir ./results/amp_aware
 
 # Validate model
 python -m validation.validate --run_dir <run_dir> --output_dir validation_results

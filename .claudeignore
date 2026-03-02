@@ -1,0 +1,59 @@
+# Old experiment results (completed ablations)
+amplitude_ablation_v1/
+amplitude_ablation_v2/
+amplitude_ablation_v3/
+amplitude_ablation_v4/
+amplitude_ablation_v5/
+hpc_ablation_jobs/
+
+# Archived / dead code
+archive/
+
+# Results, outputs, and generated data
+results/
+results_all_versions/
+bias_cov_results*/
+corrected_validation/
+validation_results/
+ls_verification/
+invivo_comparison*/
+invivo_figures*/
+invivo_results*/
+email_attachments/
+meeting_*/
+
+# Data and model weights
+data/
+Multiverse/
+production_model_v1/
+asl_offline_dataset_*/
+
+# Binary / large files
+*.npy
+*.npz
+*.pt
+*.pth
+*.png
+*.jpg
+*.pdf
+*.csv
+*.zip
+*.nii
+*.nii.gz
+
+# Build / runtime artifacts
+__pycache__/
+*.pyc
+wandb/
+*.out
+*.err
+*.slurm
+
+# Standalone scripts not part of core pipeline
+asl_interactive_dashboard.py
+generate_bias_cov_plots_v2.py
+visualize_invivo_comparison.py
+
+# Documentation (CLAUDE.md loaded separately via project instructions)
+docs/
+README.md
