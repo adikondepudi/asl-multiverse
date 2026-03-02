@@ -43,20 +43,27 @@ slurm_logs/
 *.~lock.*
 
 # ==========================
+# Completed experiments (archived)
+# ==========================
+amplitude_ablation_v1/
+amplitude_ablation_v2/
+amplitude_ablation_v3/
+amplitude_ablation_v4/
+amplitude_ablation_v5/
+hpc_ablation_jobs/
+archive/
+
+# ==========================
 # Generated results (HPC output)
 # ==========================
-bias_cov_results_v*/
-bias_cov_results_v*.zip
+bias_cov_results*/
 corrected_validation/
+validation_results/
 meeting_*/
-**/validation_results/
-**/amplitude_sensitivity.json
-**/norm_stats.json
-**/research_config.json
-**/comprehensive_evaluation.json
 results/
 invivo_results*/
 invivo_comparison*/
+invivo_figures*/
 invivo_predictions/
 invivo_preprocessed/
 prediction_maps/
@@ -67,6 +74,17 @@ evaluation_results/
 ls_verification/
 production_model_v1/
 email_attachments/
+
+# ==========================
+# Docs (keep CLAUDE.md and README.md only)
+# ==========================
+docs/
+
+# ==========================
+# Standalone scripts (not core pipeline)
+# ==========================
+generate_bias_cov_plots_v2.py
+visualize_invivo_comparison.py
 
 # ==========================
 # Python
