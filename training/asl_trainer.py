@@ -118,7 +118,17 @@ class EnhancedASLTrainer:
             self.models = [torch.compile(m, mode='reduce-overhead') for m in self.models]
             logger.info("A100 Optimization: torch.compile() applied successfully")
 
-        self.scaler = torch.amp.GradScaler('cuda', enabled=True)
+        # Use bfloat16 on Ampere+ GPUs (wider dynamic range, fewer NaN issues)
+        # Fall back to float16 on older GPUs (Volta/Turing)
+        if torch.cuda.is_available() and torch.cuda.is_bf16_supported():
+            self.amp_dtype = torch.bfloat16
+            # bfloat16 doesn't need loss scaling — disable GradScaler
+            self.scaler = torch.amp.GradScaler('cuda', enabled=False)
+            logger.info("AMP: Using bfloat16 (Ampere+ detected, GradScaler disabled)")
+        else:
+            self.amp_dtype = torch.float16
+            self.scaler = torch.amp.GradScaler('cuda', enabled=True)
+            logger.info("AMP: Using float16 (GradScaler enabled)")
 
         if wandb.run:
             for i, model in enumerate(self.models): wandb.watch(model, log='gradients', log_freq=200, idx=i)
@@ -470,7 +480,7 @@ class EnhancedASLTrainer:
             for model_idx, model in enumerate(models):
                 optimizers[model_idx].zero_grad(set_to_none=False)
 
-                with torch.amp.autocast(device_type=self.device.type, dtype=torch.float16):
+                with torch.amp.autocast(device_type=self.device.type, dtype=self.amp_dtype):
                     outputs = model(processed_signals)
                     outputs_f32 = tuple(o.float() if isinstance(o, torch.Tensor) else o for o in outputs)
 
@@ -570,7 +580,7 @@ class EnhancedASLTrainer:
                     inputs, targets = batch
 
                 for i, model in enumerate(models):
-                    with torch.amp.autocast(device_type=self.device.type, dtype=torch.float16):
+                    with torch.amp.autocast(device_type=self.device.type, dtype=self.amp_dtype):
                         outputs = model(inputs)
                         outputs_f32 = tuple(o.float() if isinstance(o, torch.Tensor) else o for o in outputs)
                         

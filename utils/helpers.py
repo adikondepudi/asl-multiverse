@@ -249,24 +249,70 @@ def process_signals_cpu(signals_unnorm: np.ndarray, norm_stats: dict, num_plds: 
 
     return np.concatenate([shape_vector, scalar_features_norm], axis=1)
 
+def _vectorized_grid_mse(att_grid, cbf_cgs_grid, plds, observed_pcasl, observed_vsasl,
+                         t1_artery, t_tau, alpha_pcasl, alpha_vsasl, t2_factor, t_sat_vs):
+    """
+    Compute MSE for all (ATT, CBF) grid combinations at once using broadcasting.
+
+    Args:
+        att_grid: (A,) ATT values in ms
+        cbf_cgs_grid: (C,) CBF values in ml/g/s (i.e. ml_100g_min / 6000)
+        plds: (P,) PLD values in ms
+        observed_pcasl: (P,) observed PCASL signal
+        observed_vsasl: (P,) observed VSASL signal
+
+    Returns:
+        mse: (A, C) MSE for each (ATT, CBF) combination
+    """
+    M0_b = 1.0
+    lambda_blood = 0.90
+    SIB = 1.0
+
+    # Broadcast dims: att (A,1,1), cbf (1,C,1), plds (1,1,P)
+    att = att_grid[:, np.newaxis, np.newaxis]      # (A, 1, 1)
+    cbf = cbf_cgs_grid[np.newaxis, :, np.newaxis]  # (1, C, 1)
+    p = plds[np.newaxis, np.newaxis, :]             # (1, 1, P)
+
+    # --- PCASL signal model (3 conditions) ---
+    pcasl_common = 2 * M0_b * cbf * alpha_pcasl / lambda_blood * (t1_artery / 1000.0) * t2_factor
+    cond_pc1 = (p >= (att - t_tau)) & (p < att)
+    cond_pc2 = p >= att
+    term_pc1 = pcasl_common * (np.exp(-att / t1_artery) - np.exp(-(t_tau + p) / t1_artery))
+    term_pc2 = pcasl_common * np.exp(-p / t1_artery) * (1 - np.exp(-t_tau / t1_artery))
+    pcasl_pred = np.where(cond_pc1, term_pc1, np.where(cond_pc2, term_pc2, 0.0))  # (A, C, P)
+
+    # --- VSASL signal model (2 conditions) ---
+    vsasl_common = 2 * M0_b * cbf * alpha_vsasl * SIB / lambda_blood * t2_factor
+    cond_vs1 = p <= att
+    term_vs1 = vsasl_common * (p / 1000.0) * np.exp(-p / t1_artery)
+    term_vs2 = vsasl_common * (att / 1000.0) * np.exp(-p / t1_artery)
+    vsasl_pred = np.where(cond_vs1, term_vs1, term_vs2)  # (A, C, P)
+
+    # --- MSE over PLDs ---
+    obs_pc = observed_pcasl[np.newaxis, np.newaxis, :]  # (1, 1, P)
+    obs_vs = observed_vsasl[np.newaxis, np.newaxis, :]  # (1, 1, P)
+    mse = np.mean((obs_pc - pcasl_pred)**2, axis=2) + \
+          np.mean((obs_vs - vsasl_pred)**2, axis=2)  # (A, C)
+
+    return mse
+
+
 def get_grid_search_initial_guess(
     observed_signal: np.ndarray,
     plds: np.ndarray,
     asl_params: dict
 ) -> list:
     """
-    Performs a coarse grid search for a single voxel to find a robust
+    Performs a coarse+fine grid search for a single voxel to find a robust
     initial guess for NLLS fitting.
+
+    Uses vectorized numpy broadcasting instead of nested loops for speed.
 
     Grid bounds must match the LS optimizer bounds in fit_PCVSASL_misMatchPLD_vectInit_pep:
     - CBF: [0, 200] ml/100g/min  (internal: [0/6000, 200/6000] ml/g/s)
     - ATT: [100, 4000] ms
     """
-    # --- 1. Define the search grid ---
-    # IMPORTANT: Must stay within LS optimizer bounds: CBF [0, 200], ATT [100, 4000]
-    cbf_values_grid = np.linspace(1, 200, 20)  # 20 steps for CBF, extended to 200
-
-    # --- 2. Pre-calculate model parameters ---
+    # --- 1. Pre-calculate model parameters ---
     t1_artery = asl_params['T1_artery']
     t_tau = asl_params['T_tau']
     t2_factor = asl_params.get('T2_factor', 1.0)
@@ -279,49 +325,39 @@ def get_grid_search_initial_guess(
     observed_pcasl = observed_signal[:num_plds]
     observed_vsasl = observed_signal[num_plds:]
 
-    best_mse = float('inf')
-    best_params = [50.0 / 6000.0, 1500.0] # Default fallback
-
-    # --- 3. Expanded coarse ATT grid (15 points for better coverage) ---
+    # --- 2. Coarse grid search (vectorized) ---
     coarse_att_grid = np.linspace(200, 3500, 15)
+    cbf_values_grid = np.linspace(1, 200, 20)
+    cbf_cgs_grid = cbf_values_grid / 6000.0
 
-    for att in coarse_att_grid:
-        for cbf in cbf_values_grid:
-            cbf_cgs = cbf / 6000.0
-            pcasl_pred = _generate_pcasl_signal_jit(
-                plds, att, cbf_cgs, t1_artery, t_tau, alpha_pcasl, t2_factor
-            )
-            vsasl_pred = _generate_vsasl_signal_jit(
-                plds, att, cbf_cgs, t1_artery, alpha_vsasl, t2_factor, t_sat_vs
-            )
-            mse = np.mean((observed_pcasl - pcasl_pred)**2) + \
-                  np.mean((observed_vsasl - vsasl_pred)**2)
-            if mse < best_mse:
-                best_mse = mse
-                best_params = [cbf_cgs, att]
+    mse_coarse = _vectorized_grid_mse(
+        coarse_att_grid, cbf_cgs_grid, plds, observed_pcasl, observed_vsasl,
+        t1_artery, t_tau, alpha_pcasl, alpha_vsasl, t2_factor, t_sat_vs
+    )
 
-    # --- 4. Fine grid around the coarse best ---
-    coarse_cbf = best_params[0] * 6000.0  # Back to ml/100g/min
-    coarse_att = best_params[1]
+    best_idx = np.unravel_index(np.argmin(mse_coarse), mse_coarse.shape)
+    coarse_cbf = cbf_values_grid[best_idx[1]]
+    coarse_att = coarse_att_grid[best_idx[0]]
+
+    # --- 3. Fine grid around the coarse best (vectorized) ---
     fine_cbf_grid = np.linspace(max(0, coarse_cbf - 20), min(200, coarse_cbf + 20), 10)
     fine_att_grid = np.linspace(max(100, coarse_att - 300), min(4000, coarse_att + 300), 10)
+    fine_cbf_cgs_grid = fine_cbf_grid / 6000.0
 
-    for cbf in fine_cbf_grid:
-        cbf_cgs = cbf / 6000.0
-        for att in fine_att_grid:
-            pcasl_pred = _generate_pcasl_signal_jit(
-                plds, att, cbf_cgs, t1_artery, t_tau, alpha_pcasl, t2_factor
-            )
-            vsasl_pred = _generate_vsasl_signal_jit(
-                plds, att, cbf_cgs, t1_artery, alpha_vsasl, t2_factor, t_sat_vs
-            )
-            mse = np.mean((observed_pcasl - pcasl_pred)**2) + \
-                  np.mean((observed_vsasl - vsasl_pred)**2)
-            if mse < best_mse:
-                best_mse = mse
-                best_params = [cbf_cgs, att]
+    mse_fine = _vectorized_grid_mse(
+        fine_att_grid, fine_cbf_cgs_grid, plds, observed_pcasl, observed_vsasl,
+        t1_artery, t_tau, alpha_pcasl, alpha_vsasl, t2_factor, t_sat_vs
+    )
 
-    return best_params
+    best_fine_idx = np.unravel_index(np.argmin(mse_fine), mse_fine.shape)
+    best_cbf_cgs = fine_cbf_cgs_grid[best_fine_idx[1]]
+    best_att = fine_att_grid[best_fine_idx[0]]
+
+    # Check if fine grid improved on coarse
+    if mse_fine[best_fine_idx] < mse_coarse[best_idx]:
+        return [best_cbf_cgs, best_att]
+    else:
+        return [cbf_cgs_grid[best_idx[1]], coarse_att]
 
 
 def get_multi_start_initial_guesses(
@@ -333,10 +369,9 @@ def get_multi_start_initial_guesses(
     """
     Multi-start grid search returning top-N candidate initial guesses.
 
-    Expands the ATT grid to 15 points and returns the top candidates
-    ranked by residual. This allows running NLLS from multiple starting
-    points and selecting the result with lowest residual, avoiding
-    local minima traps.
+    Uses vectorized numpy broadcasting for speed. For each ATT value,
+    finds the best CBF, then returns the top-N (CBF, ATT) pairs ranked
+    by residual.
 
     Args:
         observed_signal: Combined [PCASL, VSASL] signal vector
@@ -348,6 +383,7 @@ def get_multi_start_initial_guesses(
         List of [cbf_cgs, att] pairs, sorted by ascending MSE
     """
     cbf_values_grid = np.linspace(1, 200, 20)
+    cbf_cgs_grid = cbf_values_grid / 6000.0
 
     t1_artery = asl_params['T1_artery']
     t_tau = asl_params['T_tau']
@@ -361,34 +397,25 @@ def get_multi_start_initial_guesses(
     observed_pcasl = observed_signal[:num_plds]
     observed_vsasl = observed_signal[num_plds:]
 
-    # Collect all candidates with their MSE
-    candidates = []
-
     coarse_att_grid = np.linspace(200, 3500, 15)
 
-    for att in coarse_att_grid:
-        best_mse_for_att = float('inf')
-        best_cbf_for_att = 50.0 / 6000.0
+    # Vectorized: compute MSE for all (ATT, CBF) combos at once → (15, 20)
+    mse_grid = _vectorized_grid_mse(
+        coarse_att_grid, cbf_cgs_grid, plds, observed_pcasl, observed_vsasl,
+        t1_artery, t_tau, alpha_pcasl, alpha_vsasl, t2_factor, t_sat_vs
+    )
 
-        for cbf in cbf_values_grid:
-            cbf_cgs = cbf / 6000.0
-            pcasl_pred = _generate_pcasl_signal_jit(
-                plds, att, cbf_cgs, t1_artery, t_tau, alpha_pcasl, t2_factor
-            )
-            vsasl_pred = _generate_vsasl_signal_jit(
-                plds, att, cbf_cgs, t1_artery, alpha_vsasl, t2_factor, t_sat_vs
-            )
-            mse = np.mean((observed_pcasl - pcasl_pred)**2) + \
-                  np.mean((observed_vsasl - vsasl_pred)**2)
-            if mse < best_mse_for_att:
-                best_mse_for_att = mse
-                best_cbf_for_att = cbf_cgs
-
-        candidates.append((best_mse_for_att, [best_cbf_for_att, att]))
+    # For each ATT, find the best CBF
+    best_cbf_idx = np.argmin(mse_grid, axis=1)  # (15,)
+    best_mse_per_att = mse_grid[np.arange(len(coarse_att_grid)), best_cbf_idx]  # (15,)
 
     # Sort by MSE and return top-N
-    candidates.sort(key=lambda x: x[0])
-    return [c[1] for c in candidates[:n_candidates]]
+    sorted_att_idx = np.argsort(best_mse_per_att)
+    candidates = []
+    for i in sorted_att_idx[:n_candidates]:
+        candidates.append([cbf_cgs_grid[best_cbf_idx[i]], coarse_att_grid[i]])
+
+    return candidates
 
 
 def fit_multi_start_ls(

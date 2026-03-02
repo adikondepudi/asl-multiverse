@@ -57,7 +57,7 @@ def pad_to_multiple(tensor: torch.Tensor, multiple: int = 16) -> Tuple[torch.Ten
     pad_left = pad_w // 2
     pad_right = pad_w - pad_left
 
-    padded = F.pad(tensor, (pad_left, pad_right, pad_top, pad_bottom), mode='constant', value=0)
+    padded = F.pad(tensor, (pad_left, pad_right, pad_top, pad_bottom), mode='reflect')
     return padded, (pad_top, pad_bottom, pad_left, pad_right)
 
 
@@ -89,6 +89,15 @@ def load_spatial_model(model_dir: Path, device: torch.device) -> Tuple[List[torc
             training_config = full_config.get('training', {})
 
     model_class_name = training_config.get('model_class_name', 'SpatialASLNet')
+
+    # Validate normalization mode — spatial models MUST use global_scale
+    norm_mode = config.get('normalization_mode', training_config.get('normalization_mode', 'unknown'))
+    if norm_mode == 'per_curve':
+        print(f"  WARNING: Model was trained with normalization_mode='per_curve'.")
+        print(f"  This script uses global_scale normalization. CBF estimates will be WRONG.")
+        print(f"  Use predict_on_invivo.py for voxel-wise (per_curve) models instead.")
+    elif norm_mode != 'unknown':
+        print(f"  Normalization mode: {norm_mode}")
 
     # Determine number of PLDs from config
     n_plds = len(config['pld_values'])

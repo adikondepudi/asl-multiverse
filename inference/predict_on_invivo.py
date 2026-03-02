@@ -44,9 +44,9 @@ def pad_to_multiple(image: np.ndarray, multiple: int = 16) -> Tuple[np.ndarray, 
     pad_right = pad_w - pad_left
     
     if image.ndim == 2:
-        padded = np.pad(image, ((pad_top, pad_bottom), (pad_left, pad_right)), mode='constant', constant_values=0)
+        padded = np.pad(image, ((pad_top, pad_bottom), (pad_left, pad_right)), mode='reflect')
     else:
-        padded = np.pad(image, ((0, 0), (pad_top, pad_bottom), (pad_left, pad_right)), mode='constant', constant_values=0)
+        padded = np.pad(image, ((0, 0), (pad_top, pad_bottom), (pad_left, pad_right)), mode='reflect')
     
     return padded, (pad_top, pad_bottom, pad_left, pad_right)
 
@@ -376,7 +376,17 @@ def load_artifacts(model_root: Path) -> tuple:
     models, models_dir = [], model_root / 'trained_models'
     num_plds = len(config['pld_values'])
     
-    is_disentangled = 'Disentangled' in config.get('model_class_name', '')
+    # Validate: this script is for voxel-wise models only
+    model_class_name = config.get('model_class_name', '')
+    norm_mode = config.get('normalization_mode', 'per_curve')
+    if 'Spatial' in model_class_name or 'AmplitudeAware' in model_class_name:
+        print(f"  WARNING: Model class '{model_class_name}' is a spatial model.")
+        print(f"  This script is for voxel-wise inference. Use predict_spatial_invivo.py instead.")
+    if norm_mode == 'global_scale':
+        print(f"  WARNING: Model was trained with normalization_mode='global_scale'.")
+        print(f"  This script uses per-curve normalization. Results may be incorrect.")
+
+    is_disentangled = 'Disentangled' in model_class_name
     model_class = DisentangledASLNet if is_disentangled else EnhancedASLNet
     
     # Input size is dynamically determined from checkpoint - scalars are auto-detected
