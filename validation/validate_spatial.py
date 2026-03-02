@@ -265,9 +265,9 @@ class SpatialValidator:
         cbf_pred = predictions['cbf_pred']
         att_pred = predictions['att_pred']
 
-        # Create brain mask (non-zero regions)
+        # Create brain mask (non-zero regions) — per-sample percentile threshold
         mean_signal = np.mean(np.abs(self.test_data['signals'].numpy()), axis=1, keepdims=True)
-        brain_mask = (mean_signal > np.percentile(mean_signal, 5)).astype(np.float32)
+        brain_mask = (mean_signal > np.percentile(mean_signal, 5, axis=(2, 3), keepdims=True)).astype(np.float32)
 
         def masked_metrics(pred, true, mask):
             """Compute metrics only on brain pixels."""

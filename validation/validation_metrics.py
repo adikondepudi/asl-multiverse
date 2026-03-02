@@ -276,25 +276,17 @@ def concordance_correlation_coefficient(predictions: np.ndarray,
     }
 
 
-def structural_similarity_index(image1: np.ndarray,
-                               image2: np.ndarray,
-                               mask: np.ndarray = None,
-                               k1: float = 0.01,
-                               k2: float = 0.03) -> Dict[str, float]:
+def global_ssim(image1: np.ndarray,
+                image2: np.ndarray,
+                mask: np.ndarray = None,
+                k1: float = 0.01,
+                k2: float = 0.03) -> Dict[str, float]:
     """
-    Compute Structural Similarity Index (SSIM) for 2D maps.
+    Compute GLOBAL Structural Similarity Index (no sliding window).
 
-    SSIM combines three components:
-    1. Luminance: Compare mean intensities
-    2. Contrast: Compare variance/dynamic range
-    3. Structure: Compare normalized patterns
-
-    SSIM ∈ [-1, 1], where 1 = perfect structural similarity
-
-    For ASL parameter maps, SSIM captures:
-    - Whether spatial patterns are preserved
-    - Whether tissue contrasts are maintained
-    - Whether regional relationships are correct
+    NOTE: This computes a single SSIM value over all masked pixels at once,
+    which conflates local and global structure. For proper windowed SSIM,
+    use structural_similarity_index() instead.
 
     Args:
         image1: (H, W) First image (e.g., NN prediction)
@@ -339,6 +331,71 @@ def structural_similarity_index(image1: np.ndarray,
         'luminance': float(luminance),
         'contrast': float(contrast),
         'structure': float(structure),
+    }
+
+
+def structural_similarity_index(image1: np.ndarray,
+                                image2: np.ndarray,
+                                mask: np.ndarray = None,
+                                win_size: int = 7) -> Dict[str, float]:
+    """
+    Compute windowed Structural Similarity Index (SSIM) for 2D maps.
+
+    Uses sliding-window SSIM via scikit-image, which is the standard
+    implementation (Wang et al., 2004). Falls back to global_ssim()
+    if scikit-image is unavailable.
+
+    Args:
+        image1: (H, W) First image (e.g., NN prediction)
+        image2: (H, W) Second image (e.g., ground truth)
+        mask: (H, W) Optional brain mask (True/nonzero = brain)
+        win_size: Sliding window size (must be odd, default 7)
+
+    Returns:
+        Dict with 'ssim' (mean over masked region) and 'ssim_map' (H, W)
+    """
+    try:
+        from skimage.metrics import structural_similarity as sk_ssim
+    except ImportError:
+        import logging
+        logging.getLogger(__name__).warning(
+            "scikit-image not installed; falling back to global SSIM. "
+            "Install with: pip install scikit-image"
+        )
+        return global_ssim(image1, image2, mask)
+
+    im1 = image1.astype(np.float64)
+    im2 = image2.astype(np.float64)
+
+    # Determine data range from both images
+    data_range = max(im1.max() - im1.min(), im2.max() - im2.min())
+    if data_range < 1e-10:
+        return {'ssim': 1.0, 'ssim_map': np.ones_like(im1)}
+
+    # Ensure win_size doesn't exceed image dimensions
+    min_dim = min(im1.shape[0], im1.shape[1])
+    effective_win_size = min(win_size, min_dim if min_dim % 2 == 1 else min_dim - 1)
+    if effective_win_size < 3:
+        return global_ssim(im1, im2, mask)
+
+    mean_ssim, ssim_map = sk_ssim(
+        im1, im2,
+        data_range=data_range,
+        win_size=effective_win_size,
+        full=True,
+    )
+
+    # Apply mask to compute mean only over brain region
+    if mask is not None:
+        brain = mask.astype(bool)
+        if brain.sum() > 0:
+            mean_ssim = float(np.mean(ssim_map[brain]))
+        else:
+            mean_ssim = np.nan
+
+    return {
+        'ssim': float(mean_ssim),
+        'ssim_map': ssim_map,
     }
 
 

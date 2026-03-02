@@ -308,15 +308,10 @@ class DisentangledASLNet(nn.Module):
         self.encoder_frozen = False
         
         # DYNAMIC CALCULATION of scalar dimension from active_features_list
-        # This prevents shape mismatch errors when ablating different feature combinations
+        # Uses FeatureRegistry as single source of truth (avoids hardcoded dim mapping)
         if active_features_list is not None:
-            scalar_dim = 0
-            for feat in active_features_list:
-                if feat in ['mean', 'std', 'ttp', 'com', 'peak']: 
-                    scalar_dim += 2
-                elif feat in ['t1_artery', 'z_coord']: 
-                    scalar_dim += 1
-            num_scalar_features = scalar_dim
+            from utils.feature_registry import FeatureRegistry
+            num_scalar_features = FeatureRegistry.compute_scalar_dim(active_features_list)
         
         if encoder_type.lower() == 'physics_processor':
             self.encoder = PhysicsInformedASLProcessor(

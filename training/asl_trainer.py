@@ -150,6 +150,13 @@ class EnhancedASLTrainer:
         logger.info(f"Loss Config - mode: {default_loss_params['loss_mode']}, "
                     f"mae_weight: {default_loss_params['mae_weight']}, "
                     f"nll_weight: {default_loss_params['nll_weight']}")
+        if default_loss_params['dc_weight'] > 0:
+            logger.warning(
+                "DC loss enabled (dc_weight=%.3f). Ensure the KineticModel physics params "
+                "(T1_artery, alpha_PCASL, alpha_VSASL, etc.) in your config match the params "
+                "used to generate training data, otherwise DC loss will be counterproductive.",
+                default_loss_params['dc_weight']
+            )
         self.custom_loss_fn = loss_fn if loss_fn is not None else CustomLoss(**default_loss_params)
         self.global_step = 0; self.norm_stats = None
         
@@ -479,6 +486,7 @@ class EnhancedASLTrainer:
             
             for model_idx, model in enumerate(models):
                 optimizers[model_idx].zero_grad(set_to_none=False)
+                skip_backward = False
 
                 with torch.amp.autocast(device_type=self.device.type, dtype=self.amp_dtype):
                     outputs = model(processed_signals)
@@ -489,75 +497,80 @@ class EnhancedASLTrainer:
                            for o in outputs_f32 if isinstance(o, torch.Tensor)):
                         if model_idx == 0:
                             logger.warning(f"NaN/Inf in model output at step {self.global_step}, skipping batch for model {model_idx}")
-                        continue
+                        skip_backward = True
 
-                    if isinstance(target_for_loss, dict):
-                        # Unpack for MaskedSpatialLoss: cbf, att, mask
-                        loss_dict = self.custom_loss_fn(outputs_f32[0], outputs_f32[1],
-                                                        target_for_loss['cbf'], target_for_loss['att'],
-                                                        target_for_loss['mask'], processed_signals)
-                        loss = loss_dict['total_loss']
-                        comps = loss_dict
-                    else:
-                        loss, comps = self.custom_loss_fn(model_outputs=outputs_f32, targets=target_for_loss, global_epoch=epoch)
+                    if not skip_backward:
+                        if isinstance(target_for_loss, dict):
+                            # Unpack for MaskedSpatialLoss: cbf, att, mask
+                            loss_dict = self.custom_loss_fn(outputs_f32[0], outputs_f32[1],
+                                                            target_for_loss['cbf'], target_for_loss['att'],
+                                                            target_for_loss['mask'], processed_signals)
+                            loss = loss_dict['total_loss']
+                            comps = loss_dict
+                        else:
+                            loss, comps = self.custom_loss_fn(model_outputs=outputs_f32, targets=target_for_loss, global_epoch=epoch)
 
-                # NaN/Inf loss guard: skip batch to prevent gradient corruption
-                if torch.isnan(loss) or torch.isinf(loss):
+                # NaN/Inf loss guard: skip backward to prevent gradient corruption
+                if not skip_backward and (torch.isnan(loss) or torch.isinf(loss)):
                     if model_idx == 0:
                         logger.warning(f"NaN/Inf loss at step {self.global_step}, skipping batch for model {model_idx}")
                     optimizers[model_idx].zero_grad()
-                    continue
+                    skip_backward = True
 
-                self.scaler.scale(loss).backward()
-                self.scaler.unscale_(optimizers[model_idx])
-                torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
-                self.scaler.step(optimizers[model_idx])
+                if not skip_backward:
+                    self.scaler.scale(loss).backward()
+                    self.scaler.unscale_(optimizers[model_idx])
+                    torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
+                    self.scaler.step(optimizers[model_idx])
+
+                # Always step the scheduler to prevent desync across ensemble members
                 schedulers[model_idx].step()
-                
-                if model_idx == 0: total_loss += loss.item()
-                
-                if wandb.run and model_idx == 0 and self.global_step % 20 == 0:
-                    lrs = schedulers[model_idx].get_last_lr()
-                    log_dict = {"train/total_loss": loss.item(), "train/lr_head": lrs[-1]}
-                    if self.stage == 2:
-                        if isinstance(target_for_loss, dict):
-                            # Spatial mode: MaskedSpatialLoss returns cbf_loss, att_loss, etc.
-                            log_dict["train_comps/cbf_loss"] = comps.get('cbf_loss', torch.tensor(0.0)).item()
-                            log_dict["train_comps/att_loss"] = comps.get('att_loss', torch.tensor(0.0)).item()
-                            log_dict["train_comps/dc_loss"] = comps.get('dc_loss', torch.tensor(0.0)).item()
-                            log_dict["train_comps/variance_loss"] = comps.get('variance_loss', torch.tensor(0.0)).item()
 
-                            # === DIAGNOSTIC: Prediction vs Target Statistics ===
-                            # This helps catch mean-prediction issues during training
-                            mask = target_for_loss['mask']
-                            pred_cbf, pred_att = outputs_f32[0], outputs_f32[1]
-                            tgt_cbf, tgt_att = target_for_loss['cbf'], target_for_loss['att']
+                if not skip_backward:
+                    if model_idx == 0: total_loss += loss.item()
 
-                            # Compute masked statistics (normalized space for predictions)
-                            with torch.no_grad():
-                                pred_cbf_masked = pred_cbf[mask > 0.5]
-                                pred_att_masked = pred_att[mask > 0.5]
+                    if wandb.run and model_idx == 0 and self.global_step % 20 == 0:
+                        lrs = schedulers[model_idx].get_last_lr()
+                        log_dict = {"train/total_loss": loss.item(), "train/lr_head": lrs[-1]}
+                        if self.stage == 2:
+                            if isinstance(target_for_loss, dict):
+                                # Spatial mode: MaskedSpatialLoss returns cbf_loss, att_loss, etc.
+                                log_dict["train_comps/cbf_loss"] = comps.get('cbf_loss', torch.tensor(0.0)).item()
+                                log_dict["train_comps/att_loss"] = comps.get('att_loss', torch.tensor(0.0)).item()
+                                log_dict["train_comps/dc_loss"] = comps.get('dc_loss', torch.tensor(0.0)).item()
+                                log_dict["train_comps/variance_loss"] = comps.get('variance_loss', torch.tensor(0.0)).item()
 
-                                if len(pred_cbf_masked) > 0:
-                                    log_dict["diag/pred_cbf_mean"] = pred_cbf_masked.mean().item()
-                                    log_dict["diag/pred_cbf_std"] = pred_cbf_masked.std().item()
-                                    log_dict["diag/pred_att_mean"] = pred_att_masked.mean().item()
-                                    log_dict["diag/pred_att_std"] = pred_att_masked.std().item()
+                                # === DIAGNOSTIC: Prediction vs Target Statistics ===
+                                # This helps catch mean-prediction issues during training
+                                mask = target_for_loss['mask']
+                                pred_cbf, pred_att = outputs_f32[0], outputs_f32[1]
+                                tgt_cbf, tgt_att = target_for_loss['cbf'], target_for_loss['att']
 
-                                    # Target stats (raw, for reference)
-                                    tgt_cbf_masked = tgt_cbf[mask > 0.5]
-                                    tgt_att_masked = tgt_att[mask > 0.5]
-                                    log_dict["diag/tgt_cbf_mean"] = tgt_cbf_masked.mean().item()
-                                    log_dict["diag/tgt_cbf_std"] = tgt_cbf_masked.std().item()
-                                    log_dict["diag/tgt_att_mean"] = tgt_att_masked.mean().item()
-                                    log_dict["diag/tgt_att_std"] = tgt_att_masked.std().item()
-                        else:
-                            # Voxel mode: CustomLoss returns mae, mse, nll components
-                            log_dict["train_comps/mae_loss"] = comps.get('param_mae_loss', torch.tensor(0.0)).item()
-                            log_dict["train_comps/mse_loss"] = comps.get('param_mse_loss', torch.tensor(0.0)).item()
-                            log_dict["train_comps/nll_loss"] = comps.get('param_nll_loss', torch.tensor(0.0)).item()
-                            log_dict["train_comps/log_var_reg"] = comps.get('log_var_reg_loss', torch.tensor(0.0)).item()
-                    wandb.log(log_dict, step=self.global_step)
+                                # Compute masked statistics (normalized space for predictions)
+                                with torch.no_grad():
+                                    pred_cbf_masked = pred_cbf[mask > 0.5]
+                                    pred_att_masked = pred_att[mask > 0.5]
+
+                                    if len(pred_cbf_masked) > 0:
+                                        log_dict["diag/pred_cbf_mean"] = pred_cbf_masked.mean().item()
+                                        log_dict["diag/pred_cbf_std"] = pred_cbf_masked.std().item()
+                                        log_dict["diag/pred_att_mean"] = pred_att_masked.mean().item()
+                                        log_dict["diag/pred_att_std"] = pred_att_masked.std().item()
+
+                                        # Target stats (raw, for reference)
+                                        tgt_cbf_masked = tgt_cbf[mask > 0.5]
+                                        tgt_att_masked = tgt_att[mask > 0.5]
+                                        log_dict["diag/tgt_cbf_mean"] = tgt_cbf_masked.mean().item()
+                                        log_dict["diag/tgt_cbf_std"] = tgt_cbf_masked.std().item()
+                                        log_dict["diag/tgt_att_mean"] = tgt_att_masked.mean().item()
+                                        log_dict["diag/tgt_att_std"] = tgt_att_masked.std().item()
+                            else:
+                                # Voxel mode: CustomLoss returns mae, mse, nll components
+                                log_dict["train_comps/mae_loss"] = comps.get('param_mae_loss', torch.tensor(0.0)).item()
+                                log_dict["train_comps/mse_loss"] = comps.get('param_mse_loss', torch.tensor(0.0)).item()
+                                log_dict["train_comps/nll_loss"] = comps.get('param_nll_loss', torch.tensor(0.0)).item()
+                                log_dict["train_comps/log_var_reg"] = comps.get('log_var_reg_loss', torch.tensor(0.0)).item()
+                        wandb.log(log_dict, step=self.global_step)
 
             # Update scaler ONCE per batch, after all ensemble members
             self.scaler.update()

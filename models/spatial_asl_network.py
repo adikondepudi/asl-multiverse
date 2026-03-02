@@ -876,9 +876,12 @@ class MaskedSpatialLoss(nn.Module):
                 variance_loss = self.variance_weight * (avg_cbf_var_penalty + avg_att_var_penalty)
 
         # --- Data Consistency Loss (Physics-Informed) ---
-        # This loss ensures that predicted CBF/ATT values, when plugged back into
-        # the kinetic equations, reproduce the observed MRI signal intensities.
-        # This acts as a powerful regularizer anchoring the network to physical reality.
+        # WARNING: The KineticModel used here is initialized in asl_trainer.py with
+        # physics params from the training config (T1_artery, alpha_PCASL, etc.), but
+        # the training data may have been generated with DIFFERENT physics params
+        # (e.g., generate_clean_library uses its own defaults). If these don't match,
+        # the DC loss will push the network toward wrong parameter values. Ensure
+        # data-generation physics params match the KineticModel params in your config.
         dc_loss = torch.tensor(0.0, device=pred_cbf.device)
 
         if self.dc_weight > 0 and self.kinetic_model is not None and input_signals is not None:

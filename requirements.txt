@@ -4,3 +4,4 @@ plotly
 pyyaml
 numpy
 matplotlib
+scikit-image
