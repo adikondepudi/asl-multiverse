@@ -98,6 +98,7 @@ def generate_spatial_chunk(args):
     n_plds = len(plds)
     signals_batch = []
     targets_batch = []
+    t1_batch = []
 
     # Pre-compute physics constants for vectorized signal generation
     plds_bc = plds[:, np.newaxis, np.newaxis].astype(np.float32)
@@ -119,6 +120,7 @@ def generate_spatial_chunk(args):
             alpha_p = asl_params.alpha_PCASL * (asl_params.alpha_BS1**4)
             alpha_v = asl_params.alpha_VSASL * (asl_params.alpha_BS1**3)
             tau = asl_params.T_tau
+        t1_batch.append(t1_b)
         t2_f = asl_params.T2_factor
         t_sat_vs = asl_params.T_sat_vs
 
@@ -173,7 +175,8 @@ def generate_spatial_chunk(args):
     np.savez_compressed(
         output_dir / f'spatial_chunk_{chunk_id:04d}.npz',
         signals=np.array(signals_batch),
-        targets=np.array(targets_batch)
+        targets=np.array(targets_batch),
+        t1_artery=np.array(t1_batch, dtype=np.float32),
     )
     
     return len(signals_batch)

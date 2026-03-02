@@ -512,7 +512,6 @@ class EnhancedASLTrainer:
                 self.scaler.unscale_(optimizers[model_idx])
                 torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
                 self.scaler.step(optimizers[model_idx])
-                self.scaler.update()
                 schedulers[model_idx].step()
                 
                 if model_idx == 0: total_loss += loss.item()
@@ -559,6 +558,9 @@ class EnhancedASLTrainer:
                             log_dict["train_comps/nll_loss"] = comps.get('param_nll_loss', torch.tensor(0.0)).item()
                             log_dict["train_comps/log_var_reg"] = comps.get('log_var_reg_loss', torch.tensor(0.0)).item()
                     wandb.log(log_dict, step=self.global_step)
+
+            # Update scaler ONCE per batch, after all ensemble members
+            self.scaler.update()
 
             self.global_step += 1
         return total_loss / steps, {}

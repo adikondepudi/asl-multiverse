@@ -313,7 +313,13 @@ def run_comprehensive_asl_research(config: ResearchConfig, stage: int, output_di
                 sigs_flat = sigs.transpose(0, 2, 3, 1).reshape(N, -1)
                 tgts_flat = tgts.transpose(0, 2, 3, 1).reshape(N, 2)
                 
-                t1_vals = np.full((N, 1), config.T1_artery, dtype=np.float32)
+                if 't1_artery' in d:
+                    t1_per_phantom = d['t1_artery']  # (B,)
+                    t1_vals = np.broadcast_to(
+                        t1_per_phantom[:, np.newaxis, np.newaxis], (B, H, W)
+                    ).reshape(N, 1).astype(np.float32)
+                else:
+                    t1_vals = np.full((N, 1), config.T1_artery, dtype=np.float32)
                 z_vals = np.full((N, 1), 15.0, dtype=np.float32)
                 
                 params_flat = np.concatenate([tgts_flat, t1_vals, z_vals], axis=1)

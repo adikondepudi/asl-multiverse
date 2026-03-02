@@ -281,17 +281,15 @@ class AmplitudeAwareSpatialASLNet(nn.Module):
 
         # Amplitude-dependent CBF modulation
         if use_amplitude_output_modulation:
-            # Learn a MULTIPLICATIVE CORRECTION to the direct amplitude estimate
-            # CBF_final = CBF_spatial * (base_amplitude * learned_correction)
-            # This ensures amplitude directly influences CBF even before training
-            self.cbf_amplitude_correction = nn.Sequential(
-                nn.Linear(self.conditioning_dim, 32),
+            # Per-pixel additive correction from raw input via 1x1 convolutions
+            # Fixes: spatial invariance (no global pooling) and z-score conflict (additive, not multiplicative)
+            self.cbf_amplitude_conv = nn.Sequential(
+                nn.Conv2d(self.in_channels, 16, kernel_size=1),
                 nn.ReLU(inplace=True),
-                nn.Linear(32, 1),
+                nn.Conv2d(16, 1, kernel_size=1),
             )
-            # Initialize correction to output 0 (so total scale = base_amplitude * exp(0) = base_amplitude)
-            nn.init.zeros_(self.cbf_amplitude_correction[-1].weight)
-            nn.init.zeros_(self.cbf_amplitude_correction[-1].bias)
+            nn.init.zeros_(self.cbf_amplitude_conv[-1].weight)
+            nn.init.zeros_(self.cbf_amplitude_conv[-1].bias)
 
         # Initialize output head
         self._init_output_weights()
@@ -354,29 +352,11 @@ class AmplitudeAwareSpatialASLNet(nn.Module):
         cbf_spatial = spatial_out[:, 0:1, :, :]  # (B, 1, H, W)
         att_spatial = spatial_out[:, 1:2, :, :]  # (B, 1, H, W)
 
-        # Apply amplitude-dependent scaling to CBF
+        # Apply amplitude-dependent correction to CBF
         if self.use_amplitude_output_modulation:
-            # DIRECT AMPLITUDE CONNECTION:
-            # Use mean signal amplitude as base scale (this preserves CBF info directly)
-            # Channel means are the first n_channels features in raw_amplitude
-            channel_means = raw_amplitude[:, :self.in_channels]  # (B, 12)
-            base_amplitude = channel_means.mean(dim=1, keepdim=True)  # (B, 1)
-
-            # Normalize base amplitude to reasonable range (training data has ~0.01-0.1 signals)
-            # This creates a direct CBF proxy: higher amplitude = higher CBF
-            amplitude_proxy = base_amplitude * 100.0  # Scale to ~1-10 range
-
-            # Learn a correction factor (log-scale for stability)
-            log_correction = self.cbf_amplitude_correction(conditioning)  # (B, 1)
-            correction = torch.exp(log_correction.clamp(-2, 2))  # Bounded correction
-
-            # Final scale combines direct amplitude with learned correction
-            cbf_scale = amplitude_proxy * correction  # (B, 1)
-            cbf_scale = cbf_scale.unsqueeze(-1).unsqueeze(-1)  # (B, 1, 1, 1)
-
-            # The spatial network predicts RELATIVE CBF patterns
-            # The amplitude path provides the ABSOLUTE scale
-            cbf_pred = cbf_spatial * cbf_scale
+            # Per-pixel additive correction from raw input amplitude
+            cbf_correction = self.cbf_amplitude_conv(x)  # (B, 1, H, W)
+            cbf_pred = cbf_spatial + cbf_correction
         else:
             cbf_pred = cbf_spatial
 
@@ -389,6 +369,23 @@ class AmplitudeAwareSpatialASLNet(nn.Module):
         att_logvar = torch.zeros_like(att_pred) - 5.0
 
         return cbf_pred, att_pred, cbf_logvar, att_logvar
+
+    def load_state_dict(self, state_dict, strict=True):
+        """Load with backwards compatibility for v1 multiplicative output modulation."""
+        has_old_keys = any('cbf_amplitude_correction' in k for k in state_dict.keys())
+        has_new_keys = any('cbf_amplitude_conv' in k for k in state_dict.keys())
+
+        if has_old_keys and not has_new_keys and self.use_amplitude_output_modulation:
+            import warnings
+            warnings.warn(
+                "Loading v1 checkpoint with multiplicative output modulation. "
+                "New additive correction head initialized to zero. Retraining recommended.",
+                UserWarning
+            )
+            filtered = {k: v for k, v in state_dict.items() if 'cbf_amplitude_correction' not in k}
+            return super().load_state_dict(filtered, strict=False)
+
+        return super().load_state_dict(state_dict, strict=strict)
 
     def _match_size(self, x: torch.Tensor, target: torch.Tensor) -> torch.Tensor:
         """Pad tensor x to match target size (handles odd dimensions)."""

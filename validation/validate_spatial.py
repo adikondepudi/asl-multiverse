@@ -200,11 +200,13 @@ class SpatialValidator:
         signals = np.concatenate(signals_list, axis=0)[:max_samples]
         targets = np.concatenate(targets_list, axis=0)[:max_samples]
 
-        # Apply M0 normalization (same as SpatialDataset)
+        # Apply M0 normalization (same as SpatialDataset) and global_scale_factor
         M0_SCALE = 100.0
-        signals = signals * M0_SCALE
+        global_scale_factor = self.config.get('global_scale_factor', 10.0)
+        signals = signals * M0_SCALE * global_scale_factor
 
         logger.info(f"Loaded {len(signals)} test samples")
+        logger.info(f"  Applied M0_SCALE={M0_SCALE}, global_scale_factor={global_scale_factor}")
         logger.info(f"  Signal shape: {signals.shape}")
         logger.info(f"  Target shape: {targets.shape}")
 
