@@ -49,7 +49,16 @@ amplitude_ablation_v1/
 amplitude_ablation_v2/
 amplitude_ablation_v3/
 amplitude_ablation_v4/
-amplitude_ablation_v5/
+amplitude_ablation_v5/*
+!amplitude_ablation_v5/run_v5_pipeline.sh
+!amplitude_ablation_v5/generate_data.slurm
+!amplitude_ablation_v5/generate_plots.slurm
+!amplitude_ablation_v5/A_Baseline_SpatialASL
+amplitude_ablation_v5/A_Baseline_SpatialASL/*
+!amplitude_ablation_v5/A_Baseline_SpatialASL/run.slurm
+!amplitude_ablation_v5/B_AmplitudeAware
+amplitude_ablation_v5/B_AmplitudeAware/*
+!amplitude_ablation_v5/B_AmplitudeAware/run.slurm
 hpc_ablation_jobs/
 archive/
 
