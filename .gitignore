@@ -56,9 +56,11 @@ amplitude_ablation_v5/*
 !amplitude_ablation_v5/A_Baseline_SpatialASL
 amplitude_ablation_v5/A_Baseline_SpatialASL/*
 !amplitude_ablation_v5/A_Baseline_SpatialASL/run.slurm
+!amplitude_ablation_v5/A_Baseline_SpatialASL/config.yaml
 !amplitude_ablation_v5/B_AmplitudeAware
 amplitude_ablation_v5/B_AmplitudeAware/*
 !amplitude_ablation_v5/B_AmplitudeAware/run.slurm
+!amplitude_ablation_v5/B_AmplitudeAware/config.yaml
 hpc_ablation_jobs/
 archive/
 

@@ -1,0 +1,108 @@
+# =============================================================================
+# V5 AMPLITUDE-AWARE SPATIAL ASL NETWORK (OVERHAUL)
+# =============================================================================
+# AmplitudeAwareSpatialASLNet with all overhaul fixes applied:
+#   - NLL loss (replaces L1) with learned log_var heads
+#   - alpha_BS1 domain randomization [0.85, 1.0]
+#   - Rician noise with spatial correlation
+#   - Expanded CBF/ATT ranges in training data
+#
+# SPEED OPTIMIZED for experimental runs:
+#   - n_ensembles: 1 (not 3) — 3x faster per epoch
+#   - batch_size: 64 (not 32) — better A100 utilization
+#   - torch.compile enabled — 20-30% speedup
+#   - 40 epochs with patience 12
+# =============================================================================
+
+training:
+  model_class_name: AmplitudeAwareSpatialASLNet
+
+  # Network capacity
+  hidden_sizes: [32, 64, 128, 256]
+  dropout_rate: 0.1
+  norm_type: group
+
+  # Amplitude-aware features
+  use_film_at_bottleneck: true
+  use_film_at_decoder: true
+  use_amplitude_output_modulation: true
+
+  # Loss: NLL (fixes regression-to-median from L1)
+  loss_type: nll
+  dc_weight: 0.0
+  variance_weight: 0.1
+  att_scale: 1.0
+  cbf_weight: 1.0
+  att_weight: 1.0
+
+  # Uncertainty bounds
+  log_var_cbf_min: -5.0
+  log_var_cbf_max: 10.0
+  log_var_att_min: -5.0
+  log_var_att_max: 14.0
+
+  # Training parameters — SPEED OPTIMIZED
+  learning_rate: 0.0001
+  weight_decay: 0.0001
+  batch_size: 64
+  n_epochs: 40
+  n_ensembles: 1
+
+  # Performance optimizations
+  use_amp: true
+  use_tf32: true
+  use_compile: true
+  cudnn_benchmark: true
+  num_workers: 8
+  pin_memory: true
+
+  # Early stopping
+  early_stopping_patience: 12
+  early_stopping_min_delta: 0.0
+  validation_steps_per_epoch: 20
+
+data:
+  use_offline_dataset: true
+  offline_dataset_path: asl_spatial_dataset_v5
+  pld_values: [500, 1000, 1500, 2000, 2500, 3000]
+
+  normalization_mode: global_scale
+  global_scale_factor: 10.0
+
+  noise_type: rician
+  data_noise_components:
+    - thermal
+    - physio
+    - drift
+
+noise_config:
+  snr_range: [2.0, 25.0]
+  spatial_noise_sigma: 0.8
+  physio_amp_range: [0.03, 0.15]
+  physio_freq_range: [0.5, 2.0]
+  drift_range: [-0.03, 0.03]
+  spike_probability: 0.02
+  spike_magnitude_range: [2.0, 5.0]
+
+simulation:
+  T1_artery: 1650.0
+  T_tau: 1800.0
+  alpha_PCASL: 0.85
+  alpha_VSASL: 0.56
+  T2_factor: 1.0
+  alpha_BS1: 1.0
+
+  domain_randomization:
+    enabled: true
+    T1_artery_range: [1550.0, 2150.0]
+    alpha_PCASL_range: [0.75, 0.95]
+    alpha_VSASL_range: [0.40, 0.70]
+    alpha_BS1_range: [0.85, 1.0]
+    T_tau_perturb: 0.10
+
+_experiment:
+  name: v5_amplitude_aware_overhaul
+  description: |
+    AmplitudeAwareSpatialASLNet with overhaul fixes: NLL loss, learned log_var,
+    alpha_BS1 domain randomization, spatially correlated Rician noise.
+    Speed-optimized: 1 ensemble, batch 64, torch.compile.
