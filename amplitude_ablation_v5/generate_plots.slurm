@@ -18,9 +18,13 @@ echo "GENERATING BIAS/COV PLOTS (v5)"
 echo "Started: $(date)"
 echo "============================================"
 
-# Ensure config.yaml exists in each run dir (plot script needs it)
-cp -n config/v5_baseline_spatial.yaml amplitude_ablation_v5/A_Baseline_SpatialASL/config.yaml 2>/dev/null || true
-cp -n config/v5_amplitude_aware.yaml amplitude_ablation_v5/B_AmplitudeAware/config.yaml 2>/dev/null || true
+# Verify configs exist in experiment dirs (plot script needs them)
+for exp_dir in amplitude_ablation_v5/A_Baseline_SpatialASL amplitude_ablation_v5/B_AmplitudeAware; do
+    if [ ! -f "${exp_dir}/config.yaml" ]; then
+        echo "ERROR: Missing ${exp_dir}/config.yaml"
+        exit 1
+    fi
+done
 
 python generate_bias_cov_plots_v2.py \
     --output-dir bias_cov_results_v5 \
