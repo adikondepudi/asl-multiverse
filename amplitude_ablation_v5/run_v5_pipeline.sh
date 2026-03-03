@@ -9,17 +9,25 @@
 #SBATCH --error=amplitude_ablation_v5/orchestrator_%j.err
 
 # =============================================================================
-# V5 EXPANDED-RANGE RETRAINING PIPELINE
+# V5 OVERHAUL RETRAINING PIPELINE
 # =============================================================================
-# Fixes from v4:
-#   1. Expanded training CBF/ATT ranges (GM: 30-90/500-2500, WM: 10-40/800-3000)
-#      to eliminate CBF bias dip at ATT > 1800ms and CBF regression to mean
-#   2. global_scale_factor = 10.0 for both experiments (v4 Baseline had 1.0)
+# Full overhaul from v4:
+#   1. Expanded CBF/ATT ranges (GM: 10-120, WM: 5-50, tumor: 80-200)
+#   2. NLL loss (replaces L1) with learned log_var heads
+#   3. No GroupNorm on encoder1 (preserves CBF amplitude)
+#   4. alpha_BS1 domain randomization [0.85, 1.0]
+#   5. Spatially correlated Rician noise (Gaussian blur)
+#   6. global_scale_factor = 10.0 for both experiments
+#
+# SPEED OPTIMIZED for experimental runs:
+#   - 1 ensemble (not 3), batch 64, torch.compile
+#   - Baseline: 30 epochs, patience 10
+#   - AmpAware: 40 epochs, patience 12
 #
 # Runs the full pipeline:
 #   1. Generate spatial training data (100k samples, expanded ranges)
-#   2. Train Baseline SpatialASLNet (50 epochs, 3 ensembles)
-#   3. Train AmplitudeAwareSpatialASLNet (100 epochs, 3 ensembles)
+#   2. Train Baseline SpatialASLNet (30 epochs, 1 ensemble)
+#   3. Train AmplitudeAwareSpatialASLNet (40 epochs, 1 ensemble)
 #   4. Generate bias/CoV plots comparing both models vs LS
 #
 # Usage:
@@ -27,10 +35,10 @@
 #   sbatch amplitude_ablation_v5/run_v5_pipeline.sh --train-only  # Skip data gen
 #   sbatch amplitude_ablation_v5/run_v5_pipeline.sh --plots-only  # Skip data+training
 #
-# Estimated time: ~10-12 hours total
+# Estimated time: ~5-7 hours total
 #   Data generation: ~2-4 hours (CPU)
-#   Baseline training: ~1-2 hours (GPU)
-#   AmplitudeAware training: ~6-7 hours (GPU)
+#   Baseline training: ~1 hour (GPU, speed-optimized)
+#   AmplitudeAware training: ~2-3 hours (GPU, speed-optimized)
 #   Bias/CoV plots: ~1-2 hours (CPU+GPU)
 # =============================================================================
 
@@ -53,7 +61,7 @@ for arg in "$@"; do
 done
 
 echo "============================================"
-echo "V5 EXPANDED-RANGE RETRAINING PIPELINE"
+echo "V5 OVERHAUL RETRAINING PIPELINE"
 echo "============================================"
 echo "Started: $(date)"
 echo "Train only: ${TRAIN_ONLY}"
@@ -73,7 +81,7 @@ DATASET_DIR="asl_spatial_dataset_v5"
 # =============================================================================
 if [ "$TRAIN_ONLY" = false ] && [ "$PLOTS_ONLY" = false ]; then
     echo ""
-    echo "[1/4] Submitting data generation (100k spatial samples, expanded ranges)..."
+    echo "[1/4] Submitting data generation (100k spatial samples, overhaul ranges)..."
 
     DATA_JOB=$(sbatch --parsable amplitude_ablation_v5/generate_data.slurm)
     echo "  Data generation job: ${DATA_JOB}"

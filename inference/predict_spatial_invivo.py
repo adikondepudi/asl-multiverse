@@ -162,7 +162,8 @@ def load_spatial_model(model_dir: Path, device: torch.device) -> Tuple[List[torc
     return models, config, norm_stats
 
 
-def preprocess_subject(subject_dir: Path, model_plds: List[int], global_scale: float = 10.0) -> Tuple[np.ndarray, np.ndarray, nib.Nifti1Image, np.ndarray]:
+def preprocess_subject(subject_dir: Path, model_plds: List[int], global_scale: float = 10.0,
+                       alpha_bs1: float = 0.93) -> Tuple[np.ndarray, np.ndarray, nib.Nifti1Image, np.ndarray]:
     """
     Preprocess a single subject's data for spatial model inference.
 
@@ -233,29 +234,27 @@ def preprocess_subject(subject_dir: Path, model_plds: List[int], global_scale: f
     pcasl_stack = np.stack(pcasl_volumes, axis=-1)
     vsasl_stack = np.stack(vsasl_volumes, axis=-1)
 
-    # Handle PLD mismatch - insert zeros for missing PLDs
-    n_model_plds = len(model_plds)
-    n_subject_plds = len(subject_plds)
-
+    # Validate PLDs match model expectations — do NOT zero-pad missing PLDs.
+    # Zero-padding corrupts both NN (deflates amplitude features → CBF underestimation)
+    # and LS (forces kinetic curve to zero → ATT/CBF pushed to parameter bounds).
     if set(subject_plds) != set(model_plds):
-        print(f"  WARNING: PLD mismatch - model expects {model_plds}, subject has {subject_plds}")
+        raise ValueError(
+            f"PLD mismatch: model expects {model_plds}, subject has {subject_plds}. "
+            f"Zero-padding is disabled because it corrupts CBF/ATT estimates. "
+            f"Retrain the model with the subject's PLD set, or acquire data with "
+            f"the model's expected PLDs: {model_plds}."
+        )
 
-        # Create full-size arrays with zeros
-        h, w, z = pcasl_stack.shape[:3]
-        pcasl_full = np.zeros((h, w, z, n_model_plds), dtype=np.float32)
-        vsasl_full = np.zeros((h, w, z, n_model_plds), dtype=np.float32)
-
-        # Map subject PLDs to model PLDs
-        for i, pld in enumerate(subject_plds):
-            if pld in model_plds:
-                idx = model_plds.index(pld)
-                pcasl_full[..., idx] = pcasl_stack[..., i]
-                vsasl_full[..., idx] = vsasl_stack[..., i]
-            else:
-                print(f"    Dropping PLD {pld} (not in model)")
-
-        pcasl_stack = pcasl_full
-        vsasl_stack = vsasl_full
+    # Apply background suppression correction to match training distribution (alpha_BS1=1.0).
+    # In-vivo signal = true_signal * alpha_BS1^n; divide to recover true_signal magnitude.
+    # PCASL uses 4 BS pulses, VSASL uses 3 BS pulses.
+    if alpha_bs1 != 1.0:
+        pcasl_correction = alpha_bs1 ** 4
+        vsasl_correction = alpha_bs1 ** 3
+        pcasl_stack = pcasl_stack / pcasl_correction
+        vsasl_stack = vsasl_stack / vsasl_correction
+        print(f"  BS correction (alpha_BS1={alpha_bs1:.3f}): "
+              f"PCASL x{1/pcasl_correction:.3f}, VSASL x{1/vsasl_correction:.3f}")
 
     # Concatenate PCASL + VSASL: (H, W, Z, 2*n_plds)
     combined = np.concatenate([pcasl_stack, vsasl_stack], axis=-1)
@@ -385,7 +384,7 @@ def save_nifti(data: np.ndarray, reference: nib.Nifti1Image, output_path: Path):
 
 def process_subject(subject_dir: Path, models: List[torch.nn.Module],
                     config: Dict, norm_stats: Dict, device: torch.device,
-                    output_dir: Path):
+                    output_dir: Path, alpha_bs1: float = 0.93):
     """Process a single subject."""
     subject_id = subject_dir.name
     subject_output = output_dir / subject_id
@@ -399,7 +398,7 @@ def process_subject(subject_dir: Path, models: List[torch.nn.Module],
 
     # Preprocess
     spatial_stack, brain_mask, ref_img, subject_plds = preprocess_subject(
-        subject_dir, model_plds, global_scale
+        subject_dir, model_plds, global_scale, alpha_bs1=alpha_bs1
     )
 
     # Run inference
@@ -423,6 +422,7 @@ def process_subject(subject_dir: Path, models: List[torch.nn.Module],
         'subject_plds': subject_plds.tolist(),
         'model_plds': model_plds,
         'global_scale': global_scale,
+        'alpha_bs1': alpha_bs1,
         'cbf_stats': {
             'mean': float(cbf_masked[brain_mask].mean()),
             'std': float(cbf_masked[brain_mask].std()),
@@ -459,6 +459,10 @@ def main():
                         help="Device: 'cuda', 'mps', 'cpu', or 'auto'")
     parser.add_argument("--subjects", type=str, nargs='+', default=None,
                         help="Specific subjects to process (default: all)")
+    parser.add_argument("--alpha-bs1", type=float, default=0.93,
+                        help="Background suppression efficiency (default: 0.93 for in-vivo). "
+                             "Use 1.0 for no BS correction. Applied as: "
+                             "PCASL /= alpha_bs1^4, VSASL /= alpha_bs1^3.")
 
     args = parser.parse_args()
 
@@ -481,6 +485,8 @@ def main():
 
     # Load model
     models, config, norm_stats = load_spatial_model(model_dir, device)
+    print(f"  alpha_BS1 correction: {args.alpha_bs1} "
+          f"(PCASL x{1/args.alpha_bs1**4:.3f}, VSASL x{1/args.alpha_bs1**3:.3f})")
 
     # Find subjects
     subject_dirs = sorted([d for d in invivo_dir.iterdir() if d.is_dir() and not d.name.startswith('.')])
@@ -493,7 +499,8 @@ def main():
     # Process each subject
     for subject_dir in tqdm(subject_dirs, desc="Processing subjects"):
         try:
-            process_subject(subject_dir, models, config, norm_stats, device, output_dir)
+            process_subject(subject_dir, models, config, norm_stats, device, output_dir,
+                           alpha_bs1=args.alpha_bs1)
         except Exception as e:
             print(f"  ERROR processing {subject_dir.name}: {e}")
             import traceback

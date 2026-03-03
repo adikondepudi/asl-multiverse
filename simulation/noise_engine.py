@@ -5,9 +5,32 @@ Handles both PyTorch Tensors (Trainer) and NumPy Arrays (Validation/Sim).
 Supports both 1D voxel-wise and 2D spatial processing.
 """
 import torch
+import torch.nn.functional as F
 import numpy as np
 from typing import Dict, Union, List, Tuple
 from scipy.ndimage import gaussian_filter, affine_transform
+
+
+def _make_gaussian_kernel(sigma: float, device: torch.device) -> torch.Tensor:
+    """
+    Create a normalized 2D Gaussian kernel for spatial noise blurring.
+
+    The kernel covers ±3σ so it captures 99.7% of the Gaussian distribution.
+
+    Args:
+        sigma: Gaussian standard deviation in pixels
+        device: Target torch device
+
+    Returns:
+        kernel: (size, size) normalized 2D Gaussian tensor
+    """
+    radius = int(np.ceil(3 * sigma))
+    size = 2 * radius + 1
+    x = torch.arange(size, dtype=torch.float32, device=device) - radius
+    gauss_1d = torch.exp(-x ** 2 / (2 * sigma ** 2))
+    gauss_1d = gauss_1d / gauss_1d.sum()
+    kernel = gauss_1d.unsqueeze(0) * gauss_1d.unsqueeze(1)  # (size, size)
+    return kernel
 
 
 class NoiseInjector:
@@ -248,15 +271,22 @@ class NoiseInjector:
                 noise_real_l = torch.randn_like(signals) * noise_sigma * s_vec
                 noise_imag_l = torch.randn_like(signals) * noise_sigma * s_vec
 
-                # Optionally apply spatial correlation for more realistic noise
+                # Optionally apply spatial correlation for more realistic noise.
+                # Uses a proper Gaussian kernel (controlled by spatial_noise_sigma)
+                # rather than AvgPool2d (box blur), so correlation length is
+                # physically meaningful and configurable.
                 if self.spatial_noise_sigma > 0:
-                    blur = torch.nn.AvgPool2d(3, stride=1, padding=1)
-                    noise_real_c = blur(noise_real_c)
-                    noise_imag_c = blur(noise_imag_c)
-                    noise_real_l = blur(noise_real_l)
-                    noise_imag_l = blur(noise_imag_l)
+                    kernel = _make_gaussian_kernel(self.spatial_noise_sigma, device)
+                    k_size = kernel.shape[0]
+                    padding = k_size // 2
+                    # Expand kernel to (C, 1, kH, kW) for grouped depthwise conv
+                    kernel_4d = kernel.unsqueeze(0).unsqueeze(0).expand(C, 1, k_size, k_size).contiguous()
+                    noise_real_c = F.conv2d(noise_real_c, kernel_4d, padding=padding, groups=C)
+                    noise_imag_c = F.conv2d(noise_imag_c, kernel_4d, padding=padding, groups=C)
+                    noise_real_l = F.conv2d(noise_real_l, kernel_4d, padding=padding, groups=C)
+                    noise_imag_l = F.conv2d(noise_imag_l, kernel_4d, padding=padding, groups=C)
 
-                    # Rescale to maintain target SNR
+                    # Rescale to maintain target SNR after blurring reduces variance
                     target_scale = noise_sigma * s_vec
                     noise_real_c = noise_real_c * target_scale / (noise_real_c.std(dim=(2, 3), keepdim=True) + 1e-6)
                     noise_imag_c = noise_imag_c * target_scale / (noise_imag_c.std(dim=(2, 3), keepdim=True) + 1e-6)

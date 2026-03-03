@@ -14,8 +14,9 @@ cd $SLURM_SUBMIT_DIR
 
 echo "============================================"
 echo "DATA GENERATION: asl_spatial_dataset_v5"
-echo "Expanded ranges: GM CBF 30-90, ATT 500-2500"
-echo "                 WM CBF 10-40, ATT 800-3000"
+echo "Overhaul ranges: GM CBF 10-120, WM CBF 5-50"
+echo "  + tumor_hyper CBF 80-200, stroke_core CBF 0-10"
+echo "  + alpha_BS1 domain randomization [0.85, 1.0]"
 echo "Started: $(date)"
 echo "Host: $(hostname)"
 echo "============================================"

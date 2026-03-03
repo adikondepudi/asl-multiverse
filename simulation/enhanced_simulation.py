@@ -33,16 +33,18 @@ class SpatialPhantomGenerator:
     """
 
     # Tissue CBF values (ml/100g/min)
-    # Ranges expanded in v5 to cover full evaluation range and prevent
-    # regression-to-mean (v4 had GM 50-70 / WM 18-28 → NN predicted ~50 for all CBF)
+    # Ranges expanded in v6 to cover full [0, 200] range and prevent OOD
+    # extrapolation failures at high CBF (v5 union only reached ~150).
+    # Union coverage: 0-5 (csf/stroke_core), 5-50 (WM), 10-120 (GM),
+    # 80-200 (tumor_hyper). Full [0, 200] covered.
     TISSUE_CBF = {
-        'gray_matter': (30.0, 90.0),
-        'white_matter': (10.0, 40.0),
-        'csf': (0.0, 5.0),
-        'tumor_hyper': (90.0, 150.0),  # Hypervascular tumor
-        'tumor_hypo': (5.0, 20.0),     # Hypoperfused tumor core
-        'stroke_core': (2.0, 10.0),    # Ischemic core
-        'stroke_penumbra': (15.0, 35.0),  # Penumbra (salvageable)
+        'gray_matter': (10.0, 120.0),     # Expanded: covers normal and hyperemic GM
+        'white_matter': (5.0, 50.0),      # Expanded: covers normal and mild hyperperfusion WM
+        'csf': (0.0, 5.0),               # Unchanged: CSF near-zero flow
+        'tumor_hyper': (80.0, 200.0),    # Expanded upper end for aggressive tumors
+        'tumor_hypo': (2.0, 20.0),       # Slightly expanded lower end
+        'stroke_core': (0.0, 10.0),      # Expanded to 0 for complete infarct
+        'stroke_penumbra': (10.0, 40.0), # Slightly expanded
     }
 
     # Tissue ATT values (ms)
@@ -65,6 +67,8 @@ class SpatialPhantomGenerator:
         'alpha_VSASL_range': (0.40, 0.70),      # VSS efficiency
         'T_tau_perturb': 0.10,                  # ±10% label duration
         'M0_scale_range': (0.9, 1.1),           # Receiver gain variations
+        'alpha_BS1_range': (0.85, 1.0),         # Background suppression efficiency
+                                                 # (1.0 = no BS; in-vivo ≈ 0.85–0.95)
     }
 
     def __init__(self, size: int = 64, pve_sigma: float = 1.0,
@@ -89,6 +93,7 @@ class SpatialPhantomGenerator:
             self.alpha_VSASL_range = self.domain_rand.get('alpha_VSASL_range', self.DEFAULT_DOMAIN_RAND['alpha_VSASL_range'])
             self.T_tau_perturb = self.domain_rand.get('T_tau_perturb', self.DEFAULT_DOMAIN_RAND['T_tau_perturb'])
             self.M0_scale_range = self.domain_rand.get('M0_scale_range', self.DEFAULT_DOMAIN_RAND['M0_scale_range'])
+            self.alpha_BS1_range = self.domain_rand.get('alpha_BS1_range', self.DEFAULT_DOMAIN_RAND['alpha_BS1_range'])
 
     def sample_physics_params(self, base_params: 'ASLParameters' = None) -> Dict:
         """
@@ -97,6 +102,14 @@ class SpatialPhantomGenerator:
         This prevents the network from overfitting to fixed parameter values,
         which is critical for generalization to real patient data.
 
+        alpha_BS1 (background suppression efficiency) is now sampled here and
+        applied to the effective labeling efficiencies:
+          - PCASL uses 4 BS pulses: eff_alpha_PCASL = alpha_PCASL_raw * alpha_BS1^4
+          - VSASL uses 3 BS pulses: eff_alpha_VSASL = alpha_VSASL_raw * alpha_BS1^3
+        At alpha_BS1=0.93 (typical in-vivo), this reduces PCASL efficiency by ~25%
+        and VSASL efficiency by ~20%. Without this variation, the network sees only
+        alpha_BS1=1.0 during training and underestimates CBF on in-vivo data.
+
         Args:
             base_params: Base ASLParameters to use as defaults
 
@@ -104,9 +117,10 @@ class SpatialPhantomGenerator:
             Dict with sampled physics parameters:
             - T1_artery: Blood T1 in ms
             - T_tau: Label duration in ms
-            - alpha_PCASL: PCASL labeling efficiency
-            - alpha_VSASL: VSASL labeling efficiency
+            - alpha_PCASL: Effective PCASL labeling efficiency (BS-corrected)
+            - alpha_VSASL: Effective VSASL labeling efficiency (BS-corrected)
             - M0_scale: M0 scaling factor
+            - alpha_BS1: Raw background suppression efficiency (for logging)
         """
         if base_params is None:
             base_params = ASLParameters()
@@ -114,24 +128,30 @@ class SpatialPhantomGenerator:
         if self.use_domain_rand:
             # Sample from ranges
             T1_artery = np.random.uniform(*self.T1_range)
-            alpha_PCASL = np.random.uniform(*self.alpha_PCASL_range)
-            alpha_VSASL = np.random.uniform(*self.alpha_VSASL_range)
+            alpha_PCASL_raw = np.random.uniform(*self.alpha_PCASL_range)
+            alpha_VSASL_raw = np.random.uniform(*self.alpha_VSASL_range)
             T_tau = base_params.T_tau * (1 + np.random.uniform(-self.T_tau_perturb, self.T_tau_perturb))
             M0_scale = np.random.uniform(*self.M0_scale_range)
+            # Sample background suppression efficiency and apply to labeling efficiencies
+            alpha_BS1 = np.random.uniform(*self.alpha_BS1_range)
+            alpha_PCASL = alpha_PCASL_raw * (alpha_BS1 ** 4)  # 4 BS pulses for PCASL
+            alpha_VSASL = alpha_VSASL_raw * (alpha_BS1 ** 3)  # 3 BS pulses for VSASL
         else:
-            # Use defaults
+            # Use defaults; still apply base BS1 correction for non-default alpha_BS1
             T1_artery = base_params.T1_artery
-            alpha_PCASL = base_params.alpha_PCASL
-            alpha_VSASL = base_params.alpha_VSASL
+            alpha_BS1 = base_params.alpha_BS1
+            alpha_PCASL = base_params.alpha_PCASL * (alpha_BS1 ** 4)
+            alpha_VSASL = base_params.alpha_VSASL * (alpha_BS1 ** 3)
             T_tau = base_params.T_tau
             M0_scale = 1.0
 
         return {
             'T1_artery': T1_artery,
             'T_tau': T_tau,
-            'alpha_PCASL': alpha_PCASL,
-            'alpha_VSASL': alpha_VSASL,
+            'alpha_PCASL': alpha_PCASL,   # Effective (BS-corrected)
+            'alpha_VSASL': alpha_VSASL,   # Effective (BS-corrected)
             'M0_scale': M0_scale,
+            'alpha_BS1': alpha_BS1,       # Raw value, for logging/reference
         }
         
     def _generate_blob_mask(self, center: Tuple[int, int], 
@@ -681,26 +701,26 @@ class RealisticASLSimulator(ASLSimulator):
             # --- 1. Generate Parameter Maps (The "Phantom") ---
             # Background (Gray Matter-ish) — sample uniformly across expanded range
             # then add spatial variation, matching SpatialPhantomGenerator.TISSUE_CBF/ATT
-            cbf_center = np.random.uniform(30, 90)
+            cbf_center = np.random.uniform(10, 120)  # Expanded: was (30, 90)
             att_center = np.random.uniform(500, 2500)
             cbf_map = np.random.normal(cbf_center, 8, (size, size))
             att_map = np.random.normal(att_center, 200, (size, size))
-            
+
             # Add Pathology Blobs
             num_blobs = np.random.randint(1, 4)
             for _ in range(num_blobs):
                 cx, cy = np.random.randint(10, size-10, 2)
                 r = np.random.randint(5, 15)
-                
+
                 y_grid, x_grid = np.ogrid[:size, :size]
                 mask = ((x_grid - cx)**2 + (y_grid - cy)**2) <= r**2
-                
+
                 # Flip coin: Tumor (High Flow) or Stroke (Low Flow)
                 if np.random.rand() > 0.5:
-                    cbf_map[mask] = np.random.uniform(90, 140)  # Hyperperfusion
+                    cbf_map[mask] = np.random.uniform(80, 200)  # Hyperperfusion; expanded upper to 200
                     att_map[mask] = np.random.uniform(500, 1000)  # Fast transit
                 else:
-                    cbf_map[mask] = np.random.uniform(5, 15)    # Hypoperfusion
+                    cbf_map[mask] = np.random.uniform(0, 15)    # Hypoperfusion; expanded lower to 0
                     att_map[mask] = np.random.uniform(2000, 3000)  # Delayed arrival
 
             # Smooth edges to simulate Partial Volume Effect

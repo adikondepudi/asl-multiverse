@@ -206,6 +206,29 @@ class DoubleConv(nn.Module):
         return self.double_conv(x)
 
 
+class DoubleConvNoNorm(nn.Module):
+    """Double convolution without GroupNorm for the first encoder layer.
+
+    GroupNorm destroys absolute amplitude information by normalizing per-group.
+    Since CBF is encoded primarily in signal amplitude (x ~ CBF * M0 * k(ATT, T1)),
+    applying GroupNorm in the very first layer removes the primary CBF signal.
+
+    Used for encoder1 in SpatialASLNet. Deeper layers still use DoubleConv with
+    GroupNorm because they benefit from normalization for stable training.
+    """
+    def __init__(self, in_channels: int, out_channels: int):
+        super().__init__()
+        self.double_conv = nn.Sequential(
+            nn.Conv2d(in_channels, out_channels, kernel_size=3, padding=1, bias=True),
+            nn.ReLU(inplace=True),
+            nn.Conv2d(out_channels, out_channels, kernel_size=3, padding=1, bias=True),
+            nn.ReLU(inplace=True)
+        )
+
+    def forward(self, x):
+        return self.double_conv(x)
+
+
 class SimpleCNN(nn.Module):
     """
     Simple 3-layer CNN without U-Net skip connections (ablation baseline).
@@ -382,7 +405,10 @@ class SpatialASLNet(nn.Module):
         in_channels = n_plds * 2  # PCASL + VSASL input channels
 
         # Encoder (Contracting Path)
-        self.encoder1 = DoubleConv(in_channels, features[0])
+        # First layer uses DoubleConvNoNorm to preserve signal amplitude (encodes CBF).
+        # GroupNorm in the first layer destroys the absolute amplitude information
+        # that distinguishes high-CBF from low-CBF voxels.
+        self.encoder1 = DoubleConvNoNorm(in_channels, features[0])
         self.pool1 = nn.MaxPool2d(2)
         self.encoder2 = DoubleConv(features[0], features[1])
         self.pool2 = nn.MaxPool2d(2)
@@ -398,8 +424,12 @@ class SpatialASLNet(nn.Module):
         self.up3 = nn.ConvTranspose2d(features[1], features[0], kernel_size=2, stride=2)
         self.decoder3 = DoubleConv(features[1], features[0])
 
-        # Output Head: 2 channels (CBF, ATT)
-        self.out_conv = nn.Conv2d(features[0], 2, kernel_size=1)
+        # Output heads: separate for CBF/ATT mean and log-variance
+        self.cbf_head = nn.Conv2d(features[0], 1, kernel_size=1)
+        self.att_head = nn.Conv2d(features[0], 1, kernel_size=1)
+        # Log-variance heads — trained when loss_type='nll', otherwise ignored
+        self.cbf_logvar_head = nn.Conv2d(features[0], 1, kernel_size=1)
+        self.att_logvar_head = nn.Conv2d(features[0], 1, kernel_size=1)
 
         # Initialize weights
         self._init_weights()
@@ -415,10 +445,17 @@ class SpatialASLNet(nn.Module):
                 nn.init.constant_(m.weight, 1)
                 nn.init.constant_(m.bias, 0)
 
-        # Initialize output conv to small values for stable start
-        # This ensures initial predictions are near 0 (the normalized mean)
-        nn.init.normal_(self.out_conv.weight, mean=0, std=0.01)
-        nn.init.constant_(self.out_conv.bias, 0)
+        # Initialize mean output heads to small values (initial preds near 0 = normalized mean)
+        for head in [self.cbf_head, self.att_head]:
+            nn.init.normal_(head.weight, mean=0, std=0.01)
+            nn.init.constant_(head.bias, 0)
+
+        # Initialize log_var heads to bias=-5.0: exp(-5)≈0.007 (low initial uncertainty).
+        # This ensures NLL loss starts similar in scale to L1, preventing training instability
+        # where the network immediately learns to predict high uncertainty to avoid error.
+        for head in [self.cbf_logvar_head, self.att_logvar_head]:
+            nn.init.normal_(head.weight, mean=0, std=0.01)
+            nn.init.constant_(head.bias, -5.0)
 
     def forward(self, x):
         """
@@ -463,23 +500,20 @@ class SpatialASLNet(nn.Module):
         d3 = F.pad(d3, [diffX // 2, diffX - diffX // 2, diffY // 2, diffY - diffY // 2])
         d3 = self.decoder3(torch.cat([e1, d3], dim=1))
 
-        out = self.out_conv(d3)
-
-        # UNBOUNDED output - no activation constraints!
+        # UNBOUNDED mean predictions — no activation constraints.
         # Model predicts normalized values (z-scores), not raw CBF/ATT.
         # This avoids initialization bias: softplus(0)*100=69.3, sigmoid(0)*3000=1500
         # would cause mean prediction. With unbounded output, init ≈ 0 = normalized mean.
-        cbf_norm = out[:, 0:1, :, :]
-        att_norm = out[:, 1:2, :, :]
+        cbf_norm = self.cbf_head(d3)
+        att_norm = self.att_head(d3)
 
-        # Return 4 values to match existing trainer signature
-        # (cbf, att, log_var_cbf, log_var_att)
-        # Placeholder log_var for compatibility (hardcoded, never learned)
-        # TODO: Replace with learned uncertainty head if calibrated uncertainty is needed.
-        # Current value exp(-5.0) ~ 0.0067 variance is arbitrary.
-        zero_log = torch.zeros_like(cbf_norm) - 5.0
+        # Learned log-variance heads (trained when loss_type='nll').
+        # Clamped to [-5, 10]: lower bound prevents NaN from near-zero variance,
+        # upper bound prevents the network from "explaining away" error with huge uncertainty.
+        log_var_cbf = torch.clamp(self.cbf_logvar_head(d3), -5.0, 10.0)
+        log_var_att = torch.clamp(self.att_logvar_head(d3), -5.0, 10.0)
 
-        return cbf_norm, att_norm, zero_log, zero_log
+        return cbf_norm, att_norm, log_var_cbf, log_var_att
 
 
 class DualEncoderSpatialASLNet(nn.Module):
@@ -753,7 +787,9 @@ class MaskedSpatialLoss(nn.Module):
     def forward(self, pred_cbf: torch.Tensor, pred_att: torch.Tensor,
                 target_cbf: torch.Tensor, target_att: torch.Tensor,
                 brain_mask: torch.Tensor,
-                input_signals: torch.Tensor = None) -> dict:
+                input_signals: torch.Tensor = None,
+                log_var_cbf: torch.Tensor = None,
+                log_var_att: torch.Tensor = None) -> dict:
         """
         Compute masked loss.
 
@@ -767,6 +803,8 @@ class MaskedSpatialLoss(nn.Module):
             target_att: (B, 1, H, W) ground truth ATT (RAW, will be normalized)
             brain_mask: (B, 1, H, W) binary mask (1=brain, 0=air)
             input_signals: (B, 2*PLDs, H, W) for data consistency loss
+            log_var_cbf: (B, 1, H, W) predicted CBF log-variance (required for loss_type='nll')
+            log_var_att: (B, 1, H, W) predicted ATT log-variance (required for loss_type='nll')
 
         Returns:
             dict with 'total_loss' and component losses
@@ -816,6 +854,21 @@ class MaskedSpatialLoss(nn.Module):
                 0.5 * att_err ** 2,
                 delta * (torch.abs(att_err) - 0.5 * delta)
             ) * brain_mask
+        elif self.loss_type == 'nll':
+            # Gaussian Negative Log-Likelihood (heteroscedastic regression).
+            # NLL = 0.5 * exp(-log_var) * err^2 + 0.5 * log_var
+            # When log_var is large (uncertain voxel), the squared error is downweighted,
+            # allowing the network to express uncertainty instead of shrinking predictions
+            # to the mean. This addresses variance collapse at low SNR (Mao et al. 2024).
+            if log_var_cbf is not None and log_var_att is not None:
+                cbf_precision = torch.exp(-log_var_cbf)  # 1 / variance
+                cbf_loss_map = (0.5 * cbf_precision * cbf_err ** 2 + 0.5 * log_var_cbf) * brain_mask
+                att_precision = torch.exp(-log_var_att)
+                att_loss_map = (0.5 * att_precision * att_err ** 2 + 0.5 * log_var_att) * brain_mask
+            else:
+                # Fallback to L1 if log_var not provided (e.g., model doesn't output it)
+                cbf_loss_map = torch.abs(cbf_err) * brain_mask
+                att_loss_map = torch.abs(att_err) * brain_mask
         else:
             # Default to L1
             cbf_loss_map = torch.abs(cbf_err) * brain_mask

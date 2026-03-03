@@ -5,7 +5,7 @@
 #SBATCH --nodes=1
 #SBATCH --mem=64G
 #SBATCH --cpus-per-task=8
-#SBATCH --time=8:00:00
+#SBATCH --time=5:00:00
 #SBATCH --output=amplitude_ablation_v5/B_AmplitudeAware/slurm_%j.out
 #SBATCH --error=amplitude_ablation_v5/B_AmplitudeAware/slurm_%j.err
 
@@ -13,22 +13,30 @@ source /cm/shared/apps/anaconda3/2023.09/etc/profile.d/conda.sh
 conda activate asl_multiverse
 cd $SLURM_SUBMIT_DIR
 
+EXP_DIR="amplitude_ablation_v5/B_AmplitudeAware"
+CONFIG="${EXP_DIR}/config.yaml"
+
 echo "============================================"
-echo "EXPERIMENT: v5_B_AmplitudeAware"
+echo "EXPERIMENT: v5_B_AmplitudeAware (OVERHAUL)"
+echo "  NLL loss, learned log_var, alpha_BS1 DR, Rician noise"
+echo "  Speed: 1 ensemble, batch 64, torch.compile, 40 epochs"
 echo "Started: $(date)"
 echo "Host: $(hostname)"
 echo "GPU: $(nvidia-smi --query-gpu=name --format=csv,noheader 2>/dev/null || echo 'N/A')"
 echo "============================================"
 
-# --- COPY CONFIG (plot script reads config.yaml from run dir) ---
-cp config/v5_amplitude_aware.yaml amplitude_ablation_v5/B_AmplitudeAware/config.yaml
+# Config lives in the experiment directory (no copy needed)
+if [ ! -f "$CONFIG" ]; then
+    echo "ERROR: Config not found: ${CONFIG}"
+    exit 1
+fi
 
 # --- TRAINING ---
-python main.py config/v5_amplitude_aware.yaml \
-    --stage 2 --output-dir amplitude_ablation_v5/B_AmplitudeAware
+python main.py "${CONFIG}" \
+    --stage 2 --output-dir "${EXP_DIR}"
 
 # --- VALIDATION ---
-python -m validation.validate_spatial amplitude_ablation_v5/B_AmplitudeAware
+python -m validation.validate_spatial "${EXP_DIR}"
 
 echo "============================================"
 echo "EXPERIMENT COMPLETE: v5_B_AmplitudeAware"

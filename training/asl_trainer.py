@@ -501,10 +501,14 @@ class EnhancedASLTrainer:
 
                     if not skip_backward:
                         if isinstance(target_for_loss, dict):
-                            # Unpack for MaskedSpatialLoss: cbf, att, mask
+                            # Unpack for MaskedSpatialLoss: cbf, att, mask, and log_var for NLL loss
+                            # outputs_f32 = (pred_cbf, pred_att, log_var_cbf, log_var_att)
+                            log_var_cbf = outputs_f32[2] if len(outputs_f32) > 2 else None
+                            log_var_att = outputs_f32[3] if len(outputs_f32) > 3 else None
                             loss_dict = self.custom_loss_fn(outputs_f32[0], outputs_f32[1],
                                                             target_for_loss['cbf'], target_for_loss['att'],
-                                                            target_for_loss['mask'], processed_signals)
+                                                            target_for_loss['mask'], processed_signals,
+                                                            log_var_cbf=log_var_cbf, log_var_att=log_var_att)
                             loss = loss_dict['total_loss']
                             comps = loss_dict
                         else:
@@ -600,9 +604,13 @@ class EnhancedASLTrainer:
                         outputs_f32 = tuple(o.float() if isinstance(o, torch.Tensor) else o for o in outputs)
                         
                         if isinstance(targets, dict):
-                            loss_dict = self.custom_loss_fn(outputs_f32[0], outputs_f32[1], 
-                                                            targets['cbf'], targets['att'], 
-                                                            targets['mask'], inputs)
+                            # Pass log_var for NLL loss; outputs_f32 = (pred_cbf, pred_att, log_var_cbf, log_var_att)
+                            log_var_cbf = outputs_f32[2] if len(outputs_f32) > 2 else None
+                            log_var_att = outputs_f32[3] if len(outputs_f32) > 3 else None
+                            loss_dict = self.custom_loss_fn(outputs_f32[0], outputs_f32[1],
+                                                            targets['cbf'], targets['att'],
+                                                            targets['mask'], inputs,
+                                                            log_var_cbf=log_var_cbf, log_var_att=log_var_att)
                             loss = loss_dict['total_loss']
                         else:
                             # Handle Stage 1 Validation where targets might include T1 (13 cols) vs Output (12 cols)

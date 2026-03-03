@@ -279,6 +279,10 @@ class AmplitudeAwareSpatialASLNet(nn.Module):
         # Spatial predictions (normalized, like original model)
         self.spatial_head = nn.Conv2d(features[0], 2, kernel_size=1)  # CBF, ATT
 
+        # Log-variance output heads (trained when loss_type='nll', otherwise ignored)
+        self.cbf_logvar_head = nn.Conv2d(features[0], 1, kernel_size=1)
+        self.att_logvar_head = nn.Conv2d(features[0], 1, kernel_size=1)
+
         # Amplitude-dependent CBF modulation
         if use_amplitude_output_modulation:
             # Per-pixel additive correction from raw input via 1x1 convolutions
@@ -298,6 +302,13 @@ class AmplitudeAwareSpatialASLNet(nn.Module):
         """Initialize output layer for stable normalized predictions."""
         nn.init.normal_(self.spatial_head.weight, mean=0, std=0.01)
         nn.init.constant_(self.spatial_head.bias, 0)
+
+        # Initialize log_var heads to bias=-5.0: exp(-5)≈0.007 (low initial uncertainty).
+        # This ensures NLL loss starts similar in scale to L1, preventing training instability
+        # where the network immediately learns to predict high uncertainty to avoid error.
+        for head in [self.cbf_logvar_head, self.att_logvar_head]:
+            nn.init.normal_(head.weight, mean=0, std=0.01)
+            nn.init.constant_(head.bias, -5.0)
 
     def forward(self, x: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
         """
@@ -362,13 +373,13 @@ class AmplitudeAwareSpatialASLNet(nn.Module):
 
         att_pred = att_spatial
 
-        # Placeholder uncertainties (hardcoded, never learned)
-        # TODO: Replace with learned uncertainty head if calibrated uncertainty is needed.
-        # Current value exp(-5.0) ~ 0.0067 variance is arbitrary.
-        cbf_logvar = torch.zeros_like(cbf_pred) - 5.0
-        att_logvar = torch.zeros_like(att_pred) - 5.0
+        # Learned log-variance heads (trained when loss_type='nll').
+        # Clamped to [-5, 10]: lower bound prevents NaN from near-zero variance,
+        # upper bound prevents the network from "explaining away" error with huge uncertainty.
+        log_var_cbf = torch.clamp(self.cbf_logvar_head(d3), -5.0, 10.0)
+        log_var_att = torch.clamp(self.att_logvar_head(d3), -5.0, 10.0)
 
-        return cbf_pred, att_pred, cbf_logvar, att_logvar
+        return cbf_pred, att_pred, log_var_cbf, log_var_att
 
     def load_state_dict(self, state_dict, strict=True):
         """Load with backwards compatibility for v1 multiplicative output modulation."""
