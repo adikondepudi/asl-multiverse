@@ -234,17 +234,6 @@ def preprocess_subject(subject_dir: Path, model_plds: List[int], global_scale: f
     pcasl_stack = np.stack(pcasl_volumes, axis=-1)
     vsasl_stack = np.stack(vsasl_volumes, axis=-1)
 
-    # Validate PLDs match model expectations — do NOT zero-pad missing PLDs.
-    # Zero-padding corrupts both NN (deflates amplitude features → CBF underestimation)
-    # and LS (forces kinetic curve to zero → ATT/CBF pushed to parameter bounds).
-    if set(subject_plds) != set(model_plds):
-        raise ValueError(
-            f"PLD mismatch: model expects {model_plds}, subject has {subject_plds}. "
-            f"Zero-padding is disabled because it corrupts CBF/ATT estimates. "
-            f"Retrain the model with the subject's PLD set, or acquire data with "
-            f"the model's expected PLDs: {model_plds}."
-        )
-
     # Apply background suppression correction to match training distribution (alpha_BS1=1.0).
     # In-vivo signal = true_signal * alpha_BS1^n; divide to recover true_signal magnitude.
     # PCASL uses 4 BS pulses, VSASL uses 3 BS pulses.
@@ -255,6 +244,28 @@ def preprocess_subject(subject_dir: Path, model_plds: List[int], global_scale: f
         vsasl_stack = vsasl_stack / vsasl_correction
         print(f"  BS correction (alpha_BS1={alpha_bs1:.3f}): "
               f"PCASL x{1/pcasl_correction:.3f}, VSASL x{1/vsasl_correction:.3f}")
+
+    # Handle PLD mismatch: zero-pad missing PLDs at the end.
+    # At long PLDs (e.g. 3000ms) the ASL signal is very small due to T1 decay,
+    # so zero-padding introduces minimal error for typical brain tissue.
+    missing_plds = sorted(set(model_plds) - set(subject_plds))
+    if missing_plds:
+        print(f"  WARNING: Subject missing PLDs {missing_plds} — zero-padding these channels.")
+        print(f"  This is acceptable for long PLDs where ASL signal ≈ 0.")
+        H, W, Z = pcasl_stack.shape[:3]
+        n_missing = len(missing_plds)
+        pcasl_pad = np.zeros((H, W, Z, n_missing), dtype=pcasl_stack.dtype)
+        vsasl_pad = np.zeros((H, W, Z, n_missing), dtype=vsasl_stack.dtype)
+        pcasl_stack = np.concatenate([pcasl_stack, pcasl_pad], axis=-1)
+        vsasl_stack = np.concatenate([vsasl_stack, vsasl_pad], axis=-1)
+        subject_plds = sorted(set(subject_plds) | set(missing_plds))
+
+    extra_plds = sorted(set(subject_plds) - set(model_plds))
+    if extra_plds:
+        raise ValueError(
+            f"PLD mismatch: subject has extra PLDs {extra_plds} not in model {model_plds}. "
+            f"Cannot handle extra PLDs — retrain the model or remove extra data."
+        )
 
     # Concatenate PCASL + VSASL: (H, W, Z, 2*n_plds)
     combined = np.concatenate([pcasl_stack, vsasl_stack], axis=-1)

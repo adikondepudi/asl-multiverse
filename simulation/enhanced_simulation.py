@@ -33,31 +33,30 @@ class SpatialPhantomGenerator:
     """
 
     # Tissue CBF values (ml/100g/min)
-    # Ranges expanded in v6 to cover full [0, 200] range and prevent OOD
-    # extrapolation failures at high CBF (v5 union only reached ~150).
-    # Union coverage: 0-5 (csf/stroke_core), 5-50 (WM), 10-120 (GM),
-    # 80-200 (tumor_hyper). Full [0, 200] covered.
+    # Ranges expanded in v6 to cover full [0, 250] range and prevent boundary
+    # regression bias at high CBF. V5 GM capped at 120 caused systematic
+    # negative bias near boundary. Now GM extends to 200, tumor_hyper to 250.
     TISSUE_CBF = {
-        'gray_matter': (10.0, 120.0),     # Expanded: covers normal and hyperemic GM
-        'white_matter': (5.0, 50.0),      # Expanded: covers normal and mild hyperperfusion WM
+        'gray_matter': (10.0, 200.0),     # Was 120 → 200 to avoid boundary bias
+        'white_matter': (5.0, 80.0),      # Was 50 → 80
         'csf': (0.0, 5.0),               # Unchanged: CSF near-zero flow
-        'tumor_hyper': (80.0, 200.0),    # Expanded upper end for aggressive tumors
-        'tumor_hypo': (2.0, 20.0),       # Slightly expanded lower end
-        'stroke_core': (0.0, 10.0),      # Expanded to 0 for complete infarct
-        'stroke_penumbra': (10.0, 40.0), # Slightly expanded
+        'tumor_hyper': (100.0, 250.0),   # Was (80, 200) → (100, 250)
+        'tumor_hypo': (2.0, 20.0),       # Unchanged
+        'stroke_core': (0.0, 10.0),      # Unchanged
+        'stroke_penumbra': (10.0, 40.0), # Unchanged
     }
 
     # Tissue ATT values (ms)
     # Ranges expanded in v5 to cover full evaluation range (500-3000ms) and
     # prevent CBF bias dip at ATT > 1800ms (v4 had GM 1000-1600 / WM 1200-1800)
     TISSUE_ATT = {
-        'gray_matter': (500.0, 2500.0),
-        'white_matter': (800.0, 3000.0),
-        'csf': (100.0, 500.0),
-        'tumor_hyper': (500.0, 1000.0),   # Fast transit (neovascularization)
-        'tumor_hypo': (1800.0, 2500.0),   # Slow transit
-        'stroke_core': (2500.0, 3000.0),  # Very delayed (constrained to max PLD)
-        'stroke_penumbra': (1800.0, 2500.0),
+        'gray_matter': (500.0, 3000.0),        # Was 2500 → 3000
+        'white_matter': (800.0, 3500.0),       # Was 3000 → 3500
+        'csf': (100.0, 500.0),                 # Unchanged
+        'tumor_hyper': (500.0, 1000.0),        # Unchanged (fast transit)
+        'tumor_hypo': (1800.0, 3000.0),        # Was 2500 → 3000
+        'stroke_core': (2500.0, 4000.0),       # Was 3000 → 4000
+        'stroke_penumbra': (1800.0, 3000.0),   # Was 2500 → 3000
     }
 
     # Domain randomization default ranges
@@ -293,7 +292,7 @@ class SpatialPhantomGenerator:
         att_map = gaussian_filter(att_map, sigma=self.pve_sigma)
         
         # Clamp to valid ranges
-        cbf_map = np.clip(cbf_map, 0, 200).astype(np.float32)
+        cbf_map = np.clip(cbf_map, 0, 250).astype(np.float32)  # Was 200 → 250 for tumor_hyper
         att_map = np.clip(att_map, 100, 5000).astype(np.float32)
 
         return cbf_map, att_map, metadata
@@ -701,8 +700,8 @@ class RealisticASLSimulator(ASLSimulator):
             # --- 1. Generate Parameter Maps (The "Phantom") ---
             # Background (Gray Matter-ish) — sample uniformly across expanded range
             # then add spatial variation, matching SpatialPhantomGenerator.TISSUE_CBF/ATT
-            cbf_center = np.random.uniform(10, 120)  # Expanded: was (30, 90)
-            att_center = np.random.uniform(500, 2500)
+            cbf_center = np.random.uniform(10, 200)  # Expanded: was 120 → 200
+            att_center = np.random.uniform(500, 3000)  # Expanded: was 2500 → 3000
             cbf_map = np.random.normal(cbf_center, 8, (size, size))
             att_map = np.random.normal(att_center, 200, (size, size))
 
@@ -717,7 +716,7 @@ class RealisticASLSimulator(ASLSimulator):
 
                 # Flip coin: Tumor (High Flow) or Stroke (Low Flow)
                 if np.random.rand() > 0.5:
-                    cbf_map[mask] = np.random.uniform(80, 200)  # Hyperperfusion; expanded upper to 200
+                    cbf_map[mask] = np.random.uniform(100, 250)  # Hyperperfusion; expanded to match TISSUE_CBF
                     att_map[mask] = np.random.uniform(500, 1000)  # Fast transit
                 else:
                     cbf_map[mask] = np.random.uniform(0, 15)    # Hypoperfusion; expanded lower to 0
