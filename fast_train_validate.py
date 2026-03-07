@@ -272,18 +272,20 @@ def train_model(cfg: dict, model, signals: np.ndarray, targets: np.ndarray,
     optimizer = torch.optim.AdamW(model.parameters(),
                                   lr=cfg.get('learning_rate', 0.0001),
                                   weight_decay=cfg.get('weight_decay', 0.0001))
-    total_steps = (n_train // batch_size + 1) * n_epochs
-    scheduler = torch.optim.lr_scheduler.OneCycleLR(
-        optimizer, max_lr=cfg.get('learning_rate', 0.0001),
-        total_steps=total_steps, pct_start=0.05)
+    scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(
+        optimizer, T_max=n_epochs, eta_min=cfg.get('learning_rate', 0.001) * 0.01)
 
     loss_history = []
+
+    # Curriculum learning: fraction of epochs to train clean (no noise)
+    clean_fraction = 0.15  # First 15% of epochs are clean
 
     for epoch in range(n_epochs):
         model.train()
         epoch_loss = 0.0
         n_batches = 0
         perm_train = np.random.permutation(n_train)
+        use_noise = epoch >= int(n_epochs * clean_fraction)
 
         for start in range(0, n_train, batch_size):
             end = min(start + batch_size, n_train)
@@ -300,8 +302,11 @@ def train_model(cfg: dict, model, signals: np.ndarray, targets: np.ndarray,
                 masks.append(m)
             mask_t = torch.from_numpy(np.array(masks)[:, np.newaxis]).float().to(device)
 
-            # Apply noise (on device)
-            noisy_sig = noise_injector.apply_noise(raw_sig, ref_signal, pld_scaling)
+            # Apply noise (skip during clean pretraining phase)
+            if use_noise:
+                noisy_sig = noise_injector.apply_noise(raw_sig, ref_signal, pld_scaling)
+            else:
+                noisy_sig = raw_sig
 
             # Global scale normalization
             normalized = torch.clamp(noisy_sig * global_scale, -15.0, 15.0)
@@ -321,11 +326,11 @@ def train_model(cfg: dict, model, signals: np.ndarray, targets: np.ndarray,
             loss.backward()
             torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
             optimizer.step()
-            scheduler.step()
 
             epoch_loss += loss.item()
             n_batches += 1
 
+        scheduler.step()
         avg_loss = epoch_loss / max(n_batches, 1)
         loss_history.append(avg_loss)
         print(f"  Epoch {epoch+1}/{n_epochs}: loss = {avg_loss:.4f}")
@@ -340,6 +345,9 @@ def train_model(cfg: dict, model, signals: np.ndarray, targets: np.ndarray,
 def generate_test_phantoms(cfg: dict, n_phantoms: int, snr_levels: list, seed: int):
     """Generate reproducible test phantoms at multiple SNR levels.
 
+    Uses per-phantom random physics parameters to simulate real-world patient
+    variability. LS fitting uses fixed consensus parameters (realistic mismatch).
+
     Returns:
         test_data: list of dicts with keys:
             'snr', 'clean_signals', 'noisy_signals', 'cbf_map', 'att_map', 'brain_mask'
@@ -352,14 +360,13 @@ def generate_test_phantoms(cfg: dict, n_phantoms: int, snr_levels: list, seed: i
     scalings = simulator.compute_tr_noise_scaling(plds)
     pld_scaling = {'PCASL': scalings['PCASL'], 'VSASL': scalings['VSASL']}
 
+    # Domain randomization ranges for test data (matching training)
+    domain_rand = cfg.get('domain_randomization', {})
+    use_domain_rand = domain_rand.get('enabled', False)
+
     phantom_gen = SpatialPhantomGenerator(size=64, pve_sigma=1.0)
     plds_bc = plds[:, np.newaxis, np.newaxis]
     lambda_b = 0.90
-    t1_b = asl_params.T1_artery
-    alpha_p = asl_params.alpha_PCASL * (asl_params.alpha_BS1 ** 4)
-    alpha_v = asl_params.alpha_VSASL * (asl_params.alpha_BS1 ** 3)
-    tau = asl_params.T_tau
-    t2_f = asl_params.T2_factor
 
     test_data = []
 
@@ -367,6 +374,27 @@ def generate_test_phantoms(cfg: dict, n_phantoms: int, snr_levels: list, seed: i
         for p_idx in range(n_phantoms):
             np.random.seed(seed + p_idx * 100 + int(snr * 10))
             cbf_map, att_map, _ = phantom_gen.generate_phantom(include_pathology=True)
+
+            # Per-phantom random physics (simulates patient variability)
+            if use_domain_rand:
+                t1_range = domain_rand.get('T1_artery_range', [1550.0, 2150.0])
+                alpha_pcasl_range = domain_rand.get('alpha_PCASL_range', [0.75, 0.95])
+                alpha_vsasl_range = domain_rand.get('alpha_VSASL_range', [0.40, 0.70])
+                alpha_bs1_range = domain_rand.get('alpha_BS1_range', [0.85, 1.0])
+                t_tau_perturb = domain_rand.get('T_tau_perturb', 0.10)
+
+                t1_b = np.random.uniform(*t1_range)
+                alpha_bs1 = np.random.uniform(*alpha_bs1_range)
+                alpha_p = np.random.uniform(*alpha_pcasl_range) * (alpha_bs1 ** 4)
+                alpha_v = np.random.uniform(*alpha_vsasl_range) * (alpha_bs1 ** 3)
+                tau = asl_params.T_tau * (1 + np.random.uniform(-t_tau_perturb, t_tau_perturb))
+            else:
+                t1_b = asl_params.T1_artery
+                alpha_p = asl_params.alpha_PCASL * (asl_params.alpha_BS1 ** 4)
+                alpha_v = asl_params.alpha_VSASL * (asl_params.alpha_BS1 ** 3)
+                tau = asl_params.T_tau
+
+            t2_f = asl_params.T2_factor
 
             att_bc = att_map[np.newaxis, :, :].astype(np.float32)
             cbf_bc = (cbf_map / 6000.0)[np.newaxis, :, :].astype(np.float32)
@@ -602,6 +630,10 @@ def compute_diagnostics(test_data: list, loss_history: list, has_ls: bool):
                 ls_err_att = np.abs(ls_att - lt_att)
                 att_win = float(np.mean(nn_err_att < ls_err_att) * 100)
 
+                # Also compute LS MAE for comparison
+                ls_cbf_mae = float(np.mean(ls_err_cbf))
+                ls_att_mae = float(np.mean(ls_err_att))
+
         snr_result = {
             'cbf_slope': cbf_slope, 'cbf_bias': cbf_bias, 'cbf_mae': cbf_mae,
             'cbf_cov': cbf_cov,
@@ -610,6 +642,8 @@ def compute_diagnostics(test_data: list, loss_history: list, has_ls: bool):
         if cbf_win is not None:
             snr_result['cbf_win_rate'] = cbf_win
             snr_result['att_win_rate'] = att_win
+            snr_result['ls_cbf_mae'] = ls_cbf_mae
+            snr_result['ls_att_mae'] = ls_att_mae
         results['snr_results'][snr_key] = snr_result
 
     # Kill signals: check ALL SNR levels
@@ -665,9 +699,9 @@ def print_results(results: dict, cfg: dict, elapsed: float, has_ls: bool):
     print(f"\n{'SNR':>5} | {'CBF slope':>10} {'CBF bias':>10} {'CBF MAE':>9} | "
           f"{'ATT slope':>10} {'ATT MAE':>9} |", end="")
     if has_ls:
-        print(f" {'CBF win%':>9} {'ATT win%':>9}", end="")
+        print(f" {'CBF win%':>9} {'ATT win%':>9} | {'LS CBF':>7} {'LS ATT':>7}", end="")
     print()
-    print("-" * (75 + (22 if has_ls else 0)))
+    print("-" * (75 + (40 if has_ls else 0)))
 
     for snr_key in sorted(results['snr_results'].keys(), key=lambda x: int(x)):
         sr = results['snr_results'][snr_key]
@@ -682,7 +716,7 @@ def print_results(results: dict, cfg: dict, elapsed: float, has_ls: bool):
                f"{sr['att_slope']:>7.2f}    "
                f"{sr['att_mae']:>7.0f}[{att_m[0]}] |")
         if has_ls and 'cbf_win_rate' in sr:
-            row += f" {sr['cbf_win_rate']:>7.1f}%  {sr['att_win_rate']:>7.1f}%"
+            row += f" {sr['cbf_win_rate']:>7.1f}%  {sr['att_win_rate']:>7.1f}% | {sr.get('ls_cbf_mae', 0):>6.1f} {sr.get('ls_att_mae', 0):>6.0f}"
         print(row)
 
     n_fail = results['n_failures']
@@ -757,8 +791,8 @@ def save_results(results: dict, cfg: dict, output_dir: Path, config_path: str):
 def main():
     parser = argparse.ArgumentParser(description='Fast Train & Validate for ASL models')
     parser.add_argument('--config', required=True, help='YAML config file path')
-    parser.add_argument('--n-samples', type=int, default=1000, help='Training samples (default: 1000)')
-    parser.add_argument('--n-epochs', type=int, default=5, help='Training epochs (default: 5)')
+    parser.add_argument('--n-samples', type=int, default=3000, help='Training samples (default: 3000)')
+    parser.add_argument('--n-epochs', type=int, default=30, help='Training epochs (default: 30)')
     parser.add_argument('--n-test-phantoms', type=int, default=10, help='Test phantoms per SNR (default: 10)')
     parser.add_argument('--output-dir', default='fast_eval_results', help='Output directory')
     parser.add_argument('--device', default='mps', help='Device: mps, cuda, cpu')
@@ -806,7 +840,7 @@ def main():
     if has_ls:
         print(f"  LS fitting (10% subsample)...")
         t5b = time.time()
-        test_data = ls_fitting(test_data, cfg, subsample_frac=0.1)
+        test_data = ls_fitting(test_data, cfg, subsample_frac=0.2)
         print(f"  LS fitting: {time.time()-t5b:.1f}s")
 
     # Phase 6: Diagnostics
