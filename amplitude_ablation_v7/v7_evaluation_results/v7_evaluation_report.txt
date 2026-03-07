@@ -1,0 +1,76 @@
+================================================================================
+V7 ABLATION EVALUATION REPORT
+Generated: 2026-03-06 15:25
+================================================================================
+
+## Training Summary
+
+Model                                 Final Train Loss  Final Val Loss
+----------------------------------------------------------------------
+A: Baseline SpatialASLNet                       0.2127          0.2270
+B: AmplitudeAwareSpatialASLNet                  0.2102          0.2273
+
+
+## Phantom Evaluation (100 phantoms, corrected LS baseline)
+
+ SNR |        --- CBF MAE ---         |        --- ATT MAE ---         |   --- Win Rate (%) ---  
+     |   Baseline   AmpAware         LS |   Baseline   AmpAware         LS |  CBF-B  CBF-A  ATT-B  ATT-A
+--------------------------------------------------------------------------------------------------------------
+   2 |       20.0       21.6       13.0 |        328        321        409 |   23.5   29.2   64.2   63.4
+   3 |       14.0       14.9        7.7 |        265        256        323 |   21.0   26.0   61.1   61.4
+   5 |        9.4       10.0        4.2 |        199        190        236 |   21.6   22.6   58.1   58.5
+  10 |        6.4        7.0        1.9 |        130        125        148 |   22.0   19.1   54.0   52.6
+  15 |        7.2        6.7        1.2 |         99         99        109 |   15.4   15.8   51.4   48.7
+  25 |        8.9        7.3        0.7 |         69         72         72 |    8.7    9.8   47.0   42.1
+
+### Key Observations (Phantom)
+
+  At SNR=10:
+    - Baseline CBF MAE: 6.4, Win Rate: 22.0%
+    - AmpAware CBF MAE: 7.0, Win Rate: 19.1%
+    - LS CBF MAE: 1.9
+    - Baseline ATT MAE: 130ms, Win Rate: 54.0%
+    - AmpAware ATT MAE: 125ms, Win Rate: 52.6%
+    - LS ATT MAE: 148ms
+
+  CBF Win Rate trends:
+    Baseline: 24% -> 21% -> 22% -> 22% -> 15% -> 9% (SNR 2-25)
+      Beats LS at 0/6 SNR levels
+    AmpAware: 29% -> 26% -> 23% -> 19% -> 16% -> 10% (SNR 2-25)
+      Beats LS at 0/6 SNR levels
+
+  ATT Win Rate trends:
+    Baseline: 64% -> 61% -> 58% -> 54% -> 51% -> 47% (SNR 2-25)
+    AmpAware: 63% -> 61% -> 59% -> 53% -> 49% -> 42% (SNR 2-25)
+
+
+## In-Vivo Results
+
+Subject                   |     --- Baseline ---      |     --- AmpAware ---     
+                          |          CBF          ATT |          CBF          ATT
+--------------------------------------------------------------------------------
+20231002_MR1_A144         |  26.0+/-37.4  1131+/- 439 |  12.5+/-28.0   683+/- 708 |
+20231003_MR1_A142         |  29.1+/-39.4  1112+/- 437 |   9.9+/-27.6   568+/- 711 |
+20231004_MR1_A151         |  31.4+/-39.1  1239+/- 499 |  17.4+/-30.6   806+/- 752 |
+20231016_MR1_A147         |  22.3+/-30.1  1491+/- 671 |  11.2+/-23.7  1090+/- 934 |
+20231030_MR1_A152         |  36.8+/-44.4  1210+/- 463 |  19.7+/-33.9   742+/- 706 |
+20231101_MR1_A153         |  25.1+/-32.5  1353+/- 585 |  13.9+/-26.0   972+/- 803 |
+20240211_MR1_A155         |  34.6+/-41.2  1158+/- 345 |  17.2+/-30.2   767+/- 611 |
+20240216_MR1_A156         |  23.9+/-33.5  1474+/- 701 |   8.3+/-24.0  1024+/- 982 |
+
+  Baseline grand average: CBF=28.7+/-4.9, ATT=1271+/-141ms
+  AmpAware grand average: CBF=13.8+/-3.8, ATT=831+/-169ms
+
+  Expected healthy GM: CBF ~50-70 ml/100g/min, ATT ~1000-1600ms
+
+
+## Conclusions
+
+  1. Both models achieve similar final validation loss (~0.227)
+  2. Neither model consistently beats corrected LS for CBF (win rates <30%)
+  3. Both models show ATT advantage over LS at low SNR (>50% win rate)
+  4. AmplitudeAware shows marginal CBF win rate improvement over Baseline
+  5. NN advantage diminishes with increasing SNR, as expected
+  6. In-vivo results should be compared to literature values
+
+================================================================================

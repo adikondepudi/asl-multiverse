@@ -1,0 +1,84 @@
+# =============================================================================
+# FAST EXPERIMENT CONFIG (for Ralph Loop rapid iteration)
+# =============================================================================
+# Based on v5_amplitude_aware.yaml but with reduced epochs/samples for speed.
+# This config is used by fast_train_validate.py for ~5-minute local runs.
+# =============================================================================
+
+training:
+  model_class_name: AmplitudeAwareSpatialASLNet
+
+  # Network capacity
+  hidden_sizes: [32, 64, 128, 256]
+  dropout_rate: 0.1
+  norm_type: group
+
+  # Amplitude-aware features
+  use_film_at_bottleneck: true
+  use_film_at_decoder: true
+  use_amplitude_output_modulation: true
+
+  # Loss configuration
+  loss_type: l1
+  dc_weight: 0.0
+  variance_weight: 0.1
+  att_scale: 1.0
+  cbf_weight: 1.0
+  att_weight: 1.0
+
+  # Uncertainty bounds
+  log_var_cbf_min: -5.0
+  log_var_cbf_max: 10.0
+  log_var_att_min: -5.0
+  log_var_att_max: 14.0
+
+  # Training parameters
+  learning_rate: 0.0001
+  weight_decay: 0.0001
+  batch_size: 32
+  n_epochs: 5
+  n_ensembles: 1
+
+  # Early stopping (disabled for fast runs)
+  early_stopping_patience: 100
+  early_stopping_min_delta: 0.0
+
+data:
+  pld_values: [500, 1000, 1500, 2000, 2500, 3000]
+  normalization_mode: global_scale
+  global_scale_factor: 10.0
+  noise_type: rician
+  data_noise_components:
+    - thermal
+    - physio
+    - drift
+
+noise_config:
+  snr_range: [2.0, 25.0]
+  physio_amp_range: [0.03, 0.15]
+  physio_freq_range: [0.5, 2.0]
+  drift_range: [-0.03, 0.03]
+  spike_probability: 0.02
+  spike_magnitude_range: [2.0, 5.0]
+
+simulation:
+  T1_artery: 1650.0
+  T_tau: 1800.0
+  alpha_PCASL: 0.85
+  alpha_VSASL: 0.56
+  T2_factor: 1.0
+  alpha_BS1: 1.0
+
+  domain_randomization:
+    enabled: true
+    T1_artery_range: [1550.0, 2150.0]
+    alpha_PCASL_range: [0.75, 0.95]
+    alpha_VSASL_range: [0.40, 0.70]
+    alpha_BS1_range: [0.85, 1.0]
+    T_tau_perturb: 0.10
+
+_experiment:
+  name: fast_experiment
+  description: |
+    Fast iteration config for Ralph Loop. Same architecture as v5_amplitude_aware
+    but with reduced training epochs and sample count for ~5-minute local runs.

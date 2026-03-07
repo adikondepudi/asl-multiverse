@@ -1,0 +1,31 @@
+{
+  "n_phantoms": 100,
+  "n_with_pathology": 70,
+  "phantom_size": 64,
+  "snr_levels": [
+    2,
+    3,
+    5,
+    10,
+    15,
+    25
+  ],
+  "n_plds": 5,
+  "plds": [
+    500.0,
+    1000.0,
+    1500.0,
+    2000.0,
+    2500.0
+  ],
+  "physics": {
+    "T1_artery": 1650.0,
+    "T_tau": 1800.0,
+    "alpha_PCASL": 0.85,
+    "alpha_VSASL": 0.56,
+    "alpha_BS1": 1.0,
+    "T2_factor": 1.0,
+    "T_sat_vs": 2000.0
+  },
+  "seed_base": 7000
+}
