@@ -1,7 +1,7 @@
 # Ralph Plan — Ordered Task Checklist
 
 **Status**: IN PROGRESS
-**Iteration**: 7
+**Iteration**: 8
 **Last Updated**: 2026-03-08
 
 ---
@@ -56,10 +56,11 @@
   - Change: Add low-frequency spatial noise to training data
   - **FAIL**: Implementation used per-sample gaussian_filter in inner loop (~90k scipy calls), made training 10x slower. Reverted. Would need GPU-native approach (torch convolution) to be viable.
 
-- [ ] **C4**: Smoother phantoms (pve_sigma 4.0 → 5.0)
+- [FAIL] **C4**: Smoother phantoms (pve_sigma 3.0 → 5.0)
   - Change: `SpatialPhantomGenerator(size=64, pve_sigma=5.0)`
   - Why: Smoother training = smoother predictions on in-vivo
   - Risk: May lose fine detail
+  - **FAIL**: CBF wins all dropped (-4.6/-1.6/-4.0), in-vivo CoV ratio 0.97 (was 0.95), smooth ratio 0.89 (was 0.77). Loss plateaued at 0.317 (vs 0.058) — too-smooth phantoms underfit.
 
 - [ ] **C5**: Post-processing Gaussian blur (sigma=0.5)
   - Change: Apply scipy gaussian_filter to NN predictions before metrics
@@ -96,3 +97,4 @@
 | 5    | B1   | PASS | 72.1/75.9/79.1 | 86.9/75.4/84.6 | 0.94 | 0.87 | 3-model ensemble, in-vivo CoV/smooth both improved |
 | 6    | C1   | FAIL | 66.5/74.4/75.4 | 86.9/80.7/86.0 | 0.95 | 1.00 | Wider model [48,96,192,384] overfits, smooth ratio collapsed |
 | 7    | C2   | FAIL | 65.8/73.1/74.1 | 85.7/62.8/79.2 | 0.91 | 0.71 | Huber loss degraded all win rates, ATT SNR10 -13.8% |
+| 8    | C4   | FAIL | 68.0/76.3/75.0 | 88.0/79.3/86.0 | 0.97 | 0.89 | pve_sigma 3→5, too-smooth phantoms, CBF wins all dropped |
