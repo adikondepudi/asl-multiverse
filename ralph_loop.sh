@@ -33,9 +33,16 @@ for i in $(seq 1 "$MAX_ITERS"); do
     echo "----------------------------------------" | tee -a "$LOG_FILE"
 
     # Run a fresh Claude instance with the ralph prompt
-    claude -p "$(cat ralph_prompt.md)" \
-        --allowedTools "Bash,Read,Edit,Write,Glob,Grep,Python" \
-        2>&1 | tee -a "$LOG_FILE"
+    # Use unbuffer/stdbuf for line-buffered output so we can see progress live
+    if command -v stdbuf &>/dev/null; then
+        stdbuf -oL claude -p "$(cat ralph_prompt.md)" \
+            --allowedTools "Bash,Read,Edit,Write,Glob,Grep,Python" \
+            2>&1 | tee -a "$LOG_FILE"
+    else
+        claude -p "$(cat ralph_prompt.md)" \
+            --allowedTools "Bash,Read,Edit,Write,Glob,Grep,Python" \
+            2>&1 | tee -a "$LOG_FILE"
+    fi
 
     # Check for completion signal
     if tail -20 "$LOG_FILE" | grep -q "RALPH_COMPLETE"; then
