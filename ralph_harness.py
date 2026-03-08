@@ -280,7 +280,17 @@ def train_model(cfg, signals, targets, norm_stats, device, n_epochs, seed):
 # Phase 2: Synthetic evaluation
 # =============================================================================
 
-def synthetic_eval(model, cfg, norm_stats, device, n_phantoms=10, snr_levels=[3, 10, 25], seed=9999):
+def ensemble_predict(models_and_stats, inp, device):
+    """Average predictions from multiple (model, norm_stats) pairs."""
+    cbf_preds, att_preds = [], []
+    for model, ns in models_and_stats:
+        pc, pa, _, _ = model(inp)
+        cbf_preds.append(pc[0, 0].cpu().numpy() * ns['y_std_cbf'] + ns['y_mean_cbf'])
+        att_preds.append(pa[0, 0].cpu().numpy() * ns['y_std_att'] + ns['y_mean_att'])
+    return np.mean(cbf_preds, axis=0), np.mean(att_preds, axis=0)
+
+
+def synthetic_eval(model, cfg, norm_stats, device, n_phantoms=10, snr_levels=[3, 10, 25], seed=9999, models_and_stats=None):
     """Evaluate on synthetic phantoms with known ground truth."""
     np.random.seed(seed)
     plds = np.array(cfg.get('pld_values', [500, 1000, 1500, 2000, 2500]), dtype=np.float32)
@@ -330,13 +340,16 @@ def synthetic_eval(model, cfg, norm_stats, device, n_phantoms=10, snr_levels=[3,
                 scale = pld_scaling['PCASL'] if ch < n_plds else pld_scaling['VSASL']
                 noisy[ch] += np.random.randn(64, 64).astype(np.float32) * noise_sigma * scale
 
-            # NN prediction
+            # NN prediction (ensemble if available)
             with torch.no_grad():
                 inp = torch.from_numpy(noisy[np.newaxis]).float().to(device)
                 inp = torch.clamp(inp * global_scale, -30, 30)
-                pc, pa, _, _ = model(inp)
-                nn_cbf = (pc[0, 0].cpu().numpy() * norm_stats['y_std_cbf'] + norm_stats['y_mean_cbf'])
-                nn_att = (pa[0, 0].cpu().numpy() * norm_stats['y_std_att'] + norm_stats['y_mean_att'])
+                if models_and_stats and len(models_and_stats) > 1:
+                    nn_cbf, nn_att = ensemble_predict(models_and_stats, inp, device)
+                else:
+                    pc, pa, _, _ = model(inp)
+                    nn_cbf = (pc[0, 0].cpu().numpy() * norm_stats['y_std_cbf'] + norm_stats['y_mean_cbf'])
+                    nn_att = (pa[0, 0].cpu().numpy() * norm_stats['y_std_att'] + norm_stats['y_mean_att'])
 
             nn_cbf = np.clip(nn_cbf, 0, 200)
             nn_att = np.clip(nn_att, 0, 5000)
@@ -418,10 +431,13 @@ def synthetic_eval(model, cfg, norm_stats, device, n_phantoms=10, snr_levels=[3,
 # Phase 3: In-vivo evaluation
 # =============================================================================
 
-def invivo_eval(model, norm_stats, cfg, device, data_dir, ls_cache_dir, subjects):
+def invivo_eval(model, norm_stats, cfg, device, data_dir, ls_cache_dir, subjects, models_and_stats=None):
     """Evaluate on real patient data, compare to cached LS."""
     global_scale = cfg.get('global_scale_factor', 10.0)
     model.eval()
+    if models_and_stats:
+        for m, _ in models_and_stats:
+            m.eval()
     all_results = {}
 
     for subj_id in subjects:
@@ -452,9 +468,18 @@ def invivo_eval(model, norm_stats, cfg, device, data_dir, ls_cache_dir, subjects
                 pad_w = (16 - w % 16) % 16
                 if pad_h > 0 or pad_w > 0:
                     inp = torch.nn.functional.pad(inp, (0, pad_w, 0, pad_h), mode='reflect')
-                pc, pa, _, _ = model(inp)
-                cbf_vol[z] = pc[0, 0, :h, :w].cpu().numpy() * norm_stats['y_std_cbf'] + norm_stats['y_mean_cbf']
-                att_vol[z] = pa[0, 0, :h, :w].cpu().numpy() * norm_stats['y_std_att'] + norm_stats['y_mean_att']
+                if models_and_stats and len(models_and_stats) > 1:
+                    cbf_preds, att_preds = [], []
+                    for m, ns in models_and_stats:
+                        pc, pa, _, _ = m(inp)
+                        cbf_preds.append(pc[0, 0, :h, :w].cpu().numpy() * ns['y_std_cbf'] + ns['y_mean_cbf'])
+                        att_preds.append(pa[0, 0, :h, :w].cpu().numpy() * ns['y_std_att'] + ns['y_mean_att'])
+                    cbf_vol[z] = np.mean(cbf_preds, axis=0)
+                    att_vol[z] = np.mean(att_preds, axis=0)
+                else:
+                    pc, pa, _, _ = model(inp)
+                    cbf_vol[z] = pc[0, 0, :h, :w].cpu().numpy() * norm_stats['y_std_cbf'] + norm_stats['y_mean_cbf']
+                    att_vol[z] = pa[0, 0, :h, :w].cpu().numpy() * norm_stats['y_std_att'] + norm_stats['y_mean_att']
 
         nn_cbf = np.clip(np.transpose(cbf_vol, (1, 2, 0)), 0, 200)
         nn_att = np.clip(np.transpose(att_vol, (1, 2, 0)), 0, 5000)
@@ -699,12 +724,23 @@ def main():
     cfg = load_config()
     print(f"Device: {device}, Config: config/invivo_experiment.yaml")
 
-    # Phase 1: Train
-    print(f"\n[Phase 1] Generating {args.n_samples} samples + training {args.n_epochs} epochs...")
+    # Phase 1: Train ensemble (3 models with different seeds)
+    n_ensemble = 3
+    ensemble_seeds = [args.seed, args.seed + 1, args.seed + 2]
+    print(f"\n[Phase 1] Generating {args.n_samples} samples + training {n_ensemble}x{args.n_epochs} epochs (ensemble)...")
     t1 = time.time()
     signals, targets, norm_stats = generate_training_data(cfg, args.n_samples, args.seed)
     print(f"  Data: {time.time()-t1:.0f}s, norm_stats: CBF={norm_stats['y_mean_cbf']:.1f}+/-{norm_stats['y_std_cbf']:.1f}")
-    model, loss_history = train_model(cfg, signals, targets, norm_stats, device, args.n_epochs, args.seed)
+
+    models_and_stats = []
+    loss_history = None
+    for i, seed in enumerate(ensemble_seeds):
+        print(f"  Training model {i+1}/{n_ensemble} (seed={seed})...")
+        model_i, lh_i = train_model(cfg, signals, targets, norm_stats, device, args.n_epochs, seed)
+        models_and_stats.append((model_i, norm_stats))
+        if i == 0:
+            loss_history = lh_i
+    model = models_and_stats[0][0]  # primary model for backward compat
     print(f"  Training: {time.time()-t1:.0f}s total")
 
     # Save model
@@ -714,15 +750,15 @@ def main():
                output_dir / 'trained_model.pt')
 
     # Phase 2: Synthetic eval
-    print(f"\n[Phase 2] Synthetic evaluation (3 SNR levels, 10 phantoms)...")
+    print(f"\n[Phase 2] Synthetic evaluation (3 SNR levels, 10 phantoms, {n_ensemble}-model ensemble)...")
     t2 = time.time()
-    synth_results = synthetic_eval(model, cfg, norm_stats, device)
+    synth_results = synthetic_eval(model, cfg, norm_stats, device, models_and_stats=models_and_stats)
     print(f"  Synthetic eval: {time.time()-t2:.0f}s")
 
     # Phase 3: In-vivo eval
-    print(f"\n[Phase 3] In-vivo evaluation ({len(args.subjects)} subjects)...")
+    print(f"\n[Phase 3] In-vivo evaluation ({len(args.subjects)} subjects, {n_ensemble}-model ensemble)...")
     t3 = time.time()
-    invivo_results = invivo_eval(model, norm_stats, cfg, device, args.data_dir, args.ls_cache_dir, args.subjects)
+    invivo_results = invivo_eval(model, norm_stats, cfg, device, args.data_dir, args.ls_cache_dir, args.subjects, models_and_stats=models_and_stats)
     print(f"  In-vivo eval: {time.time()-t3:.1f}s")
 
     # Output

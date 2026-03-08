@@ -1,7 +1,7 @@
 # Ralph Plan — Ordered Task Checklist
 
 **Status**: IN PROGRESS
-**Iteration**: 4
+**Iteration**: 5
 **Last Updated**: 2026-03-08
 
 ---
@@ -31,10 +31,9 @@
 
 ## Phase B — Variance Reduction (code changes to ralph_harness.py)
 
-- [ ] **B1**: Ensemble averaging (train 3 models, average predictions)
+- [x] **B1**: Ensemble averaging (train 3 models, average predictions)
   - Change: Train 3 models with seeds 42,43,44; average CBF/ATT predictions
-  - Why: Reduces prediction variance → lower CoV, smoother maps
-  - Risk: 3x training time
+  - Result: In-vivo CoV ratio 1.00→0.94, smooth ratio 0.90→0.87, GM/WM 1.20→1.39. Synthetic CBF wins stable, ATT SNR3 up +1.9%.
 
 - [ ] **B2**: Test-time augmentation (4x flips, average predictions)
   - Change: At inference, predict on original + 3 flips, average
@@ -95,3 +94,4 @@
 | 2    | A2   | PASS | 72.6/77.9/79.0 | 85.0/76.6/85.0 | 1.00 | 0.90 | tv_weight 0.02→0.05, CBF wins all improved |
 | 3    | A3   | FAIL | 74.7/76.1/78.3 | 83.3/61.8/89.8 | 1.02 | 0.91 | Widened DR too aggressive, ATT win SNR10 collapsed -14.8% |
 | 4    | A4   | FAIL | 70.5/74.7/78.4 | 85.9/77.2/86.6 | 1.03 | 0.93 | Rician noise dropped CBF win SNR10 -3.2% |
+| 5    | B1   | PASS | 72.1/75.9/79.1 | 86.9/75.4/84.6 | 0.94 | 0.87 | 3-model ensemble, in-vivo CoV/smooth both improved |
