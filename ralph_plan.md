@@ -1,17 +1,18 @@
 # Ralph Plan — Ordered Task Checklist
 
 **Status**: IN PROGRESS
-**Iteration**: 0
+**Iteration**: 1
 **Last Updated**: 2026-03-08
 
 ---
 
 ## Phase A — Config-Level Fundamentals (highest leverage, lowest risk)
 
-- [ ] **A1**: More training data + longer training
+- [FAIL] **A1**: More training data + longer training
   - Change: `--n-samples 5000 --n-epochs 50` (currently 3000/30)
   - Why: More data = better generalization, more epochs = better convergence
   - Risk: Slower iteration (~15 min instead of ~10 min)
+  - **FAIL**: CBF win dropped (66.5→62.1 SNR3, 75.8→72.2 SNR10), in-vivo CoV ratio 1.09 (was 0.95), smooth ratio 0.99 (was 0.77), GM/WM ratio 1.17 (physio FAIL). Longer training overfit and degraded in-vivo generalization.
 
 - [ ] **A2**: Increase TV weight 0.02 → 0.05
   - Change: `tv_weight: 0.05` in config or ralph_harness.py
@@ -90,3 +91,4 @@
 | Iter | Task | Result | CBF Win (3/10/25) | ATT Win (3/10/25) | CoV Ratio | Smooth Ratio | Notes |
 |------|------|--------|-------------------|-------------------|-----------|--------------|-------|
 | 0    | —    | baseline | 66.5/75.8/77.9 | 85.6/76.6/84.5 | 0.95 | 0.77 | Starting point |
+| 1    | A1   | FAIL | 62.1/72.2/77.3 | 84.3/81.0/91.1 | 1.09 | 0.99 | 5000 samples/50 epochs overfit, degraded in-vivo |
