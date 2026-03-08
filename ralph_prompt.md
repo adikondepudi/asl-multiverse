@@ -63,3 +63,5 @@ If not all targets met, exit normally (the loop will spawn a new iteration).
 - Trust the metrics. If numbers go down, revert. No exceptions.
 - When updating ralph_harness.py default arguments (like --n-samples, --n-epochs), also update the defaults in argparse so future iterations use the new values.
 - ALWAYS use `python3` (not `python`) when running any Python script via Bash. Example: `python3 ralph_harness.py --device mps`.
+- NEVER add per-sample loops with scipy/numpy calls inside the training inner loop. This makes training 10x slower. If you need spatial operations, use torch convolutions or pre-compute them before training.
+- Total harness runtime should be ~8-10 minutes. If your changes would make it significantly slower, find a faster approach.

@@ -52,10 +52,9 @@
   - Risk: May need delta tuning
   - **FAIL**: CBF wins all dropped (-6.8/-4.8/-4.9), ATT win SNR10 collapsed 76.6%→62.8%. In-vivo smooth improved but synthetic degradation too severe.
 
-- [ ] **C3**: Physiological noise augmentation
+- [FAIL] **C3**: Physiological noise augmentation
   - Change: Add low-frequency spatial noise to training data
-  - Why: Better models real in-vivo noise characteristics
-  - Risk: Code complexity
+  - **FAIL**: Implementation used per-sample gaussian_filter in inner loop (~90k scipy calls), made training 10x slower. Reverted. Would need GPU-native approach (torch convolution) to be viable.
 
 - [ ] **C4**: Smoother phantoms (pve_sigma 4.0 → 5.0)
   - Change: `SpatialPhantomGenerator(size=64, pve_sigma=5.0)`
