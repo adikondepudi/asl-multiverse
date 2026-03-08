@@ -1,7 +1,7 @@
 # Ralph Plan — Ordered Task Checklist
 
 **Status**: IN PROGRESS
-**Iteration**: 5
+**Iteration**: 6
 **Last Updated**: 2026-03-08
 
 ---
@@ -40,10 +40,11 @@
 
 ## Phase C — Architecture/Loss Refinements
 
-- [ ] **C1**: Wider model [48, 96, 192, 384]
+- [FAIL] **C1**: Wider model [48, 96, 192, 384]
   - Change: `hidden_sizes: [48, 96, 192, 384]` in config
   - Why: More capacity → potentially better fitting
   - Risk: Slower training, possible overfitting
+  - **FAIL**: CBF wins all dropped (-6.1/-3.5/-3.6), smooth ratio 0.77→1.00 (NN no longer smoother), physio FAIL (GM/WM 1.17). Wider model overfits, loses spatial smoothness.
 
 - [ ] **C2**: Huber loss instead of L1
   - Change: `loss_type: huber` in config
@@ -93,3 +94,4 @@
 | 3    | A3   | FAIL | 74.7/76.1/78.3 | 83.3/61.8/89.8 | 1.02 | 0.91 | Widened DR too aggressive, ATT win SNR10 collapsed -14.8% |
 | 4    | A4   | FAIL | 70.5/74.7/78.4 | 85.9/77.2/86.6 | 1.03 | 0.93 | Rician noise dropped CBF win SNR10 -3.2% |
 | 5    | B1   | PASS | 72.1/75.9/79.1 | 86.9/75.4/84.6 | 0.94 | 0.87 | 3-model ensemble, in-vivo CoV/smooth both improved |
+| 6    | C1   | FAIL | 66.5/74.4/75.4 | 86.9/80.7/86.0 | 0.95 | 1.00 | Wider model [48,96,192,384] overfits, smooth ratio collapsed |
