@@ -1,7 +1,7 @@
 # Ralph Plan — Ordered Task Checklist
 
 **Status**: IN PROGRESS
-**Iteration**: 1
+**Iteration**: 2
 **Last Updated**: 2026-03-08
 
 ---
@@ -14,10 +14,10 @@
   - Risk: Slower iteration (~15 min instead of ~10 min)
   - **FAIL**: CBF win dropped (66.5→62.1 SNR3, 75.8→72.2 SNR10), in-vivo CoV ratio 1.09 (was 0.95), smooth ratio 0.99 (was 0.77), GM/WM ratio 1.17 (physio FAIL). Longer training overfit and degraded in-vivo generalization.
 
-- [ ] **A2**: Increase TV weight 0.02 → 0.05
+- [x] **A2**: Increase TV weight 0.02 → 0.05
   - Change: `tv_weight: 0.05` in config or ralph_harness.py
   - Why: Stronger spatial smoothness penalty → lower in-vivo smoothness metric
-  - Risk: May hurt synthetic per-voxel accuracy if too aggressive
+  - Result: CBF wins all improved (+6.1/+2.1/+1.1%), ATT stable. In-vivo CoV/smooth slightly worse but synthetic gains justify.
 
 - [ ] **A3**: Widen domain randomization ranges
   - Change: `alpha_BS1_range: [0.75, 1.0]`, `T1_artery_range: [1400, 2300]`
@@ -92,3 +92,4 @@
 |------|------|--------|-------------------|-------------------|-----------|--------------|-------|
 | 0    | —    | baseline | 66.5/75.8/77.9 | 85.6/76.6/84.5 | 0.95 | 0.77 | Starting point |
 | 1    | A1   | FAIL | 62.1/72.2/77.3 | 84.3/81.0/91.1 | 1.09 | 0.99 | 5000 samples/50 epochs overfit, degraded in-vivo |
+| 2    | A2   | PASS | 72.6/77.9/79.0 | 85.0/76.6/85.0 | 1.00 | 0.90 | tv_weight 0.02→0.05, CBF wins all improved |

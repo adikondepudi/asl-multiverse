@@ -258,7 +258,7 @@ def train_model(cfg, signals, targets, norm_stats, device, n_epochs, seed):
                      torch.mean(torch.abs(pred_cbf[:, :, :, 1:] - pred_cbf[:, :, :, :-1]))
             tv_att = torch.mean(torch.abs(pred_att[:, :, 1:, :] - pred_att[:, :, :-1, :])) + \
                      torch.mean(torch.abs(pred_att[:, :, :, 1:] - pred_att[:, :, :, :-1]))
-            tv_weight = cfg.get('tv_weight', 0.02)
+            tv_weight = cfg.get('tv_weight', 0.05)
             loss = loss + tv_weight * (tv_cbf + tv_att)
             if torch.isnan(loss) or torch.isinf(loss):
                 continue

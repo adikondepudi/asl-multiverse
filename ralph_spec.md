@@ -5,18 +5,18 @@
 ### Synthetic (per-voxel win rate, NN vs domain-randomized LS)
 | SNR | CBF Win % | ATT Win % | CBF Slope | CBF Bias |
 |-----|-----------|-----------|-----------|----------|
-| 3   | 66.5      | 85.6      | 0.80      | -3.8     |
-| 10  | 75.8      | 76.6      | 0.86      | -0.9     |
-| 25  | 77.9      | 84.5      | 0.98      | +2.0     |
+| 3   | 72.6      | 85.0      | 0.80      | -2.2     |
+| 10  | 77.9      | 76.6      | 0.87      | -0.8     |
+| 25  | 79.0      | 85.0      | 0.99      | +2.4     |
 
 ### In-Vivo (3 subjects average)
 | Metric              | NN     | LS     | Ratio (NN/LS) |
 |---------------------|--------|--------|---------------|
-| GM CBF CoV (%)      | 43.8   | 46.2   | 0.95          |
-| Spatial Smoothness  | 6.35   | 8.27   | 0.77          |
-| GM CBF Mean         | 37.8   | —      | —             |
-| GM/WM Ratio         | 1.79   | —      | —             |
-| GM ATT Mean (ms)    | 1344   | —      | —             |
+| GM CBF CoV (%)      | 46.1   | 46.2   | 1.00          |
+| Spatial Smoothness  | 7.46   | 8.27   | 0.90          |
+| GM CBF Mean         | 42.6   | —      | —             |
+| GM/WM Ratio         | 1.20   | —      | —             |
+| GM ATT Mean (ms)    | 1418   | —      | —             |
 
 ## Targets (hard — no fallback)
 - **Synthetic CBF win rate > 90%** at ALL SNR levels (3, 10, 25)
