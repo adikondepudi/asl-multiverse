@@ -1,7 +1,7 @@
 # Ralph Plan — Ordered Task Checklist
 
 **Status**: IN PROGRESS
-**Iteration**: 6
+**Iteration**: 7
 **Last Updated**: 2026-03-08
 
 ---
@@ -46,10 +46,11 @@
   - Risk: Slower training, possible overfitting
   - **FAIL**: CBF wins all dropped (-6.1/-3.5/-3.6), smooth ratio 0.77→1.00 (NN no longer smoother), physio FAIL (GM/WM 1.17). Wider model overfits, loses spatial smoothness.
 
-- [ ] **C2**: Huber loss instead of L1
+- [FAIL] **C2**: Huber loss instead of L1
   - Change: `loss_type: huber` in config
   - Why: Less sensitive to outliers than L2, smoother gradients than L1
   - Risk: May need delta tuning
+  - **FAIL**: CBF wins all dropped (-6.8/-4.8/-4.9), ATT win SNR10 collapsed 76.6%→62.8%. In-vivo smooth improved but synthetic degradation too severe.
 
 - [ ] **C3**: Physiological noise augmentation
   - Change: Add low-frequency spatial noise to training data
@@ -95,3 +96,4 @@
 | 4    | A4   | FAIL | 70.5/74.7/78.4 | 85.9/77.2/86.6 | 1.03 | 0.93 | Rician noise dropped CBF win SNR10 -3.2% |
 | 5    | B1   | PASS | 72.1/75.9/79.1 | 86.9/75.4/84.6 | 0.94 | 0.87 | 3-model ensemble, in-vivo CoV/smooth both improved |
 | 6    | C1   | FAIL | 66.5/74.4/75.4 | 86.9/80.7/86.0 | 0.95 | 1.00 | Wider model [48,96,192,384] overfits, smooth ratio collapsed |
+| 7    | C2   | FAIL | 65.8/73.1/74.1 | 85.7/62.8/79.2 | 0.91 | 0.71 | Huber loss degraded all win rates, ATT SNR10 -13.8% |
