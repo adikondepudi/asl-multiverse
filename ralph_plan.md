@@ -1,7 +1,7 @@
 # Ralph Plan — Ordered Task Checklist
 
 **Status**: IN PROGRESS
-**Iteration**: 3
+**Iteration**: 4
 **Last Updated**: 2026-03-08
 
 ---
@@ -24,10 +24,10 @@
   - Why: Wider mismatch between NN training physics and LS fixed physics → higher win rate
   - **FAIL**: ATT win at SNR10 collapsed 76.6%→61.8% (-14.8%). Too-wide ranges degraded NN accuracy.
 
-- [ ] **A4**: Switch noise model to Rician
+- [FAIL] **A4**: Switch noise model to Rician
   - Change: `noise_type: rician` in config
   - Why: Rician is physically correct for magnitude MRI data
-  - Risk: Minor — may need noise level adjustment
+  - **FAIL**: CBF win SNR10 dropped 77.9%→74.7% (-3.2%). Rician training noise made model slightly worse, possibly because test eval uses Gaussian noise.
 
 ## Phase B — Variance Reduction (code changes to ralph_harness.py)
 
@@ -94,3 +94,4 @@
 | 1    | A1   | FAIL | 62.1/72.2/77.3 | 84.3/81.0/91.1 | 1.09 | 0.99 | 5000 samples/50 epochs overfit, degraded in-vivo |
 | 2    | A2   | PASS | 72.6/77.9/79.0 | 85.0/76.6/85.0 | 1.00 | 0.90 | tv_weight 0.02→0.05, CBF wins all improved |
 | 3    | A3   | FAIL | 74.7/76.1/78.3 | 83.3/61.8/89.8 | 1.02 | 0.91 | Widened DR too aggressive, ATT win SNR10 collapsed -14.8% |
+| 4    | A4   | FAIL | 70.5/74.7/78.4 | 85.9/77.2/86.6 | 1.03 | 0.93 | Rician noise dropped CBF win SNR10 -3.2% |
