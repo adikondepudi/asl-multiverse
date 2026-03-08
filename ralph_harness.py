@@ -280,18 +280,53 @@ def train_model(cfg, signals, targets, norm_stats, device, n_epochs, seed):
 # Phase 2: Synthetic evaluation
 # =============================================================================
 
-def ensemble_predict(models_and_stats, inp, device):
-    """Average predictions from multiple (model, norm_stats) pairs."""
+def tta_predict_single(model, ns, inp):
+    """Predict with 4-flip TTA for a single model, return averaged CBF/ATT."""
+    flips = [
+        (False, False),  # original
+        (False, True),   # horizontal flip
+        (True, False),   # vertical flip
+        (True, True),    # both flips
+    ]
     cbf_preds, att_preds = [], []
-    for model, ns in models_and_stats:
-        pc, pa, _, _ = model(inp)
-        cbf_preds.append(pc[0, 0].cpu().numpy() * ns['y_std_cbf'] + ns['y_mean_cbf'])
-        att_preds.append(pa[0, 0].cpu().numpy() * ns['y_std_att'] + ns['y_mean_att'])
+    for flip_v, flip_h in flips:
+        aug = inp
+        if flip_v:
+            aug = torch.flip(aug, [2])
+        if flip_h:
+            aug = torch.flip(aug, [3])
+        pc, pa, _, _ = model(aug)
+        cbf = pc[0, 0].cpu().numpy()
+        att = pa[0, 0].cpu().numpy()
+        # Undo flips
+        if flip_v:
+            cbf = np.flip(cbf, axis=0).copy()
+            att = np.flip(att, axis=0).copy()
+        if flip_h:
+            cbf = np.flip(cbf, axis=1).copy()
+            att = np.flip(att, axis=1).copy()
+        cbf_preds.append(cbf * ns['y_std_cbf'] + ns['y_mean_cbf'])
+        att_preds.append(att * ns['y_std_att'] + ns['y_mean_att'])
     return np.mean(cbf_preds, axis=0), np.mean(att_preds, axis=0)
 
 
-def synthetic_eval(model, cfg, norm_stats, device, n_phantoms=10, snr_levels=[3, 10, 25], seed=9999, models_and_stats=None):
-    """Evaluate on synthetic phantoms with known ground truth."""
+def ensemble_predict(models_and_stats, inp, device):
+    """Average predictions from multiple (model, norm_stats) pairs with TTA."""
+    cbf_preds, att_preds = [], []
+    for model, ns in models_and_stats:
+        cbf, att = tta_predict_single(model, ns, inp)
+        cbf_preds.append(cbf)
+        att_preds.append(att)
+    return np.mean(cbf_preds, axis=0), np.mean(att_preds, axis=0)
+
+
+def _ls_cache_path():
+    return Path('invivo_results') / 'ls_synth_cache.npz'
+
+
+def _compute_ls_cache(cfg, n_phantoms=10, snr_levels=[3, 10, 25], seed=9999):
+    """Compute LS results for synthetic phantoms once and cache to disk."""
+    print("  Computing LS cache (one-time cost)...")
     np.random.seed(seed)
     plds = np.array(cfg.get('pld_values', [500, 1000, 1500, 2000, 2500]), dtype=np.float32)
     asl_dict = {k: v for k, v in cfg.items() if k in ASLParameters.__annotations__}
@@ -302,24 +337,17 @@ def synthetic_eval(model, cfg, norm_stats, device, n_phantoms=10, snr_levels=[3,
     pld_scaling = {'PCASL': scalings['PCASL'], 'VSASL': scalings['VSASL']}
     n_plds = len(plds); plds_bc = plds[:, np.newaxis, np.newaxis]
     phantom_gen = SpatialPhantomGenerator(size=64, pve_sigma=3.0)
-    global_scale = cfg.get('global_scale_factor', 10.0)
     dr_cfg = cfg.get('domain_randomization', {})
 
-    # LS physics (consensus — what a clinician uses)
     ls_params = {
         'T1_artery': 1650.0, 'T_tau': 1800.0, 'T2_factor': 1.0,
         'alpha_BS1': 0.93, 'alpha_PCASL': 0.85, 'alpha_VSASL': 0.56,
     }
 
-    model.eval()
-    results = {}
-
+    cache = {}
     for snr in snr_levels:
-        nn_errs_cbf, nn_errs_att, ls_errs_cbf, ls_errs_att = [], [], [], []
-        cbf_slopes_data = []
-
-        # Track NN errors on the same subsampled voxels as LS (for win rate)
-        nn_sub_errs_cbf_list, nn_sub_errs_att_list = [], []
+        ls_errs_cbf, ls_errs_att = [], []
+        voxel_coords = []  # (phantom_idx, yi, xi) for matching NN errors
 
         for p in range(n_phantoms):
             np.random.seed(seed + p * 100 + int(snr * 10))
@@ -327,40 +355,16 @@ def synthetic_eval(model, cfg, norm_stats, device, n_phantoms=10, snr_levels=[3,
             t1_b, alpha_p, alpha_v, tau = sample_physics(cfg, base_params, dr_cfg.get('enabled', True))
             clean = generate_asl_signal(cbf_map, att_map, plds_bc, t1_b, alpha_p, alpha_v, tau, base_params.T2_factor) * 100.0
 
-            # Apply brain-shaped mask (matching training and in-vivo coverage)
             brain_mask = make_brain_mask_2d(64)
             clean[:, ~brain_mask] = 0.0
-            cbf_map[~brain_mask] = 0.0
-            att_map[~brain_mask] = 0.0
 
-            # Add noise
             noise_sigma = ref_signal * 100.0 / snr
             noisy = clean.copy()
             for ch in range(clean.shape[0]):
                 scale = pld_scaling['PCASL'] if ch < n_plds else pld_scaling['VSASL']
                 noisy[ch] += np.random.randn(64, 64).astype(np.float32) * noise_sigma * scale
 
-            # NN prediction (ensemble if available)
-            with torch.no_grad():
-                inp = torch.from_numpy(noisy[np.newaxis]).float().to(device)
-                inp = torch.clamp(inp * global_scale, -30, 30)
-                if models_and_stats and len(models_and_stats) > 1:
-                    nn_cbf, nn_att = ensemble_predict(models_and_stats, inp, device)
-                else:
-                    pc, pa, _, _ = model(inp)
-                    nn_cbf = (pc[0, 0].cpu().numpy() * norm_stats['y_std_cbf'] + norm_stats['y_mean_cbf'])
-                    nn_att = (pa[0, 0].cpu().numpy() * norm_stats['y_std_att'] + norm_stats['y_mean_att'])
-
-            nn_cbf = np.clip(nn_cbf, 0, 200)
-            nn_att = np.clip(nn_att, 0, 5000)
-
-            bm = brain_mask
-            nn_errs_cbf.append(np.abs(nn_cbf[bm] - cbf_map[bm]))
-            nn_errs_att.append(np.abs(nn_att[bm] - att_map[bm]))
-            cbf_slopes_data.append((nn_cbf[bm], cbf_map[bm]))
-
-            # LS on 10% subsample
-            brain_idx = np.where(bm)
+            brain_idx = np.where(brain_mask)
             n_sub = max(10, int(len(brain_idx[0]) * 0.1))
             sub = np.random.choice(len(brain_idx[0]), size=n_sub, replace=False)
             pldti = np.column_stack([plds.astype(np.float64), plds.astype(np.float64)])
@@ -386,16 +390,116 @@ def synthetic_eval(model, cfg, norm_stats, device, n_phantoms=10, snr_levels=[3,
                     ls_att_val = np.clip(beta[1], 0, 5000)
                     ls_errs_cbf.append(abs(ls_cbf_val - cbf_map[yi, xi]))
                     ls_errs_att.append(abs(ls_att_val - att_map[yi, xi]))
-                    # NN error at same voxel (for matched win rate)
-                    nn_sub_errs_cbf_list.append(abs(nn_cbf[yi, xi] - cbf_map[yi, xi]))
-                    nn_sub_errs_att_list.append(abs(nn_att[yi, xi] - att_map[yi, xi]))
+                    voxel_coords.append((p, yi, xi))
                 except Exception:
                     pass
 
+        snr_key = str(int(snr))
+        cache[f'ls_errs_cbf_{snr_key}'] = np.array(ls_errs_cbf)
+        cache[f'ls_errs_att_{snr_key}'] = np.array(ls_errs_att)
+        cache[f'voxel_coords_{snr_key}'] = np.array(voxel_coords)
+        print(f"    SNR={snr}: {len(ls_errs_cbf)} LS fits cached")
+
+    np.savez(_ls_cache_path(), **cache)
+    print(f"  LS cache saved to {_ls_cache_path()}")
+    return cache
+
+
+def synthetic_eval(model, cfg, norm_stats, device, n_phantoms=10, snr_levels=[3, 10, 25], seed=9999, models_and_stats=None):
+    """Evaluate on synthetic phantoms with known ground truth. LS results are cached."""
+    # Load or compute LS cache
+    cache_path = _ls_cache_path()
+    if cache_path.exists():
+        ls_cache = dict(np.load(cache_path))
+        print("  Using cached LS results")
+    else:
+        ls_cache = _compute_ls_cache(cfg, n_phantoms, snr_levels, seed)
+
+    np.random.seed(seed)
+    plds = np.array(cfg.get('pld_values', [500, 1000, 1500, 2000, 2500]), dtype=np.float32)
+    asl_dict = {k: v for k, v in cfg.items() if k in ASLParameters.__annotations__}
+    base_params = ASLParameters(**asl_dict)
+    simulator = RealisticASLSimulator(params=base_params)
+    ref_signal = simulator._compute_reference_signal()
+    scalings = simulator.compute_tr_noise_scaling(plds)
+    pld_scaling = {'PCASL': scalings['PCASL'], 'VSASL': scalings['VSASL']}
+    n_plds = len(plds); plds_bc = plds[:, np.newaxis, np.newaxis]
+    phantom_gen = SpatialPhantomGenerator(size=64, pve_sigma=3.0)
+    global_scale = cfg.get('global_scale_factor', 10.0)
+    dr_cfg = cfg.get('domain_randomization', {})
+
+    model.eval()
+    results = {}
+
+    for snr in snr_levels:
+        snr_key = str(int(snr))
+        nn_errs_cbf, nn_errs_att = [], []
+        cbf_slopes_data = []
+
+        # Load cached LS errors and voxel coordinates
+        ls_errs_cbf = ls_cache[f'ls_errs_cbf_{snr_key}']
+        ls_errs_att = ls_cache[f'ls_errs_att_{snr_key}']
+        voxel_coords = ls_cache[f'voxel_coords_{snr_key}']
+
+        # Collect NN errors at the same voxels LS was evaluated on
+        nn_sub_errs_cbf_list, nn_sub_errs_att_list = [], []
+
+        # Regenerate phantoms with same seeds (deterministic)
+        nn_cbf_maps = {}  # phantom_idx -> nn_cbf prediction
+        nn_att_maps = {}
+
+        for p in range(n_phantoms):
+            np.random.seed(seed + p * 100 + int(snr * 10))
+            cbf_map, att_map, _ = phantom_gen.generate_phantom(include_pathology=False)
+            t1_b, alpha_p, alpha_v, tau = sample_physics(cfg, base_params, dr_cfg.get('enabled', True))
+            clean = generate_asl_signal(cbf_map, att_map, plds_bc, t1_b, alpha_p, alpha_v, tau, base_params.T2_factor) * 100.0
+
+            brain_mask = make_brain_mask_2d(64)
+            clean[:, ~brain_mask] = 0.0
+            cbf_map[~brain_mask] = 0.0
+            att_map[~brain_mask] = 0.0
+
+            noise_sigma = ref_signal * 100.0 / snr
+            noisy = clean.copy()
+            for ch in range(clean.shape[0]):
+                scale = pld_scaling['PCASL'] if ch < n_plds else pld_scaling['VSASL']
+                noisy[ch] += np.random.randn(64, 64).astype(np.float32) * noise_sigma * scale
+
+            # NN prediction (single model, no TTA for speed)
+            with torch.no_grad():
+                inp = torch.from_numpy(noisy[np.newaxis]).float().to(device)
+                inp = torch.clamp(inp * global_scale, -30, 30)
+                pc, pa, _, _ = model(inp)
+                nn_cbf = (pc[0, 0].cpu().numpy() * norm_stats['y_std_cbf'] + norm_stats['y_mean_cbf'])
+                nn_att = (pa[0, 0].cpu().numpy() * norm_stats['y_std_att'] + norm_stats['y_mean_att'])
+
+            nn_cbf = np.clip(nn_cbf, 0, 200)
+            nn_att = np.clip(nn_att, 0, 5000)
+
+            bm = brain_mask
+            nn_errs_cbf.append(np.abs(nn_cbf[bm] - cbf_map[bm]))
+            nn_errs_att.append(np.abs(nn_att[bm] - att_map[bm]))
+            cbf_slopes_data.append((nn_cbf[bm], cbf_map[bm]))
+
+            nn_cbf_maps[p] = nn_cbf
+            nn_att_maps[p] = nn_att
+            # Store ground truth for voxel matching
+            nn_cbf_maps[f'gt_cbf_{p}'] = cbf_map
+            nn_att_maps[f'gt_att_{p}'] = att_map
+
+        # Match NN errors to cached LS voxels
+        for i, (p_idx, yi, xi) in enumerate(voxel_coords):
+            p_idx, yi, xi = int(p_idx), int(yi), int(xi)
+            if p_idx in nn_cbf_maps:
+                gt_cbf = nn_cbf_maps[f'gt_cbf_{p_idx}'][yi, xi]
+                gt_att = nn_att_maps[f'gt_att_{p_idx}'][yi, xi]
+                nn_sub_errs_cbf_list.append(abs(nn_cbf_maps[p_idx][yi, xi] - gt_cbf))
+                nn_sub_errs_att_list.append(abs(nn_att_maps[p_idx][yi, xi] - gt_att))
+
         nn_cbf_mae = float(np.mean(np.concatenate(nn_errs_cbf)))
         nn_att_mae = float(np.mean(np.concatenate(nn_errs_att)))
-        ls_cbf_mae = float(np.mean(ls_errs_cbf)) if ls_errs_cbf else 999
-        ls_att_mae = float(np.mean(ls_errs_att)) if ls_errs_att else 999
+        ls_cbf_mae = float(np.mean(ls_errs_cbf)) if len(ls_errs_cbf) > 0 else 999
+        ls_att_mae = float(np.mean(ls_errs_att)) if len(ls_errs_att) > 0 else 999
 
         # CBF slope
         all_pred = np.concatenate([d[0] for d in cbf_slopes_data])
@@ -404,20 +508,18 @@ def synthetic_eval(model, cfg, norm_stats, device, n_phantoms=10, snr_levels=[3,
         cbf_slope = float(np.polyfit(all_true[valid], all_pred[valid], 1)[0]) if valid.sum() > 10 else float('nan')
         cbf_bias = float(np.mean(all_pred[valid] - all_true[valid]))
 
-        # Per-voxel win rates on the subsampled voxels where we have both NN and LS
+        # Per-voxel win rates
         nn_sub_errs_cbf = np.array(nn_sub_errs_cbf_list) if nn_sub_errs_cbf_list else np.array([])
         nn_sub_errs_att = np.array(nn_sub_errs_att_list) if nn_sub_errs_att_list else np.array([])
-        ls_sub_errs_cbf = np.array(ls_errs_cbf)
-        ls_sub_errs_att = np.array(ls_errs_att)
 
-        n_matched = min(len(nn_sub_errs_cbf), len(ls_sub_errs_cbf))
+        n_matched = min(len(nn_sub_errs_cbf), len(ls_errs_cbf))
         if n_matched > 0:
-            cbf_win = float(np.mean(nn_sub_errs_cbf[:n_matched] < ls_sub_errs_cbf[:n_matched]) * 100)
-            att_win = float(np.mean(nn_sub_errs_att[:n_matched] < ls_sub_errs_att[:n_matched]) * 100)
+            cbf_win = float(np.mean(nn_sub_errs_cbf[:n_matched] < ls_errs_cbf[:n_matched]) * 100)
+            att_win = float(np.mean(nn_sub_errs_att[:n_matched] < ls_errs_att[:n_matched]) * 100)
         else:
             cbf_win, att_win = 0.0, 0.0
 
-        results[str(int(snr))] = {
+        results[snr_key] = {
             'nn_cbf_mae': nn_cbf_mae, 'nn_att_mae': nn_att_mae,
             'ls_cbf_mae': ls_cbf_mae, 'ls_att_mae': ls_att_mae,
             'cbf_slope': cbf_slope, 'cbf_bias': cbf_bias,
@@ -431,13 +533,10 @@ def synthetic_eval(model, cfg, norm_stats, device, n_phantoms=10, snr_levels=[3,
 # Phase 3: In-vivo evaluation
 # =============================================================================
 
-def invivo_eval(model, norm_stats, cfg, device, data_dir, ls_cache_dir, subjects, models_and_stats=None):
+def invivo_eval(model, norm_stats, cfg, device, data_dir, ls_cache_dir, subjects):
     """Evaluate on real patient data, compare to cached LS."""
     global_scale = cfg.get('global_scale_factor', 10.0)
     model.eval()
-    if models_and_stats:
-        for m, _ in models_and_stats:
-            m.eval()
     all_results = {}
 
     for subj_id in subjects:
@@ -468,18 +567,9 @@ def invivo_eval(model, norm_stats, cfg, device, data_dir, ls_cache_dir, subjects
                 pad_w = (16 - w % 16) % 16
                 if pad_h > 0 or pad_w > 0:
                     inp = torch.nn.functional.pad(inp, (0, pad_w, 0, pad_h), mode='reflect')
-                if models_and_stats and len(models_and_stats) > 1:
-                    cbf_preds, att_preds = [], []
-                    for m, ns in models_and_stats:
-                        pc, pa, _, _ = m(inp)
-                        cbf_preds.append(pc[0, 0, :h, :w].cpu().numpy() * ns['y_std_cbf'] + ns['y_mean_cbf'])
-                        att_preds.append(pa[0, 0, :h, :w].cpu().numpy() * ns['y_std_att'] + ns['y_mean_att'])
-                    cbf_vol[z] = np.mean(cbf_preds, axis=0)
-                    att_vol[z] = np.mean(att_preds, axis=0)
-                else:
-                    pc, pa, _, _ = model(inp)
-                    cbf_vol[z] = pc[0, 0, :h, :w].cpu().numpy() * norm_stats['y_std_cbf'] + norm_stats['y_mean_cbf']
-                    att_vol[z] = pa[0, 0, :h, :w].cpu().numpy() * norm_stats['y_std_att'] + norm_stats['y_mean_att']
+                pc, pa, _, _ = model(inp)
+                cbf_vol[z] = pc[0, 0, :h, :w].cpu().numpy() * norm_stats['y_std_cbf'] + norm_stats['y_mean_cbf']
+                att_vol[z] = pa[0, 0, :h, :w].cpu().numpy() * norm_stats['y_std_att'] + norm_stats['y_mean_att']
 
         nn_cbf = np.clip(np.transpose(cbf_vol, (1, 2, 0)), 0, 200)
         nn_att = np.clip(np.transpose(att_vol, (1, 2, 0)), 0, 5000)
@@ -724,23 +814,13 @@ def main():
     cfg = load_config()
     print(f"Device: {device}, Config: config/invivo_experiment.yaml")
 
-    # Phase 1: Train ensemble (3 models with different seeds)
-    n_ensemble = 3
-    ensemble_seeds = [args.seed, args.seed + 1, args.seed + 2]
-    print(f"\n[Phase 1] Generating {args.n_samples} samples + training {n_ensemble}x{args.n_epochs} epochs (ensemble)...")
+    # Phase 1: Train single model (ensemble disabled for fast iteration)
+    print(f"\n[Phase 1] Generating {args.n_samples} samples + training {args.n_epochs} epochs...")
     t1 = time.time()
     signals, targets, norm_stats = generate_training_data(cfg, args.n_samples, args.seed)
     print(f"  Data: {time.time()-t1:.0f}s, norm_stats: CBF={norm_stats['y_mean_cbf']:.1f}+/-{norm_stats['y_std_cbf']:.1f}")
 
-    models_and_stats = []
-    loss_history = None
-    for i, seed in enumerate(ensemble_seeds):
-        print(f"  Training model {i+1}/{n_ensemble} (seed={seed})...")
-        model_i, lh_i = train_model(cfg, signals, targets, norm_stats, device, args.n_epochs, seed)
-        models_and_stats.append((model_i, norm_stats))
-        if i == 0:
-            loss_history = lh_i
-    model = models_and_stats[0][0]  # primary model for backward compat
+    model, loss_history = train_model(cfg, signals, targets, norm_stats, device, args.n_epochs, args.seed)
     print(f"  Training: {time.time()-t1:.0f}s total")
 
     # Save model
@@ -750,15 +830,15 @@ def main():
                output_dir / 'trained_model.pt')
 
     # Phase 2: Synthetic eval
-    print(f"\n[Phase 2] Synthetic evaluation (3 SNR levels, 10 phantoms, {n_ensemble}-model ensemble)...")
+    print(f"\n[Phase 2] Synthetic evaluation (3 SNR levels, 10 phantoms)...")
     t2 = time.time()
-    synth_results = synthetic_eval(model, cfg, norm_stats, device, models_and_stats=models_and_stats)
+    synth_results = synthetic_eval(model, cfg, norm_stats, device)
     print(f"  Synthetic eval: {time.time()-t2:.0f}s")
 
     # Phase 3: In-vivo eval
-    print(f"\n[Phase 3] In-vivo evaluation ({len(args.subjects)} subjects, {n_ensemble}-model ensemble)...")
+    print(f"\n[Phase 3] In-vivo evaluation ({len(args.subjects)} subjects)...")
     t3 = time.time()
-    invivo_results = invivo_eval(model, norm_stats, cfg, device, args.data_dir, args.ls_cache_dir, args.subjects, models_and_stats=models_and_stats)
+    invivo_results = invivo_eval(model, norm_stats, cfg, device, args.data_dir, args.ls_cache_dir, args.subjects)
     print(f"  In-vivo eval: {time.time()-t3:.1f}s")
 
     # Output

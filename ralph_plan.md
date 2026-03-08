@@ -31,14 +31,12 @@
 
 ## Phase B — Variance Reduction (code changes to ralph_harness.py)
 
-- [x] **B1**: Ensemble averaging (train 3 models, average predictions)
-  - Change: Train 3 models with seeds 42,43,44; average CBF/ATT predictions
-  - Result: In-vivo CoV ratio 1.00→0.94, smooth ratio 0.90→0.87, GM/WM 1.20→1.39. Synthetic CBF wins stable, ATT SNR3 up +1.9%.
+- [DEFER] **B1**: Ensemble averaging (train 3 models, average predictions)
+  - Was tested and helped (CoV 1.00→0.94, smooth 0.90→0.87), but DISABLED for fast iteration.
+  - Re-enable as final polish once other improvements are found.
 
-- [ ] **B2**: Test-time augmentation (4x flips, average predictions)
-  - Change: At inference, predict on original + 3 flips, average
-  - Why: Reduces noise sensitivity without retraining
-  - Risk: 4x inference time (negligible compared to training)
+- [DEFER] **B2**: Test-time augmentation (4x flips, average predictions)
+  - DISABLED for fast iteration. Re-enable as final polish.
 
 ## Phase C — Architecture/Loss Refinements
 
