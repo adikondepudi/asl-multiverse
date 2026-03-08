@@ -1,0 +1,99 @@
+You are iterating on an ASL neural network to beat least-squares fitting on REAL IN-VIVO patient data. No synthetic tests. No simulated win rates. Real brains, real noise, real comparison. You are smart. Make bold moves. Trust your judgment.
+
+THE SITUATION:
+The NN currently LOSES to LS on in-vivo data:
+  - GM CBF CoV: NN=76.6% vs LS=46.4% (LS is less noisy — BAD)
+  - Spatial smoothness: NN=9.89 vs LS=7.71 (LS is smoother — BAD)
+  - GM CBF: NN=32.1 vs LS=37.3 (both low, expected 40-80)
+  - GM/WM ratio: NN=2.33 vs LS=2.94 (LS has better contrast)
+  - Speed: NN=0.3s vs LS=33s (NN is 100x faster — GOOD)
+
+The NN should win on CoV and smoothness because it has SPATIAL CONTEXT (U-Net)
+while LS fits each voxel independently. If it's losing, something is fundamentally
+wrong with how the training data or preprocessing matches real data.
+
+SETUP:
+- Config: config/invivo_experiment.yaml (hyperparams, architecture, physics)
+- Harness: python3 invivo_comparison.py --device mps --n-epochs 30 --n-samples 3000 --subjects 20231030_MR1_A152 20231003_MR1_A142 20231016_MR1_A147
+- Results log: invivo_results/experiment_log.md
+- Latest results: invivo_results/latest_results.json
+- LS results are CACHED in invivo_comparison_results/ (never recomputed)
+- In-vivo data: data/invivo_processed_npy/ (8 subjects, each with high_snr_signals.npy, brain_mask.npy, gm_mask.npy)
+
+You may modify ANY source file. Key ones:
+  - config/invivo_experiment.yaml (hyperparams, loss, architecture, physics, domain randomization)
+  - invivo_comparison.py (the harness — signal preprocessing, M0 scaling, inference pipeline)
+  - models/amplitude_aware_spatial_network.py (AmplitudeAwareSpatialASLNet architecture)
+  - models/spatial_asl_network.py (MaskedSpatialLoss, SpatialASLNet base)
+  - simulation/enhanced_simulation.py (SpatialPhantomGenerator tissue ranges, phantom generation)
+
+EACH ITERATION:
+1. Read invivo_results/experiment_log.md and invivo_results/latest_results.json
+2. Analyze ALL subjects. Look at the pattern — which subjects are worst? Why?
+3. Make changes. Multiple changes at once are fine.
+4. Run: python3 invivo_comparison.py --device mps --n-epochs 30 --n-samples 3000 --subjects 20231030_MR1_A152 20231003_MR1_A142 20231016_MR1_A147
+5. Read results. If worse: revert with git checkout.
+6. The experiment_log.md auto-appends each run.
+
+WHAT "BEATING LS" MEANS ON IN-VIVO DATA:
+Since there's no ground truth CBF/ATT, we compare on quality metrics:
+  - CoV (coefficient of variation) within GM tissue: LOWER = less noisy = BETTER
+  - Spatial smoothness (gradient magnitude within brain): LOWER = smoother = BETTER
+  - GM/WM contrast ratio: should be 2.0-3.5 (physiologically plausible)
+  - GM CBF mean: should be 30-90 ml/100g/min
+  - GM ATT mean: should be 800-1800 ms
+The NN's architectural advantage is SPATIAL CONTEXT. It should produce SMOOTHER,
+LESS NOISY maps than per-voxel LS fitting. If it doesn't, the training is wrong.
+
+LIKELY ROOT CAUSES TO INVESTIGATE:
+1. SIGNAL PREPROCESSING MISMATCH: The in-vivo npy signals may not match training
+   signal scale. Check invivo_comparison.py run_nn_on_subject() — it applies
+   M0_scale*global_scale = 100*10 = 1000x. Is this correct? Compare actual in-vivo
+   brain signal ranges to what the model sees during training.
+
+2. TRAINING DATA DISTRIBUTION: SpatialPhantomGenerator creates synthetic phantoms
+   with geometric tissue regions. Real brains look NOTHING like this. The model may
+   be learning phantom-specific patterns that don't transfer.
+
+3. NOISE MODEL MISMATCH: Training uses Gaussian noise. In-vivo has Rician noise,
+   physiological noise, motion artifacts, B0 inhomogeneity. The model may be
+   learning to denoise the wrong kind of noise.
+
+4. DOMAIN RANDOMIZATION RANGES: The alpha_BS1, T1_artery, labeling efficiency
+   ranges may not cover the actual patient variability in this dataset.
+
+5. NORMALIZATION CHAIN: The z-score denormalization (pred * std + mean) uses
+   norm_stats from TRAINING data. If training distribution doesn't match in-vivo,
+   the denormalized values will be systematically biased.
+
+DEBUGGING TIPS:
+- Print actual signal values at each step: raw in-vivo, after scaling, after clipping
+- Compare training data signal distribution to in-vivo signal distribution
+- Try different M0 scaling factors (maybe in-vivo data is already M0-normalized
+  differently than training)
+- Check if the model produces reasonable RELATIVE patterns even if absolute values
+  are off (would indicate a calibration/scaling issue vs a fundamental model issue)
+- Look at individual slices: does the NN map look like a brain? Or noise?
+- A152 is the best subject (GM CBF closest to expected). Start debugging there.
+
+WHAT NOT TO DO:
+- Don't only optimize the config — the preprocessing in invivo_comparison.py is
+  likely the bigger issue
+- Don't increase training time hoping it fixes scaling issues
+- Don't change LS parameters — they're cached and won't be recomputed
+- Don't optimize for synthetic metrics — ONLY in-vivo results matter now
+
+SUCCESS CRITERIA -- ALL must hold on average across evaluated subjects:
+1. Physiological plausibility (per subject):
+   - GM CBF in [15, 120] ml/100g/min
+   - GM/WM ratio in [1.2, 6.0]
+   - GM ATT in [400, 3000] ms
+2. NN beats LS on AT LEAST ONE of:
+   - GM CBF CoV: NN average < LS average (less noisy)
+   - Spatial smoothness: NN average < LS average (smoother)
+3. NN does not catastrophically fail on any subject
+
+When ALL success criteria are met, output <promise>METRICS_PASSING</promise>.
+
+If after 15 iterations you are stuck, write a detailed analysis to
+invivo_results/stuck_report.md and output <promise>METRICS_PASSING</promise>.

@@ -37,10 +37,10 @@ class SpatialPhantomGenerator:
     # regression bias at high CBF. V5 GM capped at 120 caused systematic
     # negative bias near boundary. Now GM extends to 200, tumor_hyper to 250.
     TISSUE_CBF = {
-        'gray_matter': (10.0, 200.0),     # Was 120 → 200 to avoid boundary bias
-        'white_matter': (5.0, 80.0),      # Was 50 → 80
+        'gray_matter': (30.0, 90.0),     # Physiological range for healthy brain
+        'white_matter': (10.0, 35.0),    # Physiological range for healthy brain
         'csf': (0.0, 5.0),               # Unchanged: CSF near-zero flow
-        'tumor_hyper': (100.0, 250.0),   # Was (80, 200) → (100, 250)
+        'tumor_hyper': (80.0, 150.0),    # Narrowed for realism
         'tumor_hypo': (2.0, 20.0),       # Unchanged
         'stroke_core': (0.0, 10.0),      # Unchanged
         'stroke_penumbra': (10.0, 40.0), # Unchanged
@@ -50,13 +50,13 @@ class SpatialPhantomGenerator:
     # Ranges expanded in v5 to cover full evaluation range (500-3000ms) and
     # prevent CBF bias dip at ATT > 1800ms (v4 had GM 1000-1600 / WM 1200-1800)
     TISSUE_ATT = {
-        'gray_matter': (500.0, 3000.0),        # Was 2500 → 3000
-        'white_matter': (800.0, 3500.0),       # Was 3000 → 3500
+        'gray_matter': (800.0, 2200.0),        # Physiological range for healthy brain
+        'white_matter': (1000.0, 2500.0),      # Physiological range for healthy brain
         'csf': (100.0, 500.0),                 # Unchanged
         'tumor_hyper': (500.0, 1000.0),        # Unchanged (fast transit)
-        'tumor_hypo': (1800.0, 3000.0),        # Was 2500 → 3000
-        'stroke_core': (2500.0, 4000.0),       # Was 3000 → 4000
-        'stroke_penumbra': (1800.0, 3000.0),   # Was 2500 → 3000
+        'tumor_hypo': (1800.0, 3000.0),        # Unchanged
+        'stroke_core': (2500.0, 4000.0),       # Unchanged
+        'stroke_penumbra': (1800.0, 3000.0),   # Unchanged
     }
 
     # Domain randomization default ranges
