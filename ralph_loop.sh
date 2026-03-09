@@ -1,18 +1,12 @@
 #!/bin/bash
 # Ralph Loop — Automated ML iteration via fresh Claude instances
 #
-# Each iteration gets a clean context window, reads the spec + plan,
-# picks a task, implements it, tests it, and updates the plan.
-#
 # Usage:
 #   bash ralph_loop.sh          # Run up to 50 iterations
 #   bash ralph_loop.sh 10       # Run up to 10 iterations
 #
 # Monitor in another terminal:
 #   tail -f invivo_results/ralph_loop_log.txt
-#
-# Check progress:
-#   cat ralph_plan.md
 
 set -uo pipefail
 
@@ -21,6 +15,15 @@ LOG_DIR="invivo_results"
 LOG_FILE="${LOG_DIR}/ralph_loop_log.txt"
 
 mkdir -p "$LOG_DIR"
+
+# Ensure Ctrl+C kills claude and all children
+cleanup() {
+    echo "" | tee -a "$LOG_FILE"
+    echo "*** Ralph Loop interrupted by user at $(date) ***" | tee -a "$LOG_FILE"
+    kill 0 2>/dev/null
+    exit 130
+}
+trap cleanup INT TERM
 
 echo "========================================" | tee -a "$LOG_FILE"
 echo "Ralph Loop started at $(date)" | tee -a "$LOG_FILE"
@@ -32,13 +35,17 @@ for i in $(seq 1 "$MAX_ITERS"); do
     echo "=== Iteration $i / $MAX_ITERS === $(date)" | tee -a "$LOG_FILE"
     echo "----------------------------------------" | tee -a "$LOG_FILE"
 
-    # Run a fresh Claude instance with the ralph prompt
-    # --dangerously-skip-permissions: required for headless -p mode
+    # Write output to log file; user monitors via: tail -f invivo_results/ralph_loop_log.txt
+    # Running without pipe so Ctrl+C propagates correctly
     claude -p "$(cat ralph_prompt.md)" \
         --dangerously-skip-permissions \
         --allowedTools "Bash,Read,Edit,Write,Glob,Grep" \
-        2>&1 | tee -a "$LOG_FILE"
-    EXIT_CODE=${PIPESTATUS[0]}
+        >> "$LOG_FILE" 2>&1 &
+    CLAUDE_PID=$!
+    echo "Claude PID: $CLAUDE_PID (monitor with: tail -f $LOG_FILE)"
+
+    wait "$CLAUDE_PID"
+    EXIT_CODE=$?
 
     if [ "$EXIT_CODE" -eq 0 ]; then
         echo "--- Iteration $i completed successfully at $(date) ---" | tee -a "$LOG_FILE"
@@ -60,6 +67,5 @@ done
 echo "" | tee -a "$LOG_FILE"
 echo "========================================" | tee -a "$LOG_FILE"
 echo "Ralph Loop exhausted $MAX_ITERS iterations without hitting all targets." | tee -a "$LOG_FILE"
-echo "Check ralph_plan.md for progress." | tee -a "$LOG_FILE"
 echo "========================================" | tee -a "$LOG_FILE"
 exit 1
