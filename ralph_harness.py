@@ -225,7 +225,7 @@ def train_model(cfg, signals, targets, norm_stats, device, n_epochs, seed):
     optimizer = torch.optim.AdamW(model.parameters(), lr=lr, weight_decay=cfg.get('weight_decay', 0.0001))
     scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=n_epochs, eta_min=lr * 0.01)
 
-    clean_fraction = 0.15
+    clean_fraction = 0.0  # I1: skip clean epochs, all epochs get noise
     snr_min_base = noise_cfg['noise_config'].get('snr_range', [2.0, 25.0])[0]
     snr_max_base = noise_cfg['noise_config'].get('snr_range', [2.0, 25.0])[1]
     loss_history = []
