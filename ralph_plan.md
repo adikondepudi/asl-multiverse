@@ -118,9 +118,9 @@
   - Change: Add `torch.rot90(k=random)` during training alongside existing flips
   - **FAIL**: Crashed — torch.rot90 creates non-contiguous tensors, loss_fn uses .view() which requires contiguous. Needs .contiguous() after rotation. Retry as F2b.
 
-- [ ] **F2b**: Random 90° rotation augmentation (with .contiguous() fix)
+- [FAIL] **F2b**: Random 90° rotation augmentation (with .contiguous() fix)
   - Change: Same as F2 but add .contiguous() after rot90 on all tensors
-  - Why: F2 concept is sound, just needs tensor contiguity fix
+  - **FAIL**: CBF wins dropped (72.6→73.6, 77.9→73.4, 79.0→75.6). SNR10 -4.5%, SNR25 -3.4%. Rotation augmentation hurts CBF accuracy.
 
 - [ ] **F3**: Increase post-processing blur sigma (1.0 → 1.5)
   - Change: sigma=1.5 in gaussian_filter for both synth and in-vivo eval
@@ -160,3 +160,4 @@
 | 14   | E5   | FAIL | 64.3/74.9/75.9 | 83.0/73.4/83.4 | 1.00 | 0.50 | lr=0.005+warmup, CBF wins all dropped 3-8%, worse convergence |
 | 15   | F1   | FAIL | 68.3/72.0/72.4 | 85.9/76.0/82.6 | 1.08 | 0.51 | weight_decay=0, CBF wins dropped 4-7%, took 94min |
 | 16   | F2   | FAIL | —/—/— | —/—/— | — | — | Crashed: torch.rot90 non-contiguous tensor vs .view() |
+| 17   | F2b  | FAIL | 73.6/73.4/75.6 | 86.5/74.8/84.5 | 1.08 | 0.52 | rot90 with .contiguous() fix, CBF wins SNR10 -4.5%, SNR25 -3.4% |
