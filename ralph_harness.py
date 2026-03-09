@@ -625,9 +625,28 @@ def invivo_eval(model, norm_stats, cfg, device, data_dir, ls_cache_dir, subjects
                 pad_w = (16 - w % 16) % 16
                 if pad_h > 0 or pad_w > 0:
                     inp = torch.nn.functional.pad(inp, (0, pad_w, 0, pad_h), mode='reflect')
-                pc, pa, _, _ = model(inp)
-                cbf_vol[z] = pc[0, 0, :h, :w].cpu().numpy() * norm_stats['y_std_cbf'] + norm_stats['y_mean_cbf']
-                att_vol[z] = pa[0, 0, :h, :w].cpu().numpy() * norm_stats['y_std_att'] + norm_stats['y_mean_att']
+                # 4-flip TTA (same as synthetic eval)
+                flips = [(False, False), (False, True), (True, False), (True, True)]
+                cbf_preds, att_preds = [], []
+                for flip_v, flip_h in flips:
+                    aug = inp
+                    if flip_v:
+                        aug = torch.flip(aug, [2])
+                    if flip_h:
+                        aug = torch.flip(aug, [3])
+                    pc, pa, _, _ = model(aug)
+                    cbf_s = pc[0, 0, :h, :w].cpu().numpy()
+                    att_s = pa[0, 0, :h, :w].cpu().numpy()
+                    if flip_v:
+                        cbf_s = np.flip(cbf_s, axis=0).copy()
+                        att_s = np.flip(att_s, axis=0).copy()
+                    if flip_h:
+                        cbf_s = np.flip(cbf_s, axis=1).copy()
+                        att_s = np.flip(att_s, axis=1).copy()
+                    cbf_preds.append(cbf_s)
+                    att_preds.append(att_s)
+                cbf_vol[z] = np.mean(cbf_preds, axis=0) * norm_stats['y_std_cbf'] + norm_stats['y_mean_cbf']
+                att_vol[z] = np.mean(att_preds, axis=0) * norm_stats['y_std_att'] + norm_stats['y_mean_att']
 
         nn_cbf = np.transpose(cbf_vol, (1, 2, 0))
         nn_att = np.transpose(att_vol, (1, 2, 0))
