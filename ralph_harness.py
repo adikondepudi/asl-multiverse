@@ -21,6 +21,7 @@ from pathlib import Path
 import numpy as np
 import torch
 import yaml
+from scipy.ndimage import gaussian_filter
 
 warnings.filterwarnings('ignore')
 
@@ -473,6 +474,9 @@ def synthetic_eval(model, cfg, norm_stats, device, n_phantoms=10, snr_levels=[3,
                 nn_cbf = (pc[0, 0].cpu().numpy() * norm_stats['y_std_cbf'] + norm_stats['y_mean_cbf'])
                 nn_att = (pa[0, 0].cpu().numpy() * norm_stats['y_std_att'] + norm_stats['y_mean_att'])
 
+            # Post-processing Gaussian blur for denoising
+            nn_cbf = gaussian_filter(nn_cbf, sigma=0.5)
+            nn_att = gaussian_filter(nn_att, sigma=0.5)
             nn_cbf = np.clip(nn_cbf, 0, 200)
             nn_att = np.clip(nn_att, 0, 5000)
 
@@ -571,8 +575,14 @@ def invivo_eval(model, norm_stats, cfg, device, data_dir, ls_cache_dir, subjects
                 cbf_vol[z] = pc[0, 0, :h, :w].cpu().numpy() * norm_stats['y_std_cbf'] + norm_stats['y_mean_cbf']
                 att_vol[z] = pa[0, 0, :h, :w].cpu().numpy() * norm_stats['y_std_att'] + norm_stats['y_mean_att']
 
-        nn_cbf = np.clip(np.transpose(cbf_vol, (1, 2, 0)), 0, 200)
-        nn_att = np.clip(np.transpose(att_vol, (1, 2, 0)), 0, 5000)
+        nn_cbf = np.transpose(cbf_vol, (1, 2, 0))
+        nn_att = np.transpose(att_vol, (1, 2, 0))
+        # Post-processing Gaussian blur (per-slice, 2D)
+        for z in range(nn_cbf.shape[2]):
+            nn_cbf[:, :, z] = gaussian_filter(nn_cbf[:, :, z], sigma=0.5)
+            nn_att[:, :, z] = gaussian_filter(nn_att[:, :, z], sigma=0.5)
+        nn_cbf = np.clip(nn_cbf, 0, 200)
+        nn_att = np.clip(nn_att, 0, 5000)
 
         # Load cached LS
         ls_cache = Path(ls_cache_dir) / subj_id
