@@ -1,5 +1,9 @@
 You are an ML research engineer iterating on an ASL MRI neural network. You have ONE task per iteration: pick the highest-priority unchecked task from the plan, implement it, test it, and update the plan.
 
+## CRITICAL: ONE harness run, then evaluate and exit
+
+You run `ralph_harness.py` EXACTLY ONCE. After it finishes, you evaluate the results, commit or revert, and EXIT. You do NOT re-run the harness a second time for any reason. If the harness crashes with a Python traceback, mark the task [FAIL] and exit. If the harness completes but metrics are worse, mark the task [FAIL] and exit. No retries, no fixes, no second attempts. EXIT.
+
 ## Protocol
 
 ### Step 1: Read state
@@ -19,7 +23,7 @@ This preserves the current state so you can revert if needed.
 Make the changes described in the task. Only modify files listed in ralph_spec.md under "Modifiable Files". NEVER modify files under `data/` or `invivo_comparison_results/`.
 
 ### Step 5: Test
-Run the harness:
+Run the harness ONCE:
 ```bash
 python3 ralph_harness.py --device mps 2>&1 | tee /tmp/ralph_iteration.log
 ```
@@ -40,12 +44,12 @@ Read `invivo_results/latest_results.json`. Compare to "Current Best" in ralph_sp
 3. Add row to iteration log in ralph_plan.md
 4. Commit: `git add -A && git commit -m "ralph: [task_id] — [brief description of improvement]"`
 
-### Step 7b: If WORSE or FAILED → revert and exit
+### Step 7b: If WORSE, FAILED, or CRASHED → revert and exit
 1. Revert changes: `git checkout -- config/ ralph_harness.py models/ simulation/`
 2. Mark task `[FAIL]` in ralph_plan.md with brief reason
 3. Add row to iteration log
 4. Commit plan only: `git add ralph_plan.md && git commit -m "ralph: [task_id] FAIL — [reason]"`
-5. **Exit immediately.** Do NOT retry with a different approach. The bash loop will spawn a fresh session for the next task.
+5. **Exit immediately.** Do NOT retry, do NOT try a different approach, do NOT run the harness again. Just exit.
 
 ### Step 8: Check targets
 Read the targets in ralph_spec.md. If ALL targets are met:
@@ -57,8 +61,7 @@ If not all targets met, exit normally (the loop will spawn a new iteration).
 ## Important Rules
 - ONE task per iteration. Do not combine tasks.
 - Always commit before and after changes.
-- If the harness crashes with a Python exception, fix the crash and re-run ONCE. If it crashes again, mark the task [FAIL] and exit.
-- Run the harness AT MOST twice per iteration (once normally, once if crash fix needed). Never more.
+- **NEVER run ralph_harness.py more than once.** One run, evaluate, commit or revert, exit.
 - If you're unsure about a change, make the minimal version first.
 - Do NOT enable FiLM (use_film_at_bottleneck or use_film_at_decoder). This is a hard constraint.
 - Do NOT modify read-only data directories.

@@ -86,6 +86,33 @@
   - Why: Decouple CBF spatial patterns from ATT
   - **FAIL**: CBF win SNR3 dropped 72.6→66.0% (-6.6%), SNR25 79.0→74.4% (-4.6%). In-vivo improved (CoV 0.95→0.84, smooth 0.77→0.64, physio PASS) but synthetic CBF wins dropped >3%. Similar pattern to D2 — more params helps in-vivo but hurts synthetic.
 
+## Phase E — New Ideas (based on 11 iterations of learning)
+
+- [ ] **E1**: Training data augmentation (random flips)
+  - Change: Add random horizontal/vertical flips during training in ralph_harness.py
+  - Why: Free 4x effective data increase, standard in image segmentation, zero risk to architecture
+  - Implementation: torch.flip on both signal and target tensors (random per sample)
+
+- [ ] **E2**: Stronger post-processing blur (sigma=0.5 → 1.0)
+  - Change: Increase gaussian_filter sigma from 0.5 to 1.0 in synthetic and in-vivo eval
+  - Why: More smoothing → lower per-voxel noise → higher win rate vs noisy LS
+  - Risk: May over-smooth fine details
+
+- [ ] **E3**: Moderate alpha_BS1 widening [0.82, 1.0]
+  - Change: alpha_BS1_range: [0.82, 1.0] (was [0.85, 1.0], A3 tried [0.75, 1.0] which was too wide)
+  - Why: Slightly more LS mismatch without degrading NN accuracy as much as A3
+  - Risk: Low — small change from current [0.85, 1.0]
+
+- [ ] **E4**: CBF loss weight increase (1.0 → 2.0)
+  - Change: cbf_weight: 2.0 in config
+  - Why: CBF win rate is the bottleneck metric; more CBF emphasis during training
+  - Risk: May hurt ATT accuracy
+
+- [ ] **E5**: Higher learning rate (0.003 → 0.005) with warmup
+  - Change: lr=0.005, add linear warmup for first 3 epochs
+  - Why: Faster convergence may help with limited 30 epochs
+  - Risk: Instability
+
 ---
 
 ## Iteration Log
