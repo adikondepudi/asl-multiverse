@@ -1,7 +1,7 @@
 # Ralph Plan — Ordered Task Checklist
 
 **Status**: IN PROGRESS
-**Iteration**: 13
+**Iteration**: 14
 **Last Updated**: 2026-03-08
 
 ---
@@ -104,10 +104,9 @@
   - Why: CBF win rate is the bottleneck metric; more CBF emphasis during training
   - **FAIL**: CBF wins all dropped (72.6→69.4, 77.9→75.4, 79.0→77.1), ATT win SNR10 collapsed 76.6→68.9% (-7.7%). In-vivo CoV 55.7% (FAIL), physio FAIL (GM/WM 1.13). CBF emphasis hurt ATT without helping CBF.
 
-- [ ] **E5**: Higher learning rate (0.003 → 0.005) with warmup
+- [FAIL] **E5**: Higher learning rate (0.003 → 0.005) with warmup
   - Change: lr=0.005, add linear warmup for first 3 epochs
-  - Why: Faster convergence may help with limited 30 epochs
-  - Risk: Instability
+  - **FAIL**: CBF wins all dropped (72.6→64.3, 77.9→74.9, 79.0→75.9), ATT also slightly worse. Higher LR degraded convergence quality despite warmup.
 
 ---
 
@@ -129,3 +128,4 @@
 | 11   | D4   | FAIL | 66.0/76.4/74.4 | 86.6/78.5/86.5 | 0.84 | 0.64 | Dual decoder, in-vivo improved but synth CBF wins dropped -6.6% SNR3, -4.6% SNR25 |
 | 12   | E3   | FAIL | 69.6/71.6/70.8 | 85.2/75.7/83.6 | 1.07 | 0.51 | alpha_BS1 [0.82,1.0], CBF wins all dropped 3-8%, in-vivo CoV/physio FAIL |
 | 13   | E4   | FAIL | 69.4/75.4/77.1 | 83.2/68.9/79.3 | 1.21 | 0.53 | cbf_weight 2.0, CBF dropped, ATT SNR10 -7.7%, in-vivo CoV/physio FAIL |
+| 14   | E5   | FAIL | 64.3/74.9/75.9 | 83.0/73.4/83.4 | 1.00 | 0.50 | lr=0.005+warmup, CBF wins all dropped 3-8%, worse convergence |
