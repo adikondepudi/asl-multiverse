@@ -230,6 +230,12 @@ def train_model(cfg, signals, targets, norm_stats, device, n_epochs, seed):
     snr_max_base = noise_cfg['noise_config'].get('snr_range', [2.0, 25.0])[1]
     loss_history = []
 
+    # SWA: accumulate averaged weights over last swa_epochs epochs
+    swa_epochs = 5
+    swa_start = n_epochs - swa_epochs
+    swa_state = None
+    swa_count = 0
+
     for epoch in range(n_epochs):
         model.train()
         epoch_loss, n_batches = 0.0, 0
@@ -302,6 +308,23 @@ def train_model(cfg, signals, targets, norm_stats, device, n_epochs, seed):
         loss_history.append(avg_loss)
         if (epoch + 1) % 5 == 0 or epoch == 0:
             print(f"  Epoch {epoch+1}/{n_epochs}: loss = {avg_loss:.4f}")
+
+        # SWA: accumulate model weights over last swa_epochs epochs
+        if epoch >= swa_start:
+            swa_count += 1
+            current_sd = model.state_dict()
+            if swa_state is None:
+                swa_state = {k: v.clone().float() for k, v in current_sd.items()}
+            else:
+                for k in swa_state:
+                    swa_state[k] += current_sd[k].float()
+
+    # Apply SWA averaged weights
+    if swa_state is not None and swa_count > 0:
+        print(f"  Applying SWA over last {swa_count} epochs")
+        for k in swa_state:
+            swa_state[k] /= swa_count
+        model.load_state_dict({k: v.to(next(model.parameters()).dtype) for k, v in swa_state.items()})
 
     return model, loss_history
 
