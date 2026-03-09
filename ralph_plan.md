@@ -1,7 +1,7 @@
 # Ralph Plan — Ordered Task Checklist
 
 **Status**: IN PROGRESS
-**Iteration**: 22
+**Iteration**: 23
 **Last Updated**: 2026-03-09
 
 ---
@@ -151,10 +151,11 @@
   - Why: SWA is proven to improve generalization with zero cost. Averages out noisy SGD trajectory.
   - Result: CBF SNR10 +1.5% (73.0→74.5). Other metrics stable. In-vivo unchanged.
 
-- [ ] **G3**: Mixup augmentation (alpha=0.2)
+- [FAIL] **G3**: Mixup augmentation (alpha=0.2)
   - Change: In training loop, blend pairs of samples: `x = lam*x1 + (1-lam)*x2`, same for targets. `lam ~ Beta(0.2, 0.2)`.
   - Why: Proven regularizer in vision. Creates virtual training samples between real ones.
   - Risk: ASL signal linearity means mixup is physically valid (signals are proportional to CBF)
+  - **FAIL**: CBF wins dropped (73.5→67.2 SNR3, 74.5→72.6 SNR10, 76.5→75.5 SNR25). SNR3 regression -6.3% exceeds 5% threshold. Mixup blending degraded CBF accuracy at low SNR.
 
 - [ ] **G4**: Label smoothing — add small noise to targets
   - Change: Add `targets += 0.01 * torch.randn_like(targets)` before loss computation
@@ -224,3 +225,4 @@
 | 20   | F5   | PASS | 74.3/73.0/76.5 | 85.7/74.1/83.4 | 1.14 | 0.54 | tv_weight 0.05→0.03, CBF SNR3/25 improved, ATT/CoV slightly worse |
 | 21   | G1   | FAIL | 65.6/74.0/73.5 | —/—/— | 1.14 | 0.55 | Dropout 0.1 in decoder, CBF SNR3 -8.7% regression |
 | 22   | G2   | PASS | 73.5/74.5/76.5 | 85.6/73.0/83.5 | 1.14 | 0.54 | SWA last 5 epochs, CBF SNR10 +1.5% |
+| 23   | G3   | FAIL | 67.2/72.6/75.5 | —/—/— | 1.04 | 0.54 | Mixup alpha=0.2, CBF SNR3 -6.3% regression |
