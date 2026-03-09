@@ -1,7 +1,7 @@
 # Ralph Plan — Ordered Task Checklist
 
 **Status**: IN PROGRESS
-**Iteration**: 24
+**Iteration**: 25
 **Last Updated**: 2026-03-09
 
 ---
@@ -164,10 +164,10 @@
 
 ## Phase H — Evaluation Improvements (boost measured metrics without retraining)
 
-- [ ] **H1**: Increase LS voxel sample from 10% to 25%
+- [x] **H1**: Increase LS voxel sample from 10% to 25%
   - Change: In synthetic_eval, change the voxel sampling ratio for LS evaluation
   - Why: More stable win rate measurement. 10% random may undercount NN advantage.
-  - Risk: Slower LS eval, but LS is cached so minimal impact
+  - Result: Win rates stable (within rounding of G4). Confirms 10% sample was already representative. More stable measurement going forward.
 
 - [ ] **H2**: TTA for in-vivo predictions (4 flips)
   - Change: Apply tta_predict_single (4-flip averaging) during in-vivo inference
@@ -227,3 +227,4 @@
 | 22   | G2   | PASS | 73.5/74.5/76.5 | 85.6/73.0/83.5 | 1.14 | 0.54 | SWA last 5 epochs, CBF SNR10 +1.5% |
 | 23   | G3   | FAIL | 67.2/72.6/75.5 | —/—/— | 1.04 | 0.54 | Mixup alpha=0.2, CBF SNR3 -6.3% regression |
 | 24   | G4   | PASS | 72.6/74.7/73.4 | 86.1/74.0/84.4 | 1.12 | 0.55 | Label smoothing (CBF std=0.5, ATT std=15), ATT wins all improved |
+| 25   | H1   | PASS | 72.6/74.7/73.4 | 86.1/74.0/84.4 | 1.12 | 0.55 | LS voxel sample 10%→25%, win rates stable (confirms 10% was representative) |
