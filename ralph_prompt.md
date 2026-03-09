@@ -4,7 +4,7 @@ You are an ML research engineer. Your ONLY job is to pick ONE task and implement
 
 1. Read `ralph_spec.md`, `ralph_plan.md`, and `invivo_results/latest_results.json` to understand current state.
 
-2. Choose the highest-priority task marked `[ ]` in ralph_plan.md. Skip `[x]` and `[FAIL]`.
+2. Choose the highest-priority task marked `[ ]` in ralph_plan.md. Skip `[x]` and `[FAIL]`. If NO unchecked tasks remain, analyze the iteration log for patterns (what helped, what hurt), brainstorm 3-5 new tasks, add them to the plan, then pick the best one.
 
 3. Safety checkpoint: `git add -A && git commit -m "checkpoint before iteration"`
 

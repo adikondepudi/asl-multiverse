@@ -86,8 +86,8 @@ smooth_ratio_match = re.search(r'Spatial Smoothness.*?\|[^|]*\|[^|]*\|\s*([\d.]+
 best_cov_ratio = float(cov_ratio_match.group(1)) if cov_ratio_match else 1.0
 best_smooth_ratio = float(smooth_ratio_match.group(1)) if smooth_ratio_match else 1.0
 
-# Check improvement criteria:
-# Any CBF win increased AND none dropped more than 3%
+# === Improvement checks ===
+# CBF: any SNR improved AND none dropped more than 3%
 cbf_any_improved = any(new > old for new, old in zip(new_cbf, best_cbf))
 cbf_none_dropped = all(new >= old - 3.0 for new, old in zip(new_cbf, best_cbf))
 cbf_improved = cbf_any_improved and cbf_none_dropped
@@ -95,13 +95,26 @@ cbf_improved = cbf_any_improved and cbf_none_dropped
 cov_improved = cov_ratio < best_cov_ratio
 smooth_improved = smooth_ratio < best_smooth_ratio
 
-improved = cbf_improved or cov_improved or smooth_improved
+# === Regression checks — VETO if any metric regresses badly ===
+# CBF win: no SNR can drop more than 5% absolute
+cbf_major_regression = any(new < old - 5.0 for new, old in zip(new_cbf, best_cbf))
+# CoV ratio: can't worsen by more than 0.15
+cov_major_regression = cov_ratio > best_cov_ratio + 0.15
+# Smooth ratio: can't worsen by more than 0.15
+smooth_major_regression = smooth_ratio > best_smooth_ratio + 0.15
+
+any_major_regression = cbf_major_regression or cov_major_regression or smooth_major_regression
+any_improvement = cbf_improved or cov_improved or smooth_improved
+
+# PASS only if something improved AND nothing regressed badly
+improved = any_improvement and not any_major_regression
 
 print(f"CBF wins: {new_cbf[0]:.1f}/{new_cbf[1]:.1f}/{new_cbf[2]:.1f} (best: {best_cbf[0]:.1f}/{best_cbf[1]:.1f}/{best_cbf[2]:.1f})")
 print(f"CoV ratio: {cov_ratio:.2f} (best: {best_cov_ratio:.2f})")
 print(f"Smooth ratio: {smooth_ratio:.2f} (best: {best_smooth_ratio:.2f})")
-print(f"CBF improved: {cbf_improved}, CoV improved: {cov_improved}, Smooth improved: {smooth_improved}")
-print(f"VERDICT: {'PASS' if improved else 'FAIL'}")
+print(f"Improvements — CBF: {cbf_improved}, CoV: {cov_improved}, Smooth: {smooth_improved}")
+print(f"Regressions — CBF>5%: {cbf_major_regression}, CoV>0.15: {cov_major_regression}, Smooth>0.15: {smooth_major_regression}")
+print(f"VERDICT: {'PASS' if improved else 'FAIL'}" + (" (VETOED by regression)" if any_improvement and any_major_regression else ""))
 
 sys.exit(0 if improved else 1)
 PYEOF
