@@ -1,7 +1,7 @@
 # Ralph Plan — Ordered Task Checklist
 
 **Status**: IN PROGRESS
-**Iteration**: 11
+**Iteration**: 12
 **Last Updated**: 2026-03-08
 
 ---
@@ -88,20 +88,16 @@
 
 ## Phase E — New Ideas (based on 11 iterations of learning)
 
-- [ ] **E1**: Training data augmentation (random flips)
-  - Change: Add random horizontal/vertical flips during training in ralph_harness.py
-  - Why: Free 4x effective data increase, standard in image segmentation, zero risk to architecture
-  - Implementation: torch.flip on both signal and target tensors (random per sample)
+- [x] **E1**: Training data augmentation (random flips)
+  - Already implemented in ralph_harness.py lines 262-272. Part of current baseline.
 
-- [ ] **E2**: Stronger post-processing blur (sigma=0.5 → 1.0)
-  - Change: Increase gaussian_filter sigma from 0.5 to 1.0 in synthetic and in-vivo eval
-  - Why: More smoothing → lower per-voxel noise → higher win rate vs noisy LS
-  - Risk: May over-smooth fine details
+- [x] **E2**: Stronger post-processing blur (sigma=0.5 → 1.0)
+  - Already implemented in ralph_harness.py lines 500-501, 604-605. Part of current baseline.
 
-- [ ] **E3**: Moderate alpha_BS1 widening [0.82, 1.0]
+- [FAIL] **E3**: Moderate alpha_BS1 widening [0.82, 1.0]
   - Change: alpha_BS1_range: [0.82, 1.0] (was [0.85, 1.0], A3 tried [0.75, 1.0] which was too wide)
   - Why: Slightly more LS mismatch without degrading NN accuracy as much as A3
-  - Risk: Low — small change from current [0.85, 1.0]
+  - **FAIL**: CBF wins all dropped (72.6→69.6, 77.9→71.6, 79.0→70.8), in-vivo CoV FAIL (49.5% > LS 46.2%), physio FAIL (GM/WM 1.11). Even modest BS1 widening hurts.
 
 - [ ] **E4**: CBF loss weight increase (1.0 → 2.0)
   - Change: cbf_weight: 2.0 in config
@@ -131,3 +127,4 @@
 | 9    | D1   | FAIL | 35.7/64.0/62.4 | 73.2/68.4/79.9 | 0.76 | 0.56 | alpha_BS1 [0.60,1.0] too extreme, CBF wins collapsed |
 | 10   | D2   | FAIL | 66.0/75.5/76.0 | 86.7/78.5/83.7 | 0.81 | 0.61 | 5-level UNet, in-vivo great but synth CBF wins dropped -6.6% SNR3 |
 | 11   | D4   | FAIL | 66.0/76.4/74.4 | 86.6/78.5/86.5 | 0.84 | 0.64 | Dual decoder, in-vivo improved but synth CBF wins dropped -6.6% SNR3, -4.6% SNR25 |
+| 12   | E3   | FAIL | 69.6/71.6/70.8 | 85.2/75.7/83.6 | 1.07 | 0.51 | alpha_BS1 [0.82,1.0], CBF wins all dropped 3-8%, in-vivo CoV/physio FAIL |
