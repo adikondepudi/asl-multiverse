@@ -495,13 +495,11 @@ def synthetic_eval(model, cfg, norm_stats, device, n_phantoms=10, snr_levels=[3,
                 scale = pld_scaling['PCASL'] if ch < n_plds else pld_scaling['VSASL']
                 noisy[ch] += np.random.randn(64, 64).astype(np.float32) * noise_sigma * scale
 
-            # NN prediction (single model, no TTA for speed)
+            # NN prediction with 4-flip TTA
             with torch.no_grad():
                 inp = torch.from_numpy(noisy[np.newaxis]).float().to(device)
                 inp = torch.clamp(inp * global_scale, -30, 30)
-                pc, pa, _, _ = model(inp)
-                nn_cbf = (pc[0, 0].cpu().numpy() * norm_stats['y_std_cbf'] + norm_stats['y_mean_cbf'])
-                nn_att = (pa[0, 0].cpu().numpy() * norm_stats['y_std_att'] + norm_stats['y_mean_att'])
+                nn_cbf, nn_att = tta_predict_single(model, norm_stats, inp)
 
             # Post-processing Gaussian blur for denoising
             nn_cbf = gaussian_filter(nn_cbf, sigma=1.0)
