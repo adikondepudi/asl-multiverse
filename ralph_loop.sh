@@ -15,12 +15,10 @@
 #   cat ralph_plan.md
 
 set -uo pipefail
-# Note: -e removed intentionally — we handle errors per-iteration
 
 MAX_ITERS="${1:-50}"
 LOG_DIR="invivo_results"
 LOG_FILE="${LOG_DIR}/ralph_loop_log.txt"
-TIMEOUT_SECONDS=1800  # 30 minute timeout per iteration
 
 mkdir -p "$LOG_DIR"
 
@@ -35,32 +33,12 @@ for i in $(seq 1 "$MAX_ITERS"); do
     echo "----------------------------------------" | tee -a "$LOG_FILE"
 
     # Run a fresh Claude instance with the ralph prompt
-    # --dangerously-skip-permissions: required for headless -p mode to avoid blocking on prompts
-    # --model opus: lock model explicitly
-    # Background process + kill for timeout (macOS lacks `timeout`)
+    # --dangerously-skip-permissions: required for headless -p mode
     claude -p "$(cat ralph_prompt.md)" \
         --dangerously-skip-permissions \
-        --model opus \
         --allowedTools "Bash,Read,Edit,Write,Glob,Grep" \
-        2>&1 | tee -a "$LOG_FILE" &
-    CLAUDE_PID=$!
-
-    # Watchdog: kill after TIMEOUT_SECONDS
-    (
-        sleep "$TIMEOUT_SECONDS"
-        if kill -0 "$CLAUDE_PID" 2>/dev/null; then
-            echo "*** Iteration $i TIMED OUT after ${TIMEOUT_SECONDS}s ***" | tee -a "$LOG_FILE"
-            kill "$CLAUDE_PID" 2>/dev/null
-        fi
-    ) &
-    WATCHDOG_PID=$!
-
-    # Wait for claude to finish (or be killed by watchdog)
-    wait "$CLAUDE_PID" 2>/dev/null
-    EXIT_CODE=$?
-    # Kill watchdog if claude finished before timeout
-    kill "$WATCHDOG_PID" 2>/dev/null
-    wait "$WATCHDOG_PID" 2>/dev/null
+        2>&1 | tee -a "$LOG_FILE"
+    EXIT_CODE=${PIPESTATUS[0]}
 
     if [ "$EXIT_CODE" -eq 0 ]; then
         echo "--- Iteration $i completed successfully at $(date) ---" | tee -a "$LOG_FILE"

@@ -226,6 +226,8 @@ def train_model(cfg, signals, targets, norm_stats, device, n_epochs, seed):
     scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=n_epochs, eta_min=lr * 0.01)
 
     clean_fraction = 0.15
+    snr_min_base = noise_cfg['noise_config'].get('snr_range', [2.0, 25.0])[0]
+    snr_max_base = noise_cfg['noise_config'].get('snr_range', [2.0, 25.0])[1]
     loss_history = []
 
     for epoch in range(n_epochs):
@@ -233,6 +235,14 @@ def train_model(cfg, signals, targets, norm_stats, device, n_epochs, seed):
         epoch_loss, n_batches = 0.0, 0
         perm_train = np.random.permutation(n_train)
         use_noise = epoch >= int(n_epochs * clean_fraction)
+
+        # SNR curriculum: start with high SNR (easy), gradually include low SNR (hard)
+        if use_noise:
+            noisy_epoch = epoch - int(n_epochs * clean_fraction)
+            noisy_total = n_epochs - int(n_epochs * clean_fraction)
+            progress = min(noisy_epoch / max(noisy_total * 0.6, 1), 1.0)  # reach full range at 60% of noisy phase
+            curr_snr_min = snr_max_base - progress * (snr_max_base - snr_min_base)
+            noise_injector.snr_range = [curr_snr_min, snr_max_base]
 
         for start in range(0, n_train, batch_size):
             end = min(start + batch_size, n_train)

@@ -62,10 +62,10 @@
   - Risk: May lose fine detail
   - **FAIL**: CBF wins all dropped (-4.6/-1.6/-4.0), in-vivo CoV ratio 0.97 (was 0.95), smooth ratio 0.89 (was 0.77). Loss plateaued at 0.317 (vs 0.058) — too-smooth phantoms underfit.
 
-- [ ] **C5**: Post-processing Gaussian blur (sigma=0.5)
+- [x] **C5**: Post-processing Gaussian blur (sigma=0.5)
   - Change: Apply scipy gaussian_filter to NN predictions before metrics
   - Why: Simple denoising → lower CoV and smoothness
-  - Risk: May hurt per-voxel accuracy (synthetic win rate)
+  - Already implemented in ralph_harness.py (lines 478-479, 581-583). Current best includes this.
 
 ## Phase D — Aggressive (if stuck)
 
