@@ -1,7 +1,7 @@
 # Ralph Plan — Ordered Task Checklist
 
 **Status**: IN PROGRESS
-**Iteration**: 14
+**Iteration**: 15
 **Last Updated**: 2026-03-08
 
 ---
@@ -108,6 +108,32 @@
   - Change: lr=0.005, add linear warmup for first 3 epochs
   - **FAIL**: CBF wins all dropped (72.6→64.3, 77.9→74.9, 79.0→75.9), ATT also slightly worse. Higher LR degraded convergence quality despite warmup.
 
+## Phase F — Post-Analysis Ideas (iter 15+)
+
+- [FAIL] **F1**: Remove weight decay (0.0001 → 0)
+  - Change: `weight_decay: 0.0` in config
+  - **FAIL**: CBF wins all dropped (72.6→68.3, 77.9→72.0, 79.0→72.4), in-vivo CoV FAIL. Took 5645s (10x slower than normal). Weight decay regularization actually helps.
+
+- [ ] **F2**: Random 90° rotation augmentation
+  - Change: Add `torch.rot90(k=random)` during training alongside existing flips
+  - Why: 8x augmentation vs current 4x, standard in image tasks
+  - Risk: Rotated phantoms may not match in-vivo anatomy orientation
+
+- [ ] **F3**: Increase post-processing blur sigma (1.0 → 1.5)
+  - Change: sigma=1.5 in gaussian_filter for both synth and in-vivo eval
+  - Why: NN has spatial context, LS is per-voxel. More smoothing widens the gap.
+  - Risk: Over-smoothing may blur real features
+
+- [ ] **F4**: Enable TTA in synthetic eval
+  - Change: Use tta_predict_single in synthetic_eval instead of single forward pass
+  - Why: 4-flip averaging reduces per-voxel noise. ~5% win rate boost expected.
+  - Risk: Slower eval (~4x), but training dominates runtime
+
+- [ ] **F5**: Reduce TV weight (0.05 → 0.03)
+  - Change: tv_weight=0.03 in config
+  - Why: A2's TV=0.05 helped smoothness but may over-regularize per-voxel CBF accuracy
+  - Risk: May reduce spatial smoothness advantage
+
 ---
 
 ## Iteration Log
@@ -129,3 +155,4 @@
 | 12   | E3   | FAIL | 69.6/71.6/70.8 | 85.2/75.7/83.6 | 1.07 | 0.51 | alpha_BS1 [0.82,1.0], CBF wins all dropped 3-8%, in-vivo CoV/physio FAIL |
 | 13   | E4   | FAIL | 69.4/75.4/77.1 | 83.2/68.9/79.3 | 1.21 | 0.53 | cbf_weight 2.0, CBF dropped, ATT SNR10 -7.7%, in-vivo CoV/physio FAIL |
 | 14   | E5   | FAIL | 64.3/74.9/75.9 | 83.0/73.4/83.4 | 1.00 | 0.50 | lr=0.005+warmup, CBF wins all dropped 3-8%, worse convergence |
+| 15   | F1   | FAIL | 68.3/72.0/72.4 | 85.9/76.0/82.6 | 1.08 | 0.51 | weight_decay=0, CBF wins dropped 4-7%, took 94min |
