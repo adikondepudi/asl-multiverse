@@ -1,7 +1,7 @@
 # Ralph Plan — Ordered Task Checklist
 
 **Status**: IN PROGRESS
-**Iteration**: 28
+**Iteration**: 29
 **Last Updated**: 2026-03-09
 
 ---
@@ -187,10 +187,11 @@
   - Risk: Less phantom diversity (1500 vs 3000 unique anatomies)
   - **FAIL**: CBF wins dropped (74.4→70.1, 72.0→75.1, 77.4→70.8). CBF SNR25 regression -6.6% exceeds 5% threshold. Less phantom diversity hurt generalization.
 
-- [ ] **I3**: Increase variance_weight (0.01 → 0.05)
+- [FAIL] **I3**: Increase variance_weight (0.01 → 0.05)
   - Change: `variance_weight: 0.05` in config
   - Why: Stronger anti-collapse penalty forces model to preserve CBF variation. Current 0.01 may be too weak.
   - Risk: May increase MAE slightly
+  - **FAIL**: CBF wins dropped (74.4→68.3, 72.0→75.3, 77.4→77.8). CBF SNR3 regression -6.1% exceeds 5% threshold. Stronger variance penalty hurt CBF accuracy at low SNR.
 
 - [ ] **I4**: Cosine annealing with warm restarts (T_mult=2)
   - Change: Replace CosineAnnealingLR with CosineAnnealingWarmRestarts(T_0=10, T_mult=2)
@@ -232,3 +233,4 @@
 | 26   | H2   | PASS | 72.6/74.7/73.4 | 86.1/74.0/84.4 | 1.12 | 0.55 | TTA (4-flip) for in-vivo predictions, metrics stable |
 | 27   | I1   | PASS | 74.4/72.0/77.4 | 86.2/78.5/85.0 | 1.10 | 0.54 | Skip clean epochs, CBF SNR25 +4.0%, ATT SNR10 +4.5% |
 | 28   | I2   | FAIL | 70.1/75.1/70.8 | —/—/— | 1.09 | 0.54 | 2x noise per phantom, CBF SNR25 -6.6% regression, less phantom diversity hurt |
+| 29   | I3   | FAIL | 68.3/75.3/77.8 | —/—/— | 1.12 | 0.53 | variance_weight 0.01→0.05, CBF SNR3 -6.1% regression |
