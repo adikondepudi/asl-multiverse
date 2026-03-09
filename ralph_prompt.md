@@ -40,11 +40,12 @@ Read `invivo_results/latest_results.json`. Compare to "Current Best" in ralph_sp
 3. Add row to iteration log in ralph_plan.md
 4. Commit: `git add -A && git commit -m "ralph: [task_id] — [brief description of improvement]"`
 
-### Step 7b: If WORSE → revert and mark failed
+### Step 7b: If WORSE or FAILED → revert and exit
 1. Revert changes: `git checkout -- config/ ralph_harness.py models/ simulation/`
 2. Mark task `[FAIL]` in ralph_plan.md with brief reason
 3. Add row to iteration log
 4. Commit plan only: `git add ralph_plan.md && git commit -m "ralph: [task_id] FAIL — [reason]"`
+5. **Exit immediately.** Do NOT retry with a different approach. The bash loop will spawn a fresh session for the next task.
 
 ### Step 8: Check targets
 Read the targets in ralph_spec.md. If ALL targets are met:
@@ -56,7 +57,8 @@ If not all targets met, exit normally (the loop will spawn a new iteration).
 ## Important Rules
 - ONE task per iteration. Do not combine tasks.
 - Always commit before and after changes.
-- If the harness crashes, fix the crash (it counts as part of the task), then re-run.
+- If the harness crashes with a Python exception, fix the crash and re-run ONCE. If it crashes again, mark the task [FAIL] and exit.
+- Run the harness AT MOST twice per iteration (once normally, once if crash fix needed). Never more.
 - If you're unsure about a change, make the minimal version first.
 - Do NOT enable FiLM (use_film_at_bottleneck or use_film_at_decoder). This is a hard constraint.
 - Do NOT modify read-only data directories.

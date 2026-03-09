@@ -77,9 +77,9 @@
   - Change: `hidden_sizes: [32, 64, 128, 256, 512]`
   - Why: More representational power
 
-- [ ] **D3**: SNR curriculum training
-  - Change: Start training with high SNR, gradually decrease
-  - Why: Easier → harder learning schedule
+- [x] **D3**: SNR curriculum training (already implemented in ralph_harness.py lines 239-245)
+  - Change: Start with high SNR, gradually decrease
+  - Already in baseline, no new changes needed
 
 - [ ] **D4**: Separate CBF/ATT decoder heads after bottleneck
   - Why: Decouple CBF spatial patterns from ATT
