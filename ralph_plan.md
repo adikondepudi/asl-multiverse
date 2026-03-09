@@ -1,7 +1,7 @@
 # Ralph Plan — Ordered Task Checklist
 
 **Status**: IN PROGRESS
-**Iteration**: 23
+**Iteration**: 24
 **Last Updated**: 2026-03-09
 
 ---
@@ -157,10 +157,10 @@
   - Risk: ASL signal linearity means mixup is physically valid (signals are proportional to CBF)
   - **FAIL**: CBF wins dropped (73.5→67.2 SNR3, 74.5→72.6 SNR10, 76.5→75.5 SNR25). SNR3 regression -6.3% exceeds 5% threshold. Mixup blending degraded CBF accuracy at low SNR.
 
-- [ ] **G4**: Label smoothing — add small noise to targets
-  - Change: Add `targets += 0.01 * torch.randn_like(targets)` before loss computation
+- [x] **G4**: Label smoothing — add small noise to targets (CBF std=0.5, ATT std=15)
+  - Change: Add small Gaussian noise to targets before loss computation
   - Why: Prevents model from overfitting to exact target values, improves generalization
-  - Risk: May slightly increase training MAE but improve eval
+  - Result: ATT wins all improved (+0.5/+1.0/+0.9%), CBF SNR10 +0.2%. CoV ratio 1.14→1.12. CBF SNR3/25 slightly down.
 
 ## Phase H — Evaluation Improvements (boost measured metrics without retraining)
 
@@ -226,3 +226,4 @@
 | 21   | G1   | FAIL | 65.6/74.0/73.5 | —/—/— | 1.14 | 0.55 | Dropout 0.1 in decoder, CBF SNR3 -8.7% regression |
 | 22   | G2   | PASS | 73.5/74.5/76.5 | 85.6/73.0/83.5 | 1.14 | 0.54 | SWA last 5 epochs, CBF SNR10 +1.5% |
 | 23   | G3   | FAIL | 67.2/72.6/75.5 | —/—/— | 1.04 | 0.54 | Mixup alpha=0.2, CBF SNR3 -6.3% regression |
+| 24   | G4   | PASS | 72.6/74.7/73.4 | 86.1/74.0/84.4 | 1.12 | 0.55 | Label smoothing (CBF std=0.5, ATT std=15), ATT wins all improved |
