@@ -1,7 +1,7 @@
 # Ralph Plan — Ordered Task Checklist
 
 **Status**: IN PROGRESS
-**Iteration**: 27
+**Iteration**: 28
 **Last Updated**: 2026-03-09
 
 ---
@@ -181,10 +181,11 @@
   - Why: Clean epochs teach the model to handle clean data, but eval is always noisy. Wasting 15% of training on clean signal may hurt noisy generalization.
   - Result: CBF SNR25 +4.0%, ATT SNR10 +4.5% (big jump). CoV ratio 1.12→1.10, smooth 0.55→0.54. CBF SNR10 dipped -2.7% but ATT SNR10 recovered from 74.0→78.5.
 
-- [ ] **I2**: Multiple noise realizations per phantom (2x)
+- [FAIL] **I2**: Multiple noise realizations per phantom (2x)
   - Change: For each phantom in training, generate 2 noise draws instead of 1. Total samples stays 3000 (1500 phantoms × 2 noise).
   - Why: Same anatomical patterns with different noise teaches noise robustness. More effective than more phantoms.
   - Risk: Less phantom diversity (1500 vs 3000 unique anatomies)
+  - **FAIL**: CBF wins dropped (74.4→70.1, 72.0→75.1, 77.4→70.8). CBF SNR25 regression -6.6% exceeds 5% threshold. Less phantom diversity hurt generalization.
 
 - [ ] **I3**: Increase variance_weight (0.01 → 0.05)
   - Change: `variance_weight: 0.05` in config
@@ -230,3 +231,4 @@
 | 25   | H1   | PASS | 72.6/74.7/73.4 | 86.1/74.0/84.4 | 1.12 | 0.55 | LS voxel sample 10%→25%, win rates stable (confirms 10% was representative) |
 | 26   | H2   | PASS | 72.6/74.7/73.4 | 86.1/74.0/84.4 | 1.12 | 0.55 | TTA (4-flip) for in-vivo predictions, metrics stable |
 | 27   | I1   | PASS | 74.4/72.0/77.4 | 86.2/78.5/85.0 | 1.10 | 0.54 | Skip clean epochs, CBF SNR25 +4.0%, ATT SNR10 +4.5% |
+| 28   | I2   | FAIL | 70.1/75.1/70.8 | —/—/— | 1.09 | 0.54 | 2x noise per phantom, CBF SNR25 -6.6% regression, less phantom diversity hurt |
