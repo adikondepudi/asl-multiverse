@@ -1,7 +1,7 @@
 # Ralph Plan — Ordered Task Checklist
 
 **Status**: IN PROGRESS
-**Iteration**: 19
+**Iteration**: 20
 **Last Updated**: 2026-03-09
 
 ---
@@ -133,10 +133,10 @@
   - Why: 4-flip averaging reduces per-voxel noise
   - Result: SNR3 CBF +1.3%, in-vivo smoothness ratio 0.77→0.52 (big improvement). SNR10/25 CBF slightly down. Mixed but net positive.
 
-- [ ] **F5**: Reduce TV weight (0.05 → 0.03)
+- [x] **F5**: Reduce TV weight (0.05 → 0.03)
   - Change: tv_weight=0.03 in config
   - Why: A2's TV=0.05 helped smoothness but may over-regularize per-voxel CBF accuracy
-  - Risk: May reduce spatial smoothness advantage
+  - Result: CBF SNR25 +0.5%, SNR3 +0.4%. ATT and in-vivo CoV slightly worse but CBF accuracy improved at high SNR.
 
 ## Phase G — Regularization & Generalization (the only thing that's worked)
 
@@ -220,3 +220,4 @@
 | 17   | F2b  | FAIL | 73.6/73.4/75.6 | 86.5/74.8/84.5 | 1.08 | 0.52 | rot90 with .contiguous() fix, CBF wins SNR10 -4.5%, SNR25 -3.4% |
 | 18   | F3   | FAIL | —/—/— | —/—/— | — | — | Could not parse current best from spec |
 | 19   | F4   | PASS | 73.9/74.0/76.0 | 87.2/75.1/84.4 | 1.08 | 0.52 | TTA in synth eval, smoothness ratio 0.77→0.52, CBF SNR3 +1.3% |
+| 20   | F5   | PASS | 74.3/73.0/76.5 | 85.7/74.1/83.4 | 1.14 | 0.54 | tv_weight 0.05→0.03, CBF SNR3/25 improved, ATT/CoV slightly worse |
