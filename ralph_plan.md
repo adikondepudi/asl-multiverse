@@ -1,7 +1,7 @@
 # Ralph Plan — Ordered Task Checklist
 
 **Status**: IN PROGRESS
-**Iteration**: 16
+**Iteration**: 18
 **Last Updated**: 2026-03-08
 
 ---
@@ -122,10 +122,11 @@
   - Change: Same as F2 but add .contiguous() after rot90 on all tensors
   - **FAIL**: CBF wins dropped (72.6→73.6, 77.9→73.4, 79.0→75.6). SNR10 -4.5%, SNR25 -3.4%. Rotation augmentation hurts CBF accuracy.
 
-- [ ] **F3**: Increase post-processing blur sigma (1.0 → 1.5)
+- [FAIL] **F3**: Increase post-processing blur sigma (1.0 → 1.5)
   - Change: sigma=1.5 in gaussian_filter for both synth and in-vivo eval
   - Why: NN has spatial context, LS is per-voxel. More smoothing widens the gap.
   - Risk: Over-smoothing may blur real features
+  - **FAIL**: Could not parse current best from spec. Harness failed before metrics could be evaluated.
 
 - [ ] **F4**: Enable TTA in synthetic eval
   - Change: Use tta_predict_single in synthetic_eval instead of single forward pass
@@ -161,3 +162,4 @@
 | 15   | F1   | FAIL | 68.3/72.0/72.4 | 85.9/76.0/82.6 | 1.08 | 0.51 | weight_decay=0, CBF wins dropped 4-7%, took 94min |
 | 16   | F2   | FAIL | —/—/— | —/—/— | — | — | Crashed: torch.rot90 non-contiguous tensor vs .view() |
 | 17   | F2b  | FAIL | 73.6/73.4/75.6 | 86.5/74.8/84.5 | 1.08 | 0.52 | rot90 with .contiguous() fix, CBF wins SNR10 -4.5%, SNR25 -3.4% |
+| 18   | F3   | FAIL | —/—/— | —/—/— | — | — | Could not parse current best from spec |
