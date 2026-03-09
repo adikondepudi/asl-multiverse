@@ -1,7 +1,7 @@
 # Ralph Plan — Ordered Task Checklist
 
 **Status**: IN PROGRESS
-**Iteration**: 10
+**Iteration**: 11
 **Last Updated**: 2026-03-08
 
 ---
@@ -82,8 +82,9 @@
   - Change: Start with high SNR, gradually decrease
   - Already in baseline, no new changes needed
 
-- [ ] **D4**: Separate CBF/ATT decoder heads after bottleneck
+- [FAIL] **D4**: Separate CBF/ATT decoder heads after bottleneck
   - Why: Decouple CBF spatial patterns from ATT
+  - **FAIL**: CBF win SNR3 dropped 72.6→66.0% (-6.6%), SNR25 79.0→74.4% (-4.6%). In-vivo improved (CoV 0.95→0.84, smooth 0.77→0.64, physio PASS) but synthetic CBF wins dropped >3%. Similar pattern to D2 — more params helps in-vivo but hurts synthetic.
 
 ---
 
@@ -102,3 +103,4 @@
 | 8    | C4   | FAIL | 68.0/76.3/75.0 | 88.0/79.3/86.0 | 0.97 | 0.89 | pve_sigma 3→5, too-smooth phantoms, CBF wins all dropped |
 | 9    | D1   | FAIL | 35.7/64.0/62.4 | 73.2/68.4/79.9 | 0.76 | 0.56 | alpha_BS1 [0.60,1.0] too extreme, CBF wins collapsed |
 | 10   | D2   | FAIL | 66.0/75.5/76.0 | 86.7/78.5/83.7 | 0.81 | 0.61 | 5-level UNet, in-vivo great but synth CBF wins dropped -6.6% SNR3 |
+| 11   | D4   | FAIL | 66.0/76.4/74.4 | 86.6/78.5/86.5 | 0.84 | 0.64 | Dual decoder, in-vivo improved but synth CBF wins dropped -6.6% SNR3, -4.6% SNR25 |
