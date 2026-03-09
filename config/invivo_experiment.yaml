@@ -23,7 +23,7 @@ training:
   # Loss configuration
   loss_type: l1
   dc_weight: 0.0
-  variance_weight: 0.01
+  variance_weight: 0.05
   att_scale: 1.0
   cbf_weight: 1.0
   att_weight: 1.0
