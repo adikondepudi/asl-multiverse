@@ -1,7 +1,7 @@
 # Ralph Plan — Ordered Task Checklist
 
 **Status**: IN PROGRESS
-**Iteration**: 21
+**Iteration**: 22
 **Last Updated**: 2026-03-09
 
 ---
@@ -146,10 +146,10 @@
   - Risk: May slightly hurt training convergence
   - **FAIL**: CBF wins dropped (74.3→65.6 SNR3, 73.0→74.0 SNR10, 76.5→73.5 SNR25). SNR3 regression -8.7% exceeds 5% threshold. Dropout hurt CBF accuracy at low SNR.
 
-- [ ] **G2**: Stochastic Weight Averaging (SWA) over last 5 epochs
+- [x] **G2**: Stochastic Weight Averaging (SWA) over last 5 epochs
   - Change: In ralph_harness.py train_model, after epoch 25 start accumulating model weights. At end, use averaged weights for eval.
   - Why: SWA is proven to improve generalization with zero cost. Averages out noisy SGD trajectory.
-  - Risk: Minimal. Worst case: no change.
+  - Result: CBF SNR10 +1.5% (73.0→74.5). Other metrics stable. In-vivo unchanged.
 
 - [ ] **G3**: Mixup augmentation (alpha=0.2)
   - Change: In training loop, blend pairs of samples: `x = lam*x1 + (1-lam)*x2`, same for targets. `lam ~ Beta(0.2, 0.2)`.
@@ -223,3 +223,4 @@
 | 19   | F4   | PASS | 73.9/74.0/76.0 | 87.2/75.1/84.4 | 1.08 | 0.52 | TTA in synth eval, smoothness ratio 0.77→0.52, CBF SNR3 +1.3% |
 | 20   | F5   | PASS | 74.3/73.0/76.5 | 85.7/74.1/83.4 | 1.14 | 0.54 | tv_weight 0.05→0.03, CBF SNR3/25 improved, ATT/CoV slightly worse |
 | 21   | G1   | FAIL | 65.6/74.0/73.5 | —/—/— | 1.14 | 0.55 | Dropout 0.1 in decoder, CBF SNR3 -8.7% regression |
+| 22   | G2   | PASS | 73.5/74.5/76.5 | 85.6/73.0/83.5 | 1.14 | 0.54 | SWA last 5 epochs, CBF SNR10 +1.5% |
