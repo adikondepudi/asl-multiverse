@@ -1,7 +1,7 @@
 # Ralph Plan — Ordered Task Checklist
 
 **Status**: IN PROGRESS
-**Iteration**: 12
+**Iteration**: 13
 **Last Updated**: 2026-03-08
 
 ---
@@ -99,10 +99,10 @@
   - Why: Slightly more LS mismatch without degrading NN accuracy as much as A3
   - **FAIL**: CBF wins all dropped (72.6→69.6, 77.9→71.6, 79.0→70.8), in-vivo CoV FAIL (49.5% > LS 46.2%), physio FAIL (GM/WM 1.11). Even modest BS1 widening hurts.
 
-- [ ] **E4**: CBF loss weight increase (1.0 → 2.0)
+- [FAIL] **E4**: CBF loss weight increase (1.0 → 2.0)
   - Change: cbf_weight: 2.0 in config
   - Why: CBF win rate is the bottleneck metric; more CBF emphasis during training
-  - Risk: May hurt ATT accuracy
+  - **FAIL**: CBF wins all dropped (72.6→69.4, 77.9→75.4, 79.0→77.1), ATT win SNR10 collapsed 76.6→68.9% (-7.7%). In-vivo CoV 55.7% (FAIL), physio FAIL (GM/WM 1.13). CBF emphasis hurt ATT without helping CBF.
 
 - [ ] **E5**: Higher learning rate (0.003 → 0.005) with warmup
   - Change: lr=0.005, add linear warmup for first 3 epochs
@@ -128,3 +128,4 @@
 | 10   | D2   | FAIL | 66.0/75.5/76.0 | 86.7/78.5/83.7 | 0.81 | 0.61 | 5-level UNet, in-vivo great but synth CBF wins dropped -6.6% SNR3 |
 | 11   | D4   | FAIL | 66.0/76.4/74.4 | 86.6/78.5/86.5 | 0.84 | 0.64 | Dual decoder, in-vivo improved but synth CBF wins dropped -6.6% SNR3, -4.6% SNR25 |
 | 12   | E3   | FAIL | 69.6/71.6/70.8 | 85.2/75.7/83.6 | 1.07 | 0.51 | alpha_BS1 [0.82,1.0], CBF wins all dropped 3-8%, in-vivo CoV/physio FAIL |
+| 13   | E4   | FAIL | 69.4/75.4/77.1 | 83.2/68.9/79.3 | 1.21 | 0.53 | cbf_weight 2.0, CBF dropped, ATT SNR10 -7.7%, in-vivo CoV/physio FAIL |
