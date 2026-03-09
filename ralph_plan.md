@@ -1,7 +1,7 @@
 # Ralph Plan — Ordered Task Checklist
 
 **Status**: IN PROGRESS
-**Iteration**: 8
+**Iteration**: 10
 **Last Updated**: 2026-03-08
 
 ---
@@ -69,8 +69,9 @@
 
 ## Phase D — Aggressive (if stuck)
 
-- [ ] **D1**: Extreme domain randomization (alpha_BS1 [0.60, 1.0])
+- [FAIL] **D1**: Extreme domain randomization (alpha_BS1 [0.60, 1.0])
   - Why: Maximizes physics mismatch LS sees but NN handles
+  - **FAIL**: CBF wins collapsed (72.6→35.7 SNR3, 77.9→64.0 SNR10, 79.0→62.4 SNR25), ATT wins dropped (85.0→73.2, 76.6→68.4, 85.0→79.9). Too-wide alpha_BS1 range degraded NN accuracy severely.
 
 - [ ] **D2**: Deeper U-Net (5 encoder levels)
   - Change: `hidden_sizes: [32, 64, 128, 256, 512]`
@@ -98,3 +99,4 @@
 | 6    | C1   | FAIL | 66.5/74.4/75.4 | 86.9/80.7/86.0 | 0.95 | 1.00 | Wider model [48,96,192,384] overfits, smooth ratio collapsed |
 | 7    | C2   | FAIL | 65.8/73.1/74.1 | 85.7/62.8/79.2 | 0.91 | 0.71 | Huber loss degraded all win rates, ATT SNR10 -13.8% |
 | 8    | C4   | FAIL | 68.0/76.3/75.0 | 88.0/79.3/86.0 | 0.97 | 0.89 | pve_sigma 3→5, too-smooth phantoms, CBF wins all dropped |
+| 9    | D1   | FAIL | 35.7/64.0/62.4 | 73.2/68.4/79.9 | 0.76 | 0.56 | alpha_BS1 [0.60,1.0] too extreme, CBF wins collapsed |
