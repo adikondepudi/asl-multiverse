@@ -73,9 +73,10 @@
   - Why: Maximizes physics mismatch LS sees but NN handles
   - **FAIL**: CBF wins collapsed (72.6→35.7 SNR3, 77.9→64.0 SNR10, 79.0→62.4 SNR25), ATT wins dropped (85.0→73.2, 76.6→68.4, 85.0→79.9). Too-wide alpha_BS1 range degraded NN accuracy severely.
 
-- [ ] **D2**: Deeper U-Net (5 encoder levels)
+- [FAIL] **D2**: Deeper U-Net (5 encoder levels)
   - Change: `hidden_sizes: [32, 64, 128, 256, 512]`
   - Why: More representational power
+  - **FAIL**: CBF win SNR3 dropped 72.6→66.0% (-6.6%), SNR10 -2.4%, SNR25 -3.0%. In-vivo dramatically improved (CoV 0.95→0.81, smooth 0.77→0.61, physio PASS) but synthetic CBF wins dropped >3%. Training took 1426s (24min) vs usual ~5min due to 4x more params.
 
 - [x] **D3**: SNR curriculum training (already implemented in ralph_harness.py lines 239-245)
   - Change: Start with high SNR, gradually decrease
@@ -100,3 +101,4 @@
 | 7    | C2   | FAIL | 65.8/73.1/74.1 | 85.7/62.8/79.2 | 0.91 | 0.71 | Huber loss degraded all win rates, ATT SNR10 -13.8% |
 | 8    | C4   | FAIL | 68.0/76.3/75.0 | 88.0/79.3/86.0 | 0.97 | 0.89 | pve_sigma 3→5, too-smooth phantoms, CBF wins all dropped |
 | 9    | D1   | FAIL | 35.7/64.0/62.4 | 73.2/68.4/79.9 | 0.76 | 0.56 | alpha_BS1 [0.60,1.0] too extreme, CBF wins collapsed |
+| 10   | D2   | FAIL | 66.0/75.5/76.0 | 86.7/78.5/83.7 | 0.81 | 0.61 | 5-level UNet, in-vivo great but synth CBF wins dropped -6.6% SNR3 |
