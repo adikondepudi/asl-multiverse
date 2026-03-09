@@ -127,7 +127,12 @@ def make_brain_mask_2d(size=64):
 
 
 def generate_training_data(cfg, n_samples, seed):
-    """Generate spatial phantom training data with realistic brain masks."""
+    """Generate spatial phantom training data with realistic brain masks.
+
+    Uses 2 noise realizations per phantom: n_samples/2 unique phantoms, each
+    duplicated once. Same anatomy with different noise at training time teaches
+    noise robustness more effectively than more unique phantoms.
+    """
     np.random.seed(seed)
     plds = np.array(cfg.get('pld_values', [500, 1000, 1500, 2000, 2500]), dtype=np.float32)
     asl_dict = {k: v for k, v in cfg.items() if k in ASLParameters.__annotations__}
@@ -138,20 +143,27 @@ def generate_training_data(cfg, n_samples, seed):
     phantom_gen = SpatialPhantomGenerator(size=64, pve_sigma=3.0)
     plds_bc = plds[:, np.newaxis, np.newaxis]
 
+    noise_repeats = 2
+    n_unique = n_samples // noise_repeats
+
     signals_list, targets_list = [], []
-    for _ in range(n_samples):
+    for _ in range(n_unique):
         cbf_map, att_map, _ = phantom_gen.generate_phantom(include_pathology=False)
-        t1_b, alpha_p, alpha_v, tau = sample_physics(cfg, base_params, use_dr)
-        sig = generate_asl_signal(cbf_map, att_map, plds_bc, t1_b, alpha_p, alpha_v, tau, base_params.T2_factor)
 
         # Apply random brain-shaped mask (~55% coverage, matching in-vivo)
         brain_mask = make_brain_mask_2d(64)
-        sig[:, ~brain_mask] = 0.0
         cbf_map[~brain_mask] = 0.0
         att_map[~brain_mask] = 0.0
+        target = np.stack([cbf_map, att_map], axis=0).astype(np.float32)
 
-        signals_list.append(sig)
-        targets_list.append(np.stack([cbf_map, att_map], axis=0).astype(np.float32))
+        # Generate multiple copies with different domain-randomized physics
+        for _ in range(noise_repeats):
+            t1_b, alpha_p, alpha_v, tau = sample_physics(cfg, base_params, use_dr)
+            sig = generate_asl_signal(cbf_map, att_map, plds_bc, t1_b, alpha_p, alpha_v, tau, base_params.T2_factor)
+            sig[:, ~brain_mask] = 0.0
+
+            signals_list.append(sig)
+            targets_list.append(target)
 
     signals = np.array(signals_list, dtype=np.float32) * 100.0  # M0 scaling
     targets = np.array(targets_list, dtype=np.float32)
