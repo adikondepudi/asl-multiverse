@@ -49,14 +49,17 @@ with open(results_file) as f:
 with open(spec_file) as f:
     spec = f.read()
 
-# Parse current best CBF wins from spec
-# Look for pattern like "CBF Win Rate: 72.6 / 77.9 / 79.0"
-cbf_match = re.search(r'CBF Win Rate:\s*([\d.]+)\s*/\s*([\d.]+)\s*/\s*([\d.]+)', spec)
-if not cbf_match:
-    print("FAIL: Could not parse current best from spec")
+# Parse current best CBF wins from spec table
+# Format: | 3   | 72.6      | 85.0      | ...
+cbf_wins = {}
+for m in re.finditer(r'\|\s*(3|10|25)\s*\|\s*([\d.]+)\s*\|\s*([\d.]+)\s*\|', spec):
+    snr = m.group(1)
+    cbf_wins[snr] = float(m.group(2))
+if len(cbf_wins) < 3:
+    print(f"FAIL: Could not parse current best from spec (found {len(cbf_wins)} SNR rows)")
     sys.exit(1)
 
-best_cbf = [float(cbf_match.group(i)) for i in range(1, 4)]
+best_cbf = [cbf_wins['3'], cbf_wins['10'], cbf_wins['25']]
 
 # Get new results
 new_cbf = [
@@ -73,11 +76,15 @@ ls_smooth = results['checks'].get('ls_smooth_avg', 1)
 cov_ratio = new_cov / ls_cov if ls_cov > 0 else 999
 smooth_ratio = new_smooth / ls_smooth if ls_smooth > 0 else 999
 
-# Parse current best ratios from spec
-cov_match = re.search(r'CoV Ratio:\s*([\d.]+)', spec)
-smooth_match = re.search(r'Smooth Ratio:\s*([\d.]+)', spec)
-best_cov_ratio = float(cov_match.group(1)) if cov_match else 1.0
-best_smooth_ratio = float(smooth_match.group(1)) if smooth_match else 1.0
+# Parse current best ratios from spec table
+# Format: | GM CBF CoV (%)      | 43.8   | 46.2   | 0.95          |
+cov_match = re.search(r'GM CBF CoV.*?\|\s*([\d.]+)\s*\|', spec)
+smooth_match = re.search(r'Spatial Smoothness.*?\|\s*([\d.]+)\s*\|', spec)
+# The last column is the ratio
+cov_ratio_match = re.search(r'GM CBF CoV.*?\|[^|]*\|[^|]*\|\s*([\d.]+)', spec)
+smooth_ratio_match = re.search(r'Spatial Smoothness.*?\|[^|]*\|[^|]*\|\s*([\d.]+)', spec)
+best_cov_ratio = float(cov_ratio_match.group(1)) if cov_ratio_match else 1.0
+best_smooth_ratio = float(smooth_ratio_match.group(1)) if smooth_ratio_match else 1.0
 
 # Check improvement criteria:
 # Any CBF win increased AND none dropped more than 3%

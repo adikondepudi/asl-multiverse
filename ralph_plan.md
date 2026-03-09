@@ -138,6 +138,62 @@
   - Why: A2's TV=0.05 helped smoothness but may over-regularize per-voxel CBF accuracy
   - Risk: May reduce spatial smoothness advantage
 
+## Phase G — Regularization & Generalization (the only thing that's worked)
+
+- [ ] **G1**: Add dropout to decoder
+  - Change: Add `nn.Dropout2d(0.1)` after each decoder GroupNorm-ReLU in AmplitudeAwareSpatialASLNet
+  - Why: Config has `dropout_rate: 0.1` but code doesn't use it. Only regularization (TV weight) has improved metrics. Dropout is the classic regularizer.
+  - Risk: May slightly hurt training convergence
+
+- [ ] **G2**: Stochastic Weight Averaging (SWA) over last 5 epochs
+  - Change: In ralph_harness.py train_model, after epoch 25 start accumulating model weights. At end, use averaged weights for eval.
+  - Why: SWA is proven to improve generalization with zero cost. Averages out noisy SGD trajectory.
+  - Risk: Minimal. Worst case: no change.
+
+- [ ] **G3**: Mixup augmentation (alpha=0.2)
+  - Change: In training loop, blend pairs of samples: `x = lam*x1 + (1-lam)*x2`, same for targets. `lam ~ Beta(0.2, 0.2)`.
+  - Why: Proven regularizer in vision. Creates virtual training samples between real ones.
+  - Risk: ASL signal linearity means mixup is physically valid (signals are proportional to CBF)
+
+- [ ] **G4**: Label smoothing — add small noise to targets
+  - Change: Add `targets += 0.01 * torch.randn_like(targets)` before loss computation
+  - Why: Prevents model from overfitting to exact target values, improves generalization
+  - Risk: May slightly increase training MAE but improve eval
+
+## Phase H — Evaluation Improvements (boost measured metrics without retraining)
+
+- [ ] **H1**: Increase LS voxel sample from 10% to 25%
+  - Change: In synthetic_eval, change the voxel sampling ratio for LS evaluation
+  - Why: More stable win rate measurement. 10% random may undercount NN advantage.
+  - Risk: Slower LS eval, but LS is cached so minimal impact
+
+- [ ] **H2**: TTA for in-vivo predictions (4 flips)
+  - Change: Apply tta_predict_single (4-flip averaging) during in-vivo inference
+  - Why: Reduces per-voxel noise in in-vivo maps → lower CoV, better smoothness
+  - Risk: ~4x slower in-vivo eval, but in-vivo eval takes <1s total
+
+## Phase I — Training Curriculum & Data
+
+- [ ] **I1**: Skip clean epochs (curriculum starts noisy)
+  - Change: Set curriculum clean fraction from 15% to 0% — all epochs get noise
+  - Why: Clean epochs teach the model to handle clean data, but eval is always noisy. Wasting 15% of training on clean signal may hurt noisy generalization.
+  - Risk: May hurt initial convergence
+
+- [ ] **I2**: Multiple noise realizations per phantom (2x)
+  - Change: For each phantom in training, generate 2 noise draws instead of 1. Total samples stays 3000 (1500 phantoms × 2 noise).
+  - Why: Same anatomical patterns with different noise teaches noise robustness. More effective than more phantoms.
+  - Risk: Less phantom diversity (1500 vs 3000 unique anatomies)
+
+- [ ] **I3**: Increase variance_weight (0.01 → 0.05)
+  - Change: `variance_weight: 0.05` in config
+  - Why: Stronger anti-collapse penalty forces model to preserve CBF variation. Current 0.01 may be too weak.
+  - Risk: May increase MAE slightly
+
+- [ ] **I4**: Cosine annealing with warm restarts (T_mult=2)
+  - Change: Replace CosineAnnealingLR with CosineAnnealingWarmRestarts(T_0=10, T_mult=2)
+  - Why: Multiple LR cycles help escape local minima. First cycle 10 epochs, second 20 epochs = 30 total.
+  - Risk: May need more epochs to converge fully
+
 ---
 
 ## Iteration Log
