@@ -259,6 +259,18 @@ def train_model(cfg, signals, targets, norm_stats, device, n_epochs, seed):
             noisy_sig = noise_injector.apply_noise(raw_sig, ref_signal, pld_scaling) if use_noise else raw_sig
             normalized = torch.clamp(noisy_sig * global_scale, -30.0, 30.0)
 
+            # Random flip augmentation (applied consistently to input, targets, mask)
+            if torch.rand(1).item() > 0.5:
+                normalized = torch.flip(normalized, [2])  # vertical flip
+                cbf_t = torch.flip(cbf_t, [2])
+                att_t = torch.flip(att_t, [2])
+                mask_t = torch.flip(mask_t, [2])
+            if torch.rand(1).item() > 0.5:
+                normalized = torch.flip(normalized, [3])  # horizontal flip
+                cbf_t = torch.flip(cbf_t, [3])
+                att_t = torch.flip(att_t, [3])
+                mask_t = torch.flip(mask_t, [3])
+
             optimizer.zero_grad()
             pred_cbf, pred_att, lv_cbf, lv_att = model(normalized)
             loss_dict = loss_fn(pred_cbf.float(), pred_att.float(), cbf_t, att_t, mask_t, normalized,
