@@ -265,6 +265,17 @@ def train_model(cfg, signals, targets, norm_stats, device, n_epochs, seed):
             noisy_sig = noise_injector.apply_noise(raw_sig, ref_signal, pld_scaling) if use_noise else raw_sig
             normalized = torch.clamp(noisy_sig * global_scale, -30.0, 30.0)
 
+            # Mixup augmentation: blend pairs of samples within the batch
+            mixup_alpha = 0.2
+            if normalized.size(0) > 1:
+                lam = np.random.beta(mixup_alpha, mixup_alpha)
+                lam = max(lam, 1.0 - lam)  # ensure lam >= 0.5 so first sample dominates
+                perm_mix = torch.randperm(normalized.size(0), device=normalized.device)
+                normalized = lam * normalized + (1.0 - lam) * normalized[perm_mix]
+                cbf_t = lam * cbf_t + (1.0 - lam) * cbf_t[perm_mix]
+                att_t = lam * att_t + (1.0 - lam) * att_t[perm_mix]
+                mask_t = lam * mask_t + (1.0 - lam) * mask_t[perm_mix]
+
             # Random flip augmentation (applied consistently to input, targets, mask)
             if torch.rand(1).item() > 0.5:
                 normalized = torch.flip(normalized, [2])  # vertical flip
