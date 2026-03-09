@@ -422,7 +422,7 @@ def _compute_ls_cache(cfg, n_phantoms=10, snr_levels=[3, 10, 25], seed=9999):
                 noisy[ch] += np.random.randn(64, 64).astype(np.float32) * noise_sigma * scale
 
             brain_idx = np.where(brain_mask)
-            n_sub = max(10, int(len(brain_idx[0]) * 0.1))
+            n_sub = max(10, int(len(brain_idx[0]) * 0.25))
             sub = np.random.choice(len(brain_idx[0]), size=n_sub, replace=False)
             pldti = np.column_stack([plds.astype(np.float64), plds.astype(np.float64)])
 
