@@ -1,7 +1,7 @@
 # Ralph Plan — Ordered Task Checklist
 
 **Status**: IN PROGRESS
-**Iteration**: 44
+**Iteration**: 45
 **Last Updated**: 2026-03-10
 
 ---
@@ -294,9 +294,10 @@
   - Risk: May reduce CBF accuracy
   - Result: CBF SNR10 +2.1% (72.1→74.2), ATT SNR10 +1.5% (53.3→54.8). CoV ratio 1.06→1.05, smooth 0.54→0.52. CBF SNR3/25 slightly down (-1.4/-1.6%, within threshold).
 
-- [ ] **M3**: Reduce label smoothing for ATT (15ms → 5ms)
+- [x] **M3**: Reduce label smoothing for ATT (15ms → 5ms)
   - Change: Reduce ATT noise in label smoothing from 15ms to 5ms
   - Why: G4 added target noise (CBF std=0.5, ATT std=15ms). For ATT values of 800-2500ms, 15ms noise may blur the signal LS uses to beat NN per-voxel.
+  - Result: ATT SNR10 +3.5% (54.8→58.3), ATT SNR3 +0.8% (79.3→80.1). CBF SNR25 +1.2% (77.3→78.5). CBF SNR3/10 slightly down (-2.0/-0.3%, within threshold). CoV ratio 1.05→1.08 (slightly worse).
 
 - [ ] **M4**: Increase post-processing blur for CBF (1.0 → 1.5)
   - Change: CBF blur sigma from 1.0 to 1.5 in both synth and invivo eval
@@ -357,3 +358,4 @@
 | 42   | L2   | FAIL | 68.8/71.3/76.5 | —/—/— | 1.05 | 0.54 | ATT blur sigma 1.0→2.0 (CBF kept 1.0), no metric improved over best |
 | 43   | M1   | PASS | 67.3/72.1/78.9 | 80.9/53.3/75.2 | 1.06 | 0.54 | Asymmetric DR (T1_artery narrow, alpha widens), CBF SNR25 +2.4% |
 | 44   | M2   | PASS | 65.9/74.2/77.3 | 79.3/54.8/74.7 | 1.05 | 0.52 | ATT loss weight 1.0→1.5, CBF SNR10 +2.1%, smooth 0.54→0.52 |
+| 45   | M3   | PASS | 63.9/73.9/78.5 | 80.1/58.3/74.8 | 1.08 | 0.53 | ATT label smoothing 15ms→5ms, ATT SNR10 +3.5%, CBF SNR25 +1.2% |
