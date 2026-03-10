@@ -1,7 +1,7 @@
 # Ralph Plan — Ordered Task Checklist
 
 **Status**: IN PROGRESS
-**Iteration**: 38
+**Iteration**: 39
 **Last Updated**: 2026-03-09
 
 ---
@@ -234,9 +234,10 @@
   - Why: J4's grad accumulation is still in the code (CBF SNR3 -10.2% regression). More frequent regen gives 6x phantom diversity (18k unique anatomies vs 9k), leveraging the one pattern that consistently helped (J1: +1.9% from regen).
   - Result: CoV ratio improved 1.13→1.10. CBF wins stable (75.6/71.2/74.9 vs 76.3/71.1/76.9). ATT SNR10 +0.4%. Reverted J4 damage, more regen diversity.
 
-- [ ] **K2**: Two-stage domain randomization curriculum
+- [x] **K2**: Two-stage domain randomization curriculum
   - Change: First 50% of epochs: narrow DR (alpha_BS1 [0.92, 1.0], T1_artery [1550, 1850]). Last 50%: full DR range.
   - Why: Model learns fundamentals first with near-consensus physics, then learns robustness with full randomization.
+  - Result: CBF SNR10 +5.9% (69.5→75.4). CoV ratio improved 1.15→1.07. ATT SNR10 dipped -10.8% but CBF SNR10 big gain. Smooth ratio stable 0.54.
 
 - [x] **K3**: Remove rotation augmentation
   - Change: Remove torch.rot90 augmentation from training loop
@@ -295,3 +296,4 @@
 | 35   | J5   | FAIL | 66.1/77.2/76.9 | —/—/— | 1.08 | 0.48 | lr 0.003→0.002, CBF SNR3 -10.2% regression, CoV/smooth improved but vetoed |
 | 36   | K1   | PASS | 75.6/71.2/74.9 | 86.6/77.3/84.4 | 1.10 | 0.56 | Revert J4 grad accum + regen every 5 epochs, CoV improved 1.13→1.10 |
 | 37   | K3   | PASS | 72.1/69.5/75.7 | 86.8/74.1/84.3 | 1.15 | 0.54 | Remove rotation augmentation, CBF SNR25 +0.8%, smooth 0.56→0.54 |
+| 38   | K2   | PASS | 70.0/75.4/74.3 | 87.0/63.3/79.4 | 1.07 | 0.54 | Two-stage DR curriculum, CBF SNR10 +5.9%, CoV 1.15→1.07, ATT SNR10 dipped |
