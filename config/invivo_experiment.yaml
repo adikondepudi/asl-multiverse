@@ -26,7 +26,7 @@ training:
   variance_weight: 0.01
   att_scale: 1.0
   cbf_weight: 1.0
-  att_weight: 1.0
+  att_weight: 1.5
 
   # Training parameters
   learning_rate: 0.003
