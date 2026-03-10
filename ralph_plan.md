@@ -1,7 +1,7 @@
 # Ralph Plan — Ordered Task Checklist
 
 **Status**: IN PROGRESS
-**Iteration**: 43
+**Iteration**: 44
 **Last Updated**: 2026-03-10
 
 ---
@@ -288,10 +288,11 @@
   - Why: K2/L1 DR curriculum boosted CBF SNR10 (+5.9%) but crashed ATT SNR10 from 78.5%→63.0%. T1_artery directly affects ATT in the kinetic model — widening it degrades ATT accuracy. Alpha parameters mainly affect CBF through labeling efficiency. Asymmetric DR should preserve ATT accuracy while keeping CBF gains.
   - Result: CBF SNR10 +0.8% (71.3→72.1), CBF SNR25 +2.4% (76.5→78.9). ATT SNR10 dipped further (63.0→53.3). CoV ratio 1.05→1.06 (stable). CBF gains at high SNR.
 
-- [ ] **M2**: Increase ATT loss weight (att_weight=1.5)
+- [x] **M2**: Increase ATT loss weight (att_weight=1.5)
   - Change: att_weight: 1.5 in config
   - Why: ATT SNR10 at 63% is the weakest synthetic metric. More ATT emphasis during training could improve ATT accuracy. E4 tried cbf_weight=2.0 which hurt both — increasing ATT weight is the opposite approach.
   - Risk: May reduce CBF accuracy
+  - Result: CBF SNR10 +2.1% (72.1→74.2), ATT SNR10 +1.5% (53.3→54.8). CoV ratio 1.06→1.05, smooth 0.54→0.52. CBF SNR3/25 slightly down (-1.4/-1.6%, within threshold).
 
 - [ ] **M3**: Reduce label smoothing for ATT (15ms → 5ms)
   - Change: Reduce ATT noise in label smoothing from 15ms to 5ms
@@ -355,3 +356,4 @@
 | 41   | L1   | PASS | 68.8/71.3/76.5 | 85.9/63.0/79.1 | 1.05 | 0.54 | Gradual DR curriculum + revert K5, CBF SNR25 +2.2%, CoV 1.07→1.05 |
 | 42   | L2   | FAIL | 68.8/71.3/76.5 | —/—/— | 1.05 | 0.54 | ATT blur sigma 1.0→2.0 (CBF kept 1.0), no metric improved over best |
 | 43   | M1   | PASS | 67.3/72.1/78.9 | 80.9/53.3/75.2 | 1.06 | 0.54 | Asymmetric DR (T1_artery narrow, alpha widens), CBF SNR25 +2.4% |
+| 44   | M2   | PASS | 65.9/74.2/77.3 | 79.3/54.8/74.7 | 1.05 | 0.52 | ATT loss weight 1.0→1.5, CBF SNR10 +2.1%, smooth 0.54→0.52 |
