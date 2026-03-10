@@ -213,7 +213,7 @@ def train_model(cfg, signals, targets, norm_stats, device, n_epochs, seed):
 
     global_scale = cfg.get('global_scale_factor', 10.0)
     batch_size = cfg.get('batch_size', 64)
-    lr = cfg.get('learning_rate', 0.003)
+    lr = cfg.get('learning_rate', 0.002)
     n_samples = len(signals)
 
     # Initial train/val split
