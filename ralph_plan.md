@@ -1,7 +1,7 @@
 # Ralph Plan — Ordered Task Checklist
 
 **Status**: IN PROGRESS
-**Iteration**: 39
+**Iteration**: 40
 **Last Updated**: 2026-03-09
 
 ---
@@ -244,9 +244,10 @@
   - Why: F2b showed rotation hurt CBF accuracy (SNR10 -4.5%, SNR25 -3.4%). Still in code since iter 17.
   - Result: CBF SNR25 +0.8%, smooth ratio 0.56→0.54. CBF SNR3/10 slightly down (-3.5/-1.7%, within threshold). Removes known-bad augmentation.
 
-- [ ] **K4**: Increase eval phantoms (10→20)
+- [FAIL] **K4**: Increase eval phantoms (10→20)
   - Change: n_phantoms=20 in synthetic_eval
   - Why: More stable win rate measurements (reduce eval noise)
+  - **FAIL**: CBF wins dropped (74.5/60.6/71.0 vs best 70.0/75.4/74.3). CBF SNR10 regression -14.8% exceeds 5% threshold. More eval phantoms revealed lower true win rates.
 
 - [ ] **K5**: Longer training (40 epochs) with regen every 10 (4 regens = 12k unique)
   - Change: n_epochs=40, regen_interval=10
@@ -297,3 +298,4 @@
 | 36   | K1   | PASS | 75.6/71.2/74.9 | 86.6/77.3/84.4 | 1.10 | 0.56 | Revert J4 grad accum + regen every 5 epochs, CoV improved 1.13→1.10 |
 | 37   | K3   | PASS | 72.1/69.5/75.7 | 86.8/74.1/84.3 | 1.15 | 0.54 | Remove rotation augmentation, CBF SNR25 +0.8%, smooth 0.56→0.54 |
 | 38   | K2   | PASS | 70.0/75.4/74.3 | 87.0/63.3/79.4 | 1.07 | 0.54 | Two-stage DR curriculum, CBF SNR10 +5.9%, CoV 1.15→1.07, ATT SNR10 dipped |
+| 39   | K4   | FAIL | 74.5/60.6/71.0 | —/—/— | 1.07 | 0.54 | 20 eval phantoms, CBF SNR10 -14.8% regression, more phantoms revealed lower true win rates |
