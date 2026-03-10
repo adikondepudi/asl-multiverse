@@ -6,19 +6,19 @@
 NOTE: Single model with 4-flip TTA. Ensemble adds ~5% to metrics.
 | SNR | CBF Win % | ATT Win % | CBF Slope | CBF Bias |
 |-----|-----------|-----------|-----------|----------|
-| 3   | 70.0      | 87.0      | 0.72      | -3.0     |
-| 10  | 75.4      | 63.3      | 0.81      | -0.4     |
-| 25  | 74.3      | 79.4      | 0.93      | +2.9     |
+| 3   | 68.8      | 85.9      | 0.73      | -3.1     |
+| 10  | 71.3      | 63.0      | 0.83      | -0.6     |
+| 25  | 76.5      | 79.1      | 0.93      | +2.6     |
 
 ### In-Vivo (3 subjects average)
 NOTE: Single model with 4-flip TTA. Ensemble improves CoV ratio by ~0.06, smooth by ~0.03.
 | Metric              | NN     | LS     | Ratio (NN/LS) |
 |---------------------|--------|--------|---------------|
-| GM CBF CoV (%)      | 49.2   | 46.2   | 1.07          |
-| Spatial Smoothness  | 4.43   | 8.27   | 0.54          |
-| GM CBF Mean         | 44.8   | —      | —             |
+| GM CBF CoV (%)      | 48.6   | 46.2   | 1.05          |
+| Spatial Smoothness  | 4.48   | 8.27   | 0.54          |
+| GM CBF Mean         | 44.9   | —      | —             |
 | GM/WM Ratio         | 1.12   | —      | —             |
-| GM ATT Mean (ms)    | 1341   | —      | —             |
+| GM ATT Mean (ms)    | 1339   | —      | —             |
 
 ## Targets (hard — no fallback)
 - **Synthetic CBF win rate > 90%** at ALL SNR levels (3, 10, 25)
