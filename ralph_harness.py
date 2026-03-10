@@ -226,7 +226,7 @@ def train_model(cfg, signals, targets, norm_stats, device, n_epochs, seed):
 
     # Online data regeneration: regenerate phantoms every regen_interval epochs
     # This gives 6x phantom diversity (18000 unique anatomies across 30 epochs)
-    regen_interval = 5
+    regen_interval = 10
 
     # K2: Two-stage domain randomization curriculum
     # First 50% of epochs: narrow DR (near-consensus physics, easier to learn)
@@ -910,7 +910,7 @@ def main():
     parser = argparse.ArgumentParser(description='Ralph Harness — synthetic + in-vivo evaluation')
     parser.add_argument('--device', default='mps')
     parser.add_argument('--n-samples', type=int, default=3000)
-    parser.add_argument('--n-epochs', type=int, default=30)
+    parser.add_argument('--n-epochs', type=int, default=40)
     parser.add_argument('--data-dir', default='data/invivo_processed_npy')
     parser.add_argument('--ls-cache-dir', default='invivo_comparison_results')
     parser.add_argument('--output-dir', default='invivo_results')
