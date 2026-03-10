@@ -1,7 +1,7 @@
 # Ralph Plan — Ordered Task Checklist
 
 **Status**: IN PROGRESS
-**Iteration**: 37
+**Iteration**: 38
 **Last Updated**: 2026-03-09
 
 ---
@@ -238,9 +238,10 @@
   - Change: First 50% of epochs: narrow DR (alpha_BS1 [0.92, 1.0], T1_artery [1550, 1850]). Last 50%: full DR range.
   - Why: Model learns fundamentals first with near-consensus physics, then learns robustness with full randomization.
 
-- [ ] **K3**: Remove rotation augmentation
+- [x] **K3**: Remove rotation augmentation
   - Change: Remove torch.rot90 augmentation from training loop
   - Why: F2b showed rotation hurt CBF accuracy (SNR10 -4.5%, SNR25 -3.4%). Still in code since iter 17.
+  - Result: CBF SNR25 +0.8%, smooth ratio 0.56→0.54. CBF SNR3/10 slightly down (-3.5/-1.7%, within threshold). Removes known-bad augmentation.
 
 - [ ] **K4**: Increase eval phantoms (10→20)
   - Change: n_phantoms=20 in synthetic_eval
@@ -293,3 +294,4 @@
 | 34   | J4   | FAIL | 66.1/77.2/76.9 | —/—/— | 1.08 | 0.48 | Gradient accumulation (eff batch 128), CBF SNR3 -10.2% regression, CoV/smooth improved but vetoed |
 | 35   | J5   | FAIL | 66.1/77.2/76.9 | —/—/— | 1.08 | 0.48 | lr 0.003→0.002, CBF SNR3 -10.2% regression, CoV/smooth improved but vetoed |
 | 36   | K1   | PASS | 75.6/71.2/74.9 | 86.6/77.3/84.4 | 1.10 | 0.56 | Revert J4 grad accum + regen every 5 epochs, CoV improved 1.13→1.10 |
+| 37   | K3   | PASS | 72.1/69.5/75.7 | 86.8/74.1/84.3 | 1.15 | 0.54 | Remove rotation augmentation, CBF SNR25 +0.8%, smooth 0.56→0.54 |
