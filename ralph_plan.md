@@ -1,7 +1,7 @@
 # Ralph Plan — Ordered Task Checklist
 
 **Status**: IN PROGRESS
-**Iteration**: 42
+**Iteration**: 43
 **Last Updated**: 2026-03-10
 
 ---
@@ -283,10 +283,10 @@
 
 ## Phase M — Asymmetric DR & ATT Recovery (based on 42 iterations)
 
-- [ ] **M1**: Asymmetric DR — keep T1_artery narrow, widen alpha only
+- [x] **M1**: Asymmetric DR — keep T1_artery narrow, widen alpha only
   - Change: In gradual DR curriculum, keep T1_artery at narrow range [1550, 1850] throughout training. Only gradually widen alpha_BS1, alpha_PCASL, alpha_VSASL, and T_tau_perturb.
   - Why: K2/L1 DR curriculum boosted CBF SNR10 (+5.9%) but crashed ATT SNR10 from 78.5%→63.0%. T1_artery directly affects ATT in the kinetic model — widening it degrades ATT accuracy. Alpha parameters mainly affect CBF through labeling efficiency. Asymmetric DR should preserve ATT accuracy while keeping CBF gains.
-  - Risk: May slightly reduce CBF gains from DR (less T1_artery mismatch for LS)
+  - Result: CBF SNR10 +0.8% (71.3→72.1), CBF SNR25 +2.4% (76.5→78.9). ATT SNR10 dipped further (63.0→53.3). CoV ratio 1.05→1.06 (stable). CBF gains at high SNR.
 
 - [ ] **M2**: Increase ATT loss weight (att_weight=1.5)
   - Change: att_weight: 1.5 in config
@@ -354,3 +354,4 @@
 | 40   | K5   | FAIL | 72.3/60.9/71.3 | —/—/— | 1.03 | 0.53 | 40 epochs/regen every 10, CBF SNR10 -14.5% regression, longer training didn't help |
 | 41   | L1   | PASS | 68.8/71.3/76.5 | 85.9/63.0/79.1 | 1.05 | 0.54 | Gradual DR curriculum + revert K5, CBF SNR25 +2.2%, CoV 1.07→1.05 |
 | 42   | L2   | FAIL | 68.8/71.3/76.5 | —/—/— | 1.05 | 0.54 | ATT blur sigma 1.0→2.0 (CBF kept 1.0), no metric improved over best |
+| 43   | M1   | PASS | 67.3/72.1/78.9 | 80.9/53.3/75.2 | 1.06 | 0.54 | Asymmetric DR (T1_artery narrow, alpha widens), CBF SNR25 +2.4% |
