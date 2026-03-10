@@ -1,7 +1,7 @@
 # Ralph Plan — Ordered Task Checklist
 
 **Status**: IN PROGRESS
-**Iteration**: 34
+**Iteration**: 36
 **Last Updated**: 2026-03-09
 
 ---
@@ -226,6 +226,29 @@
   - Change: lr=0.002 with same cosine annealing
   - Why: E5 tried 0.005 (too high). 0.002 is more conservative, may improve fine-grained convergence.
   - **FAIL**: CBF wins dropped (76.3→66.1 SNR3, 71.1→77.2 SNR10, 76.9→76.9 SNR25). CBF SNR3 regression -10.2% exceeds 5% threshold. CoV ratio improved (1.13→1.08) and smooth ratio improved (0.54→0.48) but vetoed by CBF SNR3 regression.
+
+## Phase K — Data Diversity & Cleanup (based on 35 iterations)
+
+- [ ] **K1**: Revert J4 gradient accumulation + more frequent phantom regen (every 5 epochs)
+  - Change: Remove accum_steps=2, set regen_interval=5 (was 10)
+  - Why: J4's grad accumulation is still in the code (CBF SNR3 -10.2% regression). More frequent regen gives 6x phantom diversity (18k unique anatomies vs 9k), leveraging the one pattern that consistently helped (J1: +1.9% from regen).
+  - Risk: Regen overhead (5 regens vs 2), may slow training slightly
+
+- [ ] **K2**: Two-stage domain randomization curriculum
+  - Change: First 50% of epochs: narrow DR (alpha_BS1 [0.92, 1.0], T1_artery [1550, 1850]). Last 50%: full DR range.
+  - Why: Model learns fundamentals first with near-consensus physics, then learns robustness with full randomization.
+
+- [ ] **K3**: Remove rotation augmentation
+  - Change: Remove torch.rot90 augmentation from training loop
+  - Why: F2b showed rotation hurt CBF accuracy (SNR10 -4.5%, SNR25 -3.4%). Still in code since iter 17.
+
+- [ ] **K4**: Increase eval phantoms (10→20)
+  - Change: n_phantoms=20 in synthetic_eval
+  - Why: More stable win rate measurements (reduce eval noise)
+
+- [ ] **K5**: Longer training (40 epochs) with regen every 10 (4 regens = 12k unique)
+  - Change: n_epochs=40, regen_interval=10
+  - Why: A1 failed with 50/5000 (overfitting on same data). With regen, more epochs = more diversity.
 
 ---
 

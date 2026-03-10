@@ -225,8 +225,8 @@ def train_model(cfg, signals, targets, norm_stats, device, n_epochs, seed):
     train_targets = targets[train_idx]
 
     # Online data regeneration: regenerate phantoms every regen_interval epochs
-    # This gives 3x phantom diversity (9000 unique anatomies across 30 epochs)
-    regen_interval = 10
+    # This gives 6x phantom diversity (18000 unique anatomies across 30 epochs)
+    regen_interval = 5
 
     optimizer = torch.optim.AdamW(model.parameters(), lr=lr, weight_decay=cfg.get('weight_decay', 0.0001))
     scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=n_epochs, eta_min=lr * 0.01)
@@ -241,9 +241,6 @@ def train_model(cfg, signals, targets, norm_stats, device, n_epochs, seed):
     swa_start = n_epochs - swa_epochs
     swa_state = None
     swa_count = 0
-
-    # Gradient accumulation for effective batch size 128
-    accum_steps = 2  # batch_size=64 * 2 = 128 effective
 
     for epoch in range(n_epochs):
         # Regenerate training data at interval boundaries (except epoch 0, which uses initial data)
@@ -272,8 +269,6 @@ def train_model(cfg, signals, targets, norm_stats, device, n_epochs, seed):
             curr_snr_min = snr_max_base - progress * (snr_max_base - snr_min_base)
             noise_injector.snr_range = [curr_snr_min, snr_max_base]
 
-        optimizer.zero_grad()  # zero grads at start of epoch for accumulation
-        n_batches_total = (n_train + batch_size - 1) // batch_size
         for batch_idx, start in enumerate(range(0, n_train, batch_size)):
             end = min(start + batch_size, n_train)
             idx = perm_train[start:end]
@@ -325,12 +320,10 @@ def train_model(cfg, signals, targets, norm_stats, device, n_epochs, seed):
             loss = loss + tv_weight * (tv_cbf + tv_att)
             if torch.isnan(loss) or torch.isinf(loss):
                 continue
-            # Gradient accumulation: scale loss and accumulate
-            (loss / accum_steps).backward()
-            if (batch_idx + 1) % accum_steps == 0 or (batch_idx + 1) == n_batches_total:
-                torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
-                optimizer.step()
-                optimizer.zero_grad()
+            optimizer.zero_grad()
+            loss.backward()
+            torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
+            optimizer.step()
             epoch_loss += loss.item(); n_batches += 1
 
         scheduler.step()
