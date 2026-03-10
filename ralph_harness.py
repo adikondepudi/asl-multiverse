@@ -884,7 +884,7 @@ def print_and_save(synth_results, invivo_results, loss_history, output_dir):
 def main():
     parser = argparse.ArgumentParser(description='Ralph Harness — synthetic + in-vivo evaluation')
     parser.add_argument('--device', default='mps')
-    parser.add_argument('--n-samples', type=int, default=3000)
+    parser.add_argument('--n-samples', type=int, default=4500)
     parser.add_argument('--n-epochs', type=int, default=30)
     parser.add_argument('--data-dir', default='data/invivo_processed_npy')
     parser.add_argument('--ls-cache-dir', default='invivo_comparison_results')
