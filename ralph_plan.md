@@ -281,6 +281,30 @@
   - Why: Makes LS evaluation more realistic (clinical uncertainty in parameters)
   - Risk: Artificially handicaps LS; not a real model improvement
 
+## Phase M — Asymmetric DR & ATT Recovery (based on 42 iterations)
+
+- [ ] **M1**: Asymmetric DR — keep T1_artery narrow, widen alpha only
+  - Change: In gradual DR curriculum, keep T1_artery at narrow range [1550, 1850] throughout training. Only gradually widen alpha_BS1, alpha_PCASL, alpha_VSASL, and T_tau_perturb.
+  - Why: K2/L1 DR curriculum boosted CBF SNR10 (+5.9%) but crashed ATT SNR10 from 78.5%→63.0%. T1_artery directly affects ATT in the kinetic model — widening it degrades ATT accuracy. Alpha parameters mainly affect CBF through labeling efficiency. Asymmetric DR should preserve ATT accuracy while keeping CBF gains.
+  - Risk: May slightly reduce CBF gains from DR (less T1_artery mismatch for LS)
+
+- [ ] **M2**: Increase ATT loss weight (att_weight=1.5)
+  - Change: att_weight: 1.5 in config
+  - Why: ATT SNR10 at 63% is the weakest synthetic metric. More ATT emphasis during training could improve ATT accuracy. E4 tried cbf_weight=2.0 which hurt both — increasing ATT weight is the opposite approach.
+  - Risk: May reduce CBF accuracy
+
+- [ ] **M3**: Reduce label smoothing for ATT (15ms → 5ms)
+  - Change: Reduce ATT noise in label smoothing from 15ms to 5ms
+  - Why: G4 added target noise (CBF std=0.5, ATT std=15ms). For ATT values of 800-2500ms, 15ms noise may blur the signal LS uses to beat NN per-voxel.
+
+- [ ] **M4**: Increase post-processing blur for CBF (1.0 → 1.5)
+  - Change: CBF blur sigma from 1.0 to 1.5 in both synth and invivo eval
+  - Why: F3 tried 1.5 but crashed (parsing issue). CoV ratio is 1.05 — more CBF smoothing could push NN below LS. CBF varies more slowly than single-voxel, so more smoothing is physically justified.
+
+- [ ] **M5**: Ensemble (3 models) — final polish
+  - Change: Re-enable ensemble (train 3 models, average predictions)
+  - Why: B1 showed ensemble helps (CoV 1.00→0.94, smooth 0.90→0.87). Deferred for fast iteration. If M1-M4 improve base model, ensemble multiplies gains.
+
 ---
 
 ## Iteration Log

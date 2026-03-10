@@ -257,13 +257,20 @@ def train_model(cfg, signals, targets, norm_stats, device, n_epochs, seed):
     swa_count = 0
 
     for epoch in range(n_epochs):
-        # L1: Gradual DR interpolation — linearly widen from narrow to full
+        # M1: Asymmetric DR — keep T1_artery narrow, gradually widen alpha only
+        # K2/L1 DR curriculum boosted CBF SNR10 (+5.9%) but crashed ATT SNR10
+        # from 78.5% to 63.0%. T1_artery directly affects ATT — widening it
+        # degrades ATT accuracy. Alpha params mainly affect CBF. Keep T1_artery
+        # narrow to preserve ATT, widen alphas for CBF gains.
         dr_progress = min(epoch / max(n_epochs - 1, 1), 1.0)
         interp_dr = {'enabled': True}
-        for key in ['T1_artery_range', 'alpha_PCASL_range', 'alpha_VSASL_range', 'alpha_BS1_range']:
+        # Alpha params: gradually widen from narrow to full
+        for key in ['alpha_PCASL_range', 'alpha_VSASL_range', 'alpha_BS1_range']:
             n_lo, n_hi = narrow_dr[key]
             f_lo, f_hi = full_dr.get(key, narrow_dr[key])
             interp_dr[key] = [n_lo + (f_lo - n_lo) * dr_progress, n_hi + (f_hi - n_hi) * dr_progress]
+        # T1_artery: keep at narrow range throughout (preserves ATT accuracy)
+        interp_dr['T1_artery_range'] = list(narrow_dr['T1_artery_range'])
         interp_dr['T_tau_perturb'] = narrow_dr['T_tau_perturb'] + (full_dr.get('T_tau_perturb', 0.10) - narrow_dr['T_tau_perturb']) * dr_progress
         cfg['domain_randomization'] = interp_dr
 
