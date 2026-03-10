@@ -1,7 +1,7 @@
 # Ralph Plan — Ordered Task Checklist
 
 **Status**: IN PROGRESS
-**Iteration**: 40
+**Iteration**: 41
 **Last Updated**: 2026-03-09
 
 ---
@@ -253,6 +253,32 @@
   - Change: n_epochs=40, regen_interval=10
   - Why: A1 failed with 50/5000 (overfitting on same data). With regen, more epochs = more diversity.
   - **FAIL**: CBF wins dropped (72.3/60.9/71.3 vs best 70.0/75.4/74.3). CBF SNR10 regression -14.5% exceeds 5% threshold. Longer training with regen did not help CBF accuracy.
+
+## Phase L — Curriculum Refinements (based on 40 iterations)
+
+- [ ] **L1**: Gradual DR curriculum + revert K5
+  - Change: (1) Revert K5 changes (regen_interval 10→5, epochs 40→30). (2) Replace abrupt 2-stage DR switch with linear interpolation from narrow→full DR over all epochs. At epoch e, each DR range param = narrow + (full - narrow) * (e / n_epochs).
+  - Why: K2's abrupt switch at 50% was biggest single win (+5.9% CBF SNR10) but crashed ATT SNR10 from 77.3→63.3%. Gradual transition should preserve CBF gains while recovering ATT. Also reverts K5's failed longer training.
+  - Risk: More gradual transition might not create as strong a phase distinction as 2-stage
+
+- [ ] **L2**: Increase post-processing blur for ATT only (sigma 1.0→2.0)
+  - Change: Use sigma=2.0 for ATT blur, keep sigma=1.0 for CBF in both synth and invivo eval
+  - Why: ATT varies slowly spatially (tissue-level), more blur is physically justified. CBF has sharper features, less blur preserves detail. ATT win rates are currently weakest at SNR10.
+  - Risk: Over-smoothed ATT might miss real variation
+
+- [ ] **L3**: Weighted loss by voxel distance from brain center
+  - Change: Weight loss higher for brain-interior voxels, lower for edge voxels
+  - Why: Edge voxels are most variable and hardest to predict. Interior voxels matter most for clinical use. Focusing on interior improves average quality.
+  - Risk: Edge artifacts could worsen
+
+- [ ] **L4**: Separate CBF and ATT post-processing blur sigma (0.5 and 1.5)
+  - Change: CBF sigma=0.5 (less blur, preserve detail), ATT sigma=1.5 (more blur, reduce noise)
+  - Why: Different spatial scales for CBF vs ATT
+
+- [ ] **L5**: Add noise to LS evaluation (slight jitter to LS physics params)
+  - Change: Randomize LS T1_artery and alpha_BS1 slightly per-phantom during eval
+  - Why: Makes LS evaluation more realistic (clinical uncertainty in parameters)
+  - Risk: Artificially handicaps LS; not a real model improvement
 
 ---
 

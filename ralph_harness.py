@@ -226,11 +226,12 @@ def train_model(cfg, signals, targets, norm_stats, device, n_epochs, seed):
 
     # Online data regeneration: regenerate phantoms every regen_interval epochs
     # This gives 6x phantom diversity (18000 unique anatomies across 30 epochs)
-    regen_interval = 10
+    regen_interval = 5
 
-    # K2: Two-stage domain randomization curriculum
-    # First 50% of epochs: narrow DR (near-consensus physics, easier to learn)
-    # Last 50%: full DR range (robustness to physics mismatch)
+    # L1: Gradual DR curriculum — linearly interpolate from narrow to full DR
+    # over all epochs. At epoch e, range = narrow + (full - narrow) * (e / n_epochs).
+    # K2's abrupt switch at 50% gained +5.9% CBF SNR10 but crashed ATT SNR10 -14%.
+    # Gradual transition should preserve CBF gains while recovering ATT.
     full_dr = cfg.get('domain_randomization', {}).copy()
     narrow_dr = {
         'enabled': True,
@@ -240,7 +241,6 @@ def train_model(cfg, signals, targets, norm_stats, device, n_epochs, seed):
         'alpha_BS1_range': [0.92, 1.0],         # narrow (full: 0.85-1.0)
         'T_tau_perturb': 0.05,                  # narrow (full: 0.10)
     }
-    dr_switch_epoch = n_epochs // 2  # switch at 50%
 
     optimizer = torch.optim.AdamW(model.parameters(), lr=lr, weight_decay=cfg.get('weight_decay', 0.0001))
     scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=n_epochs, eta_min=lr * 0.01)
@@ -257,17 +257,20 @@ def train_model(cfg, signals, targets, norm_stats, device, n_epochs, seed):
     swa_count = 0
 
     for epoch in range(n_epochs):
-        # K2: Switch DR range based on epoch
-        if epoch < dr_switch_epoch:
-            cfg['domain_randomization'] = narrow_dr
-        else:
-            cfg['domain_randomization'] = full_dr
+        # L1: Gradual DR interpolation — linearly widen from narrow to full
+        dr_progress = min(epoch / max(n_epochs - 1, 1), 1.0)
+        interp_dr = {'enabled': True}
+        for key in ['T1_artery_range', 'alpha_PCASL_range', 'alpha_VSASL_range', 'alpha_BS1_range']:
+            n_lo, n_hi = narrow_dr[key]
+            f_lo, f_hi = full_dr.get(key, narrow_dr[key])
+            interp_dr[key] = [n_lo + (f_lo - n_lo) * dr_progress, n_hi + (f_hi - n_hi) * dr_progress]
+        interp_dr['T_tau_perturb'] = narrow_dr['T_tau_perturb'] + (full_dr.get('T_tau_perturb', 0.10) - narrow_dr['T_tau_perturb']) * dr_progress
+        cfg['domain_randomization'] = interp_dr
 
         # Regenerate training data at interval boundaries (except epoch 0, which uses initial data)
         if epoch > 0 and epoch % regen_interval == 0:
             regen_seed = seed + epoch * 1000
-            dr_label = "narrow" if epoch < dr_switch_epoch else "full"
-            print(f"  Regenerating training data (seed={regen_seed}, DR={dr_label})...")
+            print(f"  Regenerating training data (seed={regen_seed}, DR progress={dr_progress:.0%})...")
             new_signals, new_targets, _ = generate_training_data(cfg, n_samples, regen_seed)
             # Keep original norm_stats for loss consistency
             n_new = len(new_signals)
@@ -414,7 +417,7 @@ def _ls_cache_path():
     return Path('invivo_results') / 'ls_synth_cache.npz'
 
 
-def _compute_ls_cache(cfg, n_phantoms=20, snr_levels=[3, 10, 25], seed=9999):
+def _compute_ls_cache(cfg, n_phantoms=10, snr_levels=[3, 10, 25], seed=9999):
     """Compute LS results for synthetic phantoms once and cache to disk."""
     print("  Computing LS cache (one-time cost)...")
     np.random.seed(seed)
@@ -495,7 +498,7 @@ def _compute_ls_cache(cfg, n_phantoms=20, snr_levels=[3, 10, 25], seed=9999):
     return cache
 
 
-def synthetic_eval(model, cfg, norm_stats, device, n_phantoms=20, snr_levels=[3, 10, 25], seed=9999, models_and_stats=None):
+def synthetic_eval(model, cfg, norm_stats, device, n_phantoms=10, snr_levels=[3, 10, 25], seed=9999, models_and_stats=None):
     """Evaluate on synthetic phantoms with known ground truth. LS results are cached."""
     # Load or compute LS cache
     cache_path = _ls_cache_path()
@@ -910,7 +913,7 @@ def main():
     parser = argparse.ArgumentParser(description='Ralph Harness — synthetic + in-vivo evaluation')
     parser.add_argument('--device', default='mps')
     parser.add_argument('--n-samples', type=int, default=3000)
-    parser.add_argument('--n-epochs', type=int, default=40)
+    parser.add_argument('--n-epochs', type=int, default=30)
     parser.add_argument('--data-dir', default='data/invivo_processed_npy')
     parser.add_argument('--ls-cache-dir', default='invivo_comparison_results')
     parser.add_argument('--output-dir', default='invivo_results')
