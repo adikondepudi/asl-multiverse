@@ -570,11 +570,14 @@ def synthetic_eval(model, cfg, norm_stats, device, n_phantoms=10, snr_levels=[3,
                 scale = pld_scaling['PCASL'] if ch < n_plds else pld_scaling['VSASL']
                 noisy[ch] += np.random.randn(64, 64).astype(np.float32) * noise_sigma * scale
 
-            # NN prediction with 4-flip TTA
+            # NN prediction with TTA (ensemble if available)
             with torch.no_grad():
                 inp = torch.from_numpy(noisy[np.newaxis]).float().to(device)
                 inp = torch.clamp(inp * global_scale, -30, 30)
-                nn_cbf, nn_att = tta_predict_single(model, norm_stats, inp)
+                if models_and_stats is not None:
+                    nn_cbf, nn_att = ensemble_predict(models_and_stats, inp, device)
+                else:
+                    nn_cbf, nn_att = tta_predict_single(model, norm_stats, inp)
 
             # Post-processing Gaussian blur for denoising
             nn_cbf = gaussian_filter(nn_cbf, sigma=1.5)
@@ -639,7 +642,7 @@ def synthetic_eval(model, cfg, norm_stats, device, n_phantoms=10, snr_levels=[3,
 # Phase 3: In-vivo evaluation
 # =============================================================================
 
-def invivo_eval(model, norm_stats, cfg, device, data_dir, ls_cache_dir, subjects):
+def invivo_eval(model, norm_stats, cfg, device, data_dir, ls_cache_dir, subjects, models_and_stats=None):
     """Evaluate on real patient data, compare to cached LS."""
     global_scale = cfg.get('global_scale_factor', 10.0)
     model.eval()
@@ -665,6 +668,9 @@ def invivo_eval(model, norm_stats, cfg, device, data_dir, ls_cache_dir, subjects
         cbf_vol = np.zeros((Z, H, W), dtype=np.float32)
         att_vol = np.zeros((Z, H, W), dtype=np.float32)
 
+        # Determine which models to use (ensemble or single)
+        eval_models = models_and_stats if models_and_stats is not None else [(model, norm_stats)]
+
         with torch.no_grad():
             for z in range(Z):
                 inp = torch.from_numpy(signals_spatial[z:z + 1]).float().to(device)
@@ -673,28 +679,30 @@ def invivo_eval(model, norm_stats, cfg, device, data_dir, ls_cache_dir, subjects
                 pad_w = (16 - w % 16) % 16
                 if pad_h > 0 or pad_w > 0:
                     inp = torch.nn.functional.pad(inp, (0, pad_w, 0, pad_h), mode='reflect')
-                # 4-flip TTA (same as synthetic eval)
+                # 4-flip TTA across all ensemble members
                 flips = [(False, False), (False, True), (True, False), (True, True)]
                 cbf_preds, att_preds = [], []
-                for flip_v, flip_h in flips:
-                    aug = inp
-                    if flip_v:
-                        aug = torch.flip(aug, [2])
-                    if flip_h:
-                        aug = torch.flip(aug, [3])
-                    pc, pa, _, _ = model(aug)
-                    cbf_s = pc[0, 0, :h, :w].cpu().numpy()
-                    att_s = pa[0, 0, :h, :w].cpu().numpy()
-                    if flip_v:
-                        cbf_s = np.flip(cbf_s, axis=0).copy()
-                        att_s = np.flip(att_s, axis=0).copy()
-                    if flip_h:
-                        cbf_s = np.flip(cbf_s, axis=1).copy()
-                        att_s = np.flip(att_s, axis=1).copy()
-                    cbf_preds.append(cbf_s)
-                    att_preds.append(att_s)
-                cbf_vol[z] = np.mean(cbf_preds, axis=0) * norm_stats['y_std_cbf'] + norm_stats['y_mean_cbf']
-                att_vol[z] = np.mean(att_preds, axis=0) * norm_stats['y_std_att'] + norm_stats['y_mean_att']
+                for ens_model, ens_ns in eval_models:
+                    ens_model.eval()
+                    for flip_v, flip_h in flips:
+                        aug = inp
+                        if flip_v:
+                            aug = torch.flip(aug, [2])
+                        if flip_h:
+                            aug = torch.flip(aug, [3])
+                        pc, pa, _, _ = ens_model(aug)
+                        cbf_s = pc[0, 0, :h, :w].cpu().numpy()
+                        att_s = pa[0, 0, :h, :w].cpu().numpy()
+                        if flip_v:
+                            cbf_s = np.flip(cbf_s, axis=0).copy()
+                            att_s = np.flip(att_s, axis=0).copy()
+                        if flip_h:
+                            cbf_s = np.flip(cbf_s, axis=1).copy()
+                            att_s = np.flip(att_s, axis=1).copy()
+                        cbf_preds.append(cbf_s * ens_ns['y_std_cbf'] + ens_ns['y_mean_cbf'])
+                        att_preds.append(att_s * ens_ns['y_std_att'] + ens_ns['y_mean_att'])
+                cbf_vol[z] = np.mean(cbf_preds, axis=0)
+                att_vol[z] = np.mean(att_preds, axis=0)
 
         nn_cbf = np.transpose(cbf_vol, (1, 2, 0))
         nn_att = np.transpose(att_vol, (1, 2, 0))
@@ -945,42 +953,56 @@ def main():
     cfg = load_config()
     print(f"Device: {device}, Config: config/invivo_experiment.yaml")
 
-    # Phase 1: Train single model (ensemble disabled for fast iteration)
-    print(f"\n[Phase 1] Generating {args.n_samples} samples + training {args.n_epochs} epochs...")
-    t1 = time.time()
-    # K2: Initial data uses narrow DR (first 50% of epochs are narrow)
-    full_dr_saved = cfg.get('domain_randomization', {}).copy()
-    cfg['domain_randomization'] = {
-        'enabled': True,
-        'T1_artery_range': [1550.0, 1850.0],
-        'alpha_PCASL_range': [0.80, 0.90],
-        'alpha_VSASL_range': [0.48, 0.62],
-        'alpha_BS1_range': [0.92, 1.0],
-        'T_tau_perturb': 0.05,
-    }
-    signals, targets, norm_stats = generate_training_data(cfg, args.n_samples, args.seed)
-    cfg['domain_randomization'] = full_dr_saved  # restore for train_model
-    print(f"  Data: {time.time()-t1:.0f}s, norm_stats: CBF={norm_stats['y_mean_cbf']:.1f}+/-{norm_stats['y_std_cbf']:.1f}")
+    # Phase 1: Train 3-model ensemble (M5)
+    n_ensemble = 3
+    models_and_stats = []
+    loss_history = None
 
-    model, loss_history = train_model(cfg, signals, targets, norm_stats, device, args.n_epochs, args.seed)
-    print(f"  Training: {time.time()-t1:.0f}s total")
+    for ens_i in range(n_ensemble):
+        ens_seed = args.seed + ens_i * 777
+        print(f"\n[Phase 1] Ensemble member {ens_i+1}/{n_ensemble} (seed={ens_seed}): "
+              f"Generating {args.n_samples} samples + training {args.n_epochs} epochs...")
+        t1 = time.time()
+        # K2: Initial data uses narrow DR (first 50% of epochs are narrow)
+        full_dr_saved = cfg.get('domain_randomization', {}).copy()
+        cfg['domain_randomization'] = {
+            'enabled': True,
+            'T1_artery_range': [1550.0, 1850.0],
+            'alpha_PCASL_range': [0.80, 0.90],
+            'alpha_VSASL_range': [0.48, 0.62],
+            'alpha_BS1_range': [0.92, 1.0],
+            'T_tau_perturb': 0.05,
+        }
+        signals, targets, norm_stats = generate_training_data(cfg, args.n_samples, ens_seed)
+        cfg['domain_randomization'] = full_dr_saved  # restore for train_model
+        print(f"  Data: {time.time()-t1:.0f}s, norm_stats: CBF={norm_stats['y_mean_cbf']:.1f}+/-{norm_stats['y_std_cbf']:.1f}")
 
-    # Save model
+        model, hist = train_model(cfg, signals, targets, norm_stats, device, args.n_epochs, ens_seed)
+        print(f"  Training: {time.time()-t1:.0f}s total")
+        models_and_stats.append((model, norm_stats))
+        if loss_history is None:
+            loss_history = hist
+
+    # Save first model for compatibility
     output_dir = Path(args.output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
-    torch.save({'model_state_dict': model.state_dict(), 'norm_stats': norm_stats},
+    torch.save({'model_state_dict': models_and_stats[0][0].state_dict(), 'norm_stats': models_and_stats[0][1]},
                output_dir / 'trained_model.pt')
 
+    # Use first model as primary (for API compatibility), but pass ensemble for prediction
+    model, norm_stats = models_and_stats[0]
+
     # Phase 2: Synthetic eval
-    print(f"\n[Phase 2] Synthetic evaluation (3 SNR levels, 10 phantoms)...")
+    print(f"\n[Phase 2] Synthetic evaluation (3 SNR levels, 10 phantoms, {n_ensemble}-model ensemble)...")
     t2 = time.time()
-    synth_results = synthetic_eval(model, cfg, norm_stats, device)
+    synth_results = synthetic_eval(model, cfg, norm_stats, device, models_and_stats=models_and_stats)
     print(f"  Synthetic eval: {time.time()-t2:.0f}s")
 
     # Phase 3: In-vivo eval
-    print(f"\n[Phase 3] In-vivo evaluation ({len(args.subjects)} subjects)...")
+    print(f"\n[Phase 3] In-vivo evaluation ({len(args.subjects)} subjects, {n_ensemble}-model ensemble)...")
     t3 = time.time()
-    invivo_results = invivo_eval(model, norm_stats, cfg, device, args.data_dir, args.ls_cache_dir, args.subjects)
+    invivo_results = invivo_eval(model, norm_stats, cfg, device, args.data_dir, args.ls_cache_dir, args.subjects,
+                                 models_and_stats=models_and_stats)
     print(f"  In-vivo eval: {time.time()-t3:.1f}s")
 
     # Output
