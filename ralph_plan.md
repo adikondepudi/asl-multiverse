@@ -1,7 +1,7 @@
 # Ralph Plan — Ordered Task Checklist
 
 **Status**: IN PROGRESS
-**Iteration**: 30
+**Iteration**: 31
 **Last Updated**: 2026-03-09
 
 ---
@@ -201,11 +201,11 @@
 
 ## Phase J — Data Diversity (online regeneration)
 
-- [ ] **J1**: Online phantom regeneration every 10 epochs
+- [x] **J1**: Online phantom regeneration every 10 epochs
   - Change: Regenerate fresh training phantoms at epochs 10 and 20 (3 different datasets across 30 epochs)
   - Why: Current training repeats same 3000 phantoms 30 times. Regeneration gives 9000 unique anatomies across training. A1 (5000/50 epochs) failed due to overfitting from more epochs, not more data. This gives more diversity without more passes per sample.
   - Also reverts accumulated failed changes from I2 (noise_repeats), I3 (variance_weight), I4 (scheduler)
-  - Risk: Data generation adds ~10-15s per regeneration. Slightly longer training.
+  - Result: CBF SNR3 +1.9% (74.4→76.3). SNR10/25 within noise (-0.9/-0.5%). ATT stable. More phantom diversity helped low-SNR CBF.
 
 - [ ] **J2**: Exponential Moving Average (EMA) of model weights (decay=0.999)
   - Change: Replace SWA with EMA applied every optimizer step. Smoother averaging across all training.
@@ -260,3 +260,4 @@
 | 28   | I2   | FAIL | 70.1/75.1/70.8 | —/—/— | 1.09 | 0.54 | 2x noise per phantom, CBF SNR25 -6.6% regression, less phantom diversity hurt |
 | 29   | I3   | FAIL | 68.3/75.3/77.8 | —/—/— | 1.12 | 0.53 | variance_weight 0.01→0.05, CBF SNR3 -6.1% regression |
 | 30   | I4   | FAIL | 65.5/74.1/77.4 | —/—/— | 1.06 | 0.52 | CosineAnnealingWarmRestarts, CBF SNR3 -8.9% regression |
+| 31   | J1   | PASS | 76.3/71.1/76.9 | 86.3/76.9/85.6 | 1.13 | 0.54 | Online phantom regen every 10 epochs, CBF SNR3 +1.9%, reverts I2/I3/I4 |
