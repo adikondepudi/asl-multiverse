@@ -1,7 +1,7 @@
 # Ralph Plan — Ordered Task Checklist
 
 **Status**: IN PROGRESS
-**Iteration**: 29
+**Iteration**: 30
 **Last Updated**: 2026-03-09
 
 ---
@@ -193,10 +193,11 @@
   - Risk: May increase MAE slightly
   - **FAIL**: CBF wins dropped (74.4→68.3, 72.0→75.3, 77.4→77.8). CBF SNR3 regression -6.1% exceeds 5% threshold. Stronger variance penalty hurt CBF accuracy at low SNR.
 
-- [ ] **I4**: Cosine annealing with warm restarts (T_mult=2)
+- [FAIL] **I4**: Cosine annealing with warm restarts (T_mult=2)
   - Change: Replace CosineAnnealingLR with CosineAnnealingWarmRestarts(T_0=10, T_mult=2)
   - Why: Multiple LR cycles help escape local minima. First cycle 10 epochs, second 20 epochs = 30 total.
   - Risk: May need more epochs to converge fully
+  - **FAIL**: CBF wins dropped (74.4→65.5, 72.0→74.1, 77.4→77.4). CBF SNR3 regression -8.9% exceeds 5% threshold. Warm restarts hurt low-SNR CBF accuracy.
 
 ---
 
@@ -234,3 +235,4 @@
 | 27   | I1   | PASS | 74.4/72.0/77.4 | 86.2/78.5/85.0 | 1.10 | 0.54 | Skip clean epochs, CBF SNR25 +4.0%, ATT SNR10 +4.5% |
 | 28   | I2   | FAIL | 70.1/75.1/70.8 | —/—/— | 1.09 | 0.54 | 2x noise per phantom, CBF SNR25 -6.6% regression, less phantom diversity hurt |
 | 29   | I3   | FAIL | 68.3/75.3/77.8 | —/—/— | 1.12 | 0.53 | variance_weight 0.01→0.05, CBF SNR3 -6.1% regression |
+| 30   | I4   | FAIL | 65.5/74.1/77.4 | —/—/— | 1.06 | 0.52 | CosineAnnealingWarmRestarts, CBF SNR3 -8.9% regression |
