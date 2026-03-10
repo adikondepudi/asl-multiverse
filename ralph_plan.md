@@ -261,10 +261,11 @@
   - Why: K2's abrupt switch at 50% was biggest single win (+5.9% CBF SNR10) but crashed ATT SNR10 from 77.3→63.3%. Gradual transition should preserve CBF gains while recovering ATT. Also reverts K5's failed longer training.
   - Result: CBF SNR25 +2.2% (74.3→76.5), CoV improved 1.07→1.05. CBF SNR3/10 slightly down (-1.2/-4.1%, within threshold). ATT stable. Gradual DR preserved CBF gains with better CoV.
 
-- [ ] **L2**: Increase post-processing blur for ATT only (sigma 1.0→2.0)
+- [FAIL] **L2**: Increase post-processing blur for ATT only (sigma 1.0→2.0)
   - Change: Use sigma=2.0 for ATT blur, keep sigma=1.0 for CBF in both synth and invivo eval
   - Why: ATT varies slowly spatially (tissue-level), more blur is physically justified. CBF has sharper features, less blur preserves detail. ATT win rates are currently weakest at SNR10.
   - Risk: Over-smoothed ATT might miss real variation
+  - **FAIL**: CBF wins 68.8/71.3/76.5 (no improvement over best 68.8/71.3/76.5). CoV ratio 1.05 (no improvement over best 1.05). Smooth ratio 0.54 (no improvement over best 0.54). No metric improved.
 
 - [ ] **L3**: Weighted loss by voxel distance from brain center
   - Change: Weight loss higher for brain-interior voxels, lower for edge voxels
@@ -328,3 +329,4 @@
 | 39   | K4   | FAIL | 74.5/60.6/71.0 | —/—/— | 1.07 | 0.54 | 20 eval phantoms, CBF SNR10 -14.8% regression, more phantoms revealed lower true win rates |
 | 40   | K5   | FAIL | 72.3/60.9/71.3 | —/—/— | 1.03 | 0.53 | 40 epochs/regen every 10, CBF SNR10 -14.5% regression, longer training didn't help |
 | 41   | L1   | PASS | 68.8/71.3/76.5 | 85.9/63.0/79.1 | 1.05 | 0.54 | Gradual DR curriculum + revert K5, CBF SNR25 +2.2%, CoV 1.07→1.05 |
+| 42   | L2   | FAIL | 68.8/71.3/76.5 | —/—/— | 1.05 | 0.54 | ATT blur sigma 1.0→2.0 (CBF kept 1.0), no metric improved over best |
