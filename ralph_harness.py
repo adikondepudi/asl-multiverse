@@ -299,13 +299,6 @@ def train_model(cfg, signals, targets, norm_stats, device, n_epochs, seed):
                 cbf_t = torch.flip(cbf_t, [3])
                 att_t = torch.flip(att_t, [3])
                 mask_t = torch.flip(mask_t, [3])
-            # Random 90° rotation augmentation
-            k = int(torch.randint(0, 4, (1,)).item())
-            if k > 0:
-                normalized = torch.rot90(normalized, k, [2, 3]).contiguous()
-                cbf_t = torch.rot90(cbf_t, k, [2, 3]).contiguous()
-                att_t = torch.rot90(att_t, k, [2, 3]).contiguous()
-                mask_t = torch.rot90(mask_t, k, [2, 3]).contiguous()
 
             pred_cbf, pred_att, lv_cbf, lv_att = model(normalized)
             loss_dict = loss_fn(pred_cbf.float(), pred_att.float(), cbf_t, att_t, mask_t, normalized,
