@@ -332,7 +332,12 @@ def train_model(cfg, signals, targets, norm_stats, device, n_epochs, seed):
                 mask_t = torch.flip(mask_t, [3])
 
             pred_cbf, pred_att, lv_cbf, lv_att = model(normalized)
-            loss_dict = loss_fn(pred_cbf.float(), pred_att.float(), cbf_t, att_t, mask_t, normalized,
+            # L3: Weight loss by distance from brain edge (interior voxels matter more)
+            # avg_pool2d on binary mask: edge voxels have avg < 1.0, interior = 1.0
+            interior_weight = torch.nn.functional.avg_pool2d(mask_t, kernel_size=7, stride=1, padding=3)
+            # Blend: edge voxels get 0.5 weight, interior gets 1.0
+            weighted_mask = mask_t * (0.5 + 0.5 * interior_weight)
+            loss_dict = loss_fn(pred_cbf.float(), pred_att.float(), cbf_t, att_t, weighted_mask, normalized,
                            log_var_cbf=lv_cbf.float(), log_var_att=lv_att.float())
             loss = loss_dict['total_loss']
             # TV regularization for spatial smoothness
