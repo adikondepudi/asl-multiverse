@@ -249,9 +249,10 @@
   - Why: More stable win rate measurements (reduce eval noise)
   - **FAIL**: CBF wins dropped (74.5/60.6/71.0 vs best 70.0/75.4/74.3). CBF SNR10 regression -14.8% exceeds 5% threshold. More eval phantoms revealed lower true win rates.
 
-- [ ] **K5**: Longer training (40 epochs) with regen every 10 (4 regens = 12k unique)
+- [FAIL] **K5**: Longer training (40 epochs) with regen every 10 (4 regens = 12k unique)
   - Change: n_epochs=40, regen_interval=10
   - Why: A1 failed with 50/5000 (overfitting on same data). With regen, more epochs = more diversity.
+  - **FAIL**: CBF wins dropped (72.3/60.9/71.3 vs best 70.0/75.4/74.3). CBF SNR10 regression -14.5% exceeds 5% threshold. Longer training with regen did not help CBF accuracy.
 
 ---
 
@@ -299,3 +300,4 @@
 | 37   | K3   | PASS | 72.1/69.5/75.7 | 86.8/74.1/84.3 | 1.15 | 0.54 | Remove rotation augmentation, CBF SNR25 +0.8%, smooth 0.56→0.54 |
 | 38   | K2   | PASS | 70.0/75.4/74.3 | 87.0/63.3/79.4 | 1.07 | 0.54 | Two-stage DR curriculum, CBF SNR10 +5.9%, CoV 1.15→1.07, ATT SNR10 dipped |
 | 39   | K4   | FAIL | 74.5/60.6/71.0 | —/—/— | 1.07 | 0.54 | 20 eval phantoms, CBF SNR10 -14.8% regression, more phantoms revealed lower true win rates |
+| 40   | K5   | FAIL | 72.3/60.9/71.3 | —/—/— | 1.03 | 0.53 | 40 epochs/regen every 10, CBF SNR10 -14.5% regression, longer training didn't help |
