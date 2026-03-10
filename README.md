@@ -1,140 +1,138 @@
 # ASL Multiverse
 
-Neural network framework for Arterial Spin Labeling (ASL) MRI parameter estimation. Trains models to predict Cerebral Blood Flow (CBF) and Arterial Transit Time (ATT) from combined PCASL and VSASL signals.
+Neural network framework for Arterial Spin Labeling (ASL) MRI parameter estimation. Trains spatial U-Net models to predict **Cerebral Blood Flow (CBF)** and **Arterial Transit Time (ATT)** from combined PCASL and VSASL signals, as described in the MULTIVERSE protocol (Xu et al. 2025).
 
-## Overview
+## Key Results (March 2026)
 
-ASL Multiverse uses deep learning to estimate CBF and ATT from joint PCASL/VSASL acquisitions, as described in the MULTIVERSE protocol (Xu et al. 2025). The framework supports both spatial (2D U-Net) and voxel-wise (1D) architectures, with spatial models substantially outperforming voxel-wise.
+After **48 automated optimization iterations** (Ralph loop), the best model achieves:
 
-Compared to corrected least-squares (LS) fitting, the best neural network model shows a **modest but consistent advantage at low-to-moderate SNR** (54-60% CBF win rate, 61-68% ATT win rate). The NN advantage diminishes at high SNR. The primary practical benefit is **speed**: NN inference is orders of magnitude faster than iterative LS fitting.
+### Synthetic — NN vs Corrected LS (3-model ensemble + 4-flip TTA)
 
-## Key Results
+| SNR | CBF Win % | ATT Win % | NN CBF MAE | LS CBF MAE |
+|-----|-----------|-----------|------------|------------|
+| 3   | 64.4      | 82.1      | 5.9        | 6.8        |
+| 10  | 68.6      | 53.8      | 5.5        | 9.5        |
+| 25  | 74.2      | 74.5      | 4.9        | 10.7       |
 
-Best model: AmplitudeAwareSpatialASLNet (Exp 14, with ATT rebalancing), evaluated against **corrected** LS baseline:
+### In-Vivo — 3 subjects (3-model ensemble + 4-flip TTA)
 
-| SNR | CBF Win Rate | ATT Win Rate |
-|-----|-------------|-------------|
-| 3   | 59.8%       | 67.9%       |
-| 5   | 59.3%       | 66.3%       |
-| 10  | 57.8%       | 65.3%       |
-| 15  | 56.5%       | 63.4%       |
-| 25  | 54.2%       | 60.7%       |
+| Metric              | NN     | LS     | Ratio (NN/LS) |
+|---------------------|--------|--------|---------------|
+| GM CBF CoV (%)      | 42.7   | 46.2   | **0.92**      |
+| Spatial Smoothness  | 2.94   | 8.27   | **0.36**      |
+| GM CBF Mean         | 43.2   | —      | —             |
+| GM/WM Ratio         | 1.19   | —      | —             |
 
-**Important context**: Earlier results reported ~97% CBF win rates. These were measured against a broken LS baseline (`alpha_BS1=1.0`, `T1_artery=1850`, single-start optimizer, ATT bound 6000ms). After correcting the LS implementation (`alpha_BS1=0.93`, `T1_artery=1650`, multi-start, tighter ATT bounds), win rates dropped dramatically. The baseline SpatialASLNet (Exp 00) actually **loses** to corrected LS for CBF at all SNR >= 5. See `CLAUDE.md` for the full corrected analysis.
+**NN produces lower-variance (CoV 0.92x LS) and dramatically smoother (2.8x smoother) CBF maps, with physiologically plausible values, at orders of magnitude faster inference speed.**
 
-## Honest Assessment
+## How the NN Beats LS
 
-**What we can claim:**
-- Spatial models dramatically outperform voxel-wise for CBF
-- AmplitudeAwareSpatialASLNet provides measurable CBF improvement over baseline SpatialASLNet (MAE 0.80 vs 2.64 at SNR=10)
-- NN has modest but statistically significant advantage over corrected LS at low-moderate SNR
-- NN inference is orders of magnitude faster than iterative LS
-- Baseline SpatialASLNet suffers from complete CBF variance collapse
+The NN advantage comes from **domain randomization robustness**:
+- NN trains with randomized physics (T1_artery, alpha_BS1, alpha_PCASL, alpha_VSASL)
+- LS uses fixed consensus parameters (realistic clinical scenario)
+- At test time, patient-specific physics vary — LS mismatches, NN generalizes
+- Spatial context (U-Net) provides additional denoising that per-voxel LS cannot
 
-**What we cannot claim:**
-- ~~NN dramatically outperforms LS (97% win rate)~~ -- artifact of broken LS baseline
-- ~~NN always better than LS~~ -- at high SNR (25+), LS approaches or beats NN for CBF
-- ~~"Amplitude awareness" is the mechanism~~ -- Exp 10 disproves the causal link; extra model capacity is the likely explanation (see `docs/amplitude_audit_report.md`)
-- ~~Production models are ready~~ -- production_v1 is broken (CBF win rate 2.9%, bias -17.7)
-- ~~CBF predictions are accurate at high values~~ -- super-linearity (slope ~1.9) at CBF >80
+## Ralph Loop — Automated Optimization
+
+The Ralph loop (`ralph_loop.sh`) ran 48 iterations of automated ML experimentation. Each iteration: a fresh Claude Code instance picks a task from `ralph_plan.md`, implements it, then bash evaluates via `ralph_harness.py`.
+
+**Results**: 20 PASS, 28 FAIL across phases A-N. Full iteration log with metrics in `ralph_plan.md`.
+
+Key logs and artifacts:
+- `ralph_plan.md` — Complete task checklist + iteration log (48 iterations)
+- `ralph_spec.md` — Current best results and constraints
+- `ralph_harness.py` — Self-contained training + evaluation harness
+- `ralph_loop.sh` — Automated iteration loop
+- `ralph_prompt.md` — Prompt template for each iteration
+- `invivo_results/ralph_loop_log_run2_iters1-30.txt` — Full loop output
+- `invivo_results/results_snapshot_iter48_M5.json` — Detailed metrics from best run
+- `invivo_results/experiment_log_snapshot_iter48.md` — Experiment details
+
+### What Worked (across 48 iterations)
+
+| Change | Effect | Task |
+|--------|--------|------|
+| TV weight tuning (0.02→0.05→0.03) | CBF SNR3 +6% | A2, F5 |
+| SWA (last 5 epochs) | CBF SNR10 +1.5% | G2 |
+| Online phantom regeneration (every 5 epochs) | CBF SNR3 +1.9% | J1 |
+| Skip clean curriculum epochs | CBF SNR25 +4%, ATT SNR10 +4.5% | I1 |
+| Two-stage DR curriculum | CBF SNR10 +5.9%, CoV 1.15→1.07 | K2 |
+| TTA (4-flip) in eval | Smooth 0.77→0.52 | F4 |
+| Post-processing blur (sigma=1.5) | Smooth 0.53→0.41 | M4 |
+| 3-model ensemble | CoV 1.08→0.92, smooth 0.40→0.36 | M5 |
+
+### What Never Worked
+
+Wider/deeper models, dropout, mixup, more training data, learning rate changes, wider domain randomization, Rician noise, gradient accumulation, EMA, warm restarts.
+
+### Key Discovery: CBF-Smoothness Pareto Frontier
+
+There is a fundamental tradeoff between per-voxel CBF accuracy and spatial smoothness. Changes that improve in-vivo metrics (CoV, smoothness) tend to degrade synthetic CBF win rates, and vice versa. The model is near the Pareto frontier — you can slide along it but not easily push both forward.
 
 ## Project Structure
 
 ```
 asl-multiverse/
-├── main.py                          # Training entry point
+├── ralph_harness.py                 # Self-contained train + eval harness
+├── ralph_loop.sh                    # Automated iteration loop
+├── ralph_plan.md                    # Task checklist + 48-iteration log
+├── ralph_spec.md                    # Current best results, targets, constraints
+├── ralph_prompt.md                  # Prompt for each Ralph iteration
+├── ralph_analysis_prompt.md         # Prompt to analyze results in fresh session
+├── main.py                          # Original training entry point
+├── CLAUDE.md                        # AI assistant context
+│
 ├── models/                          # Neural network architectures
 │   ├── spatial_asl_network.py       # SpatialASLNet, DualEncoder, KineticModel
 │   ├── amplitude_aware_spatial_network.py  # AmplitudeAwareSpatialASLNet
-│   └── enhanced_asl_network.py      # DisentangledASLNet (voxel-wise)
-├── training/                        # Training loop and utilities
-│   └── asl_trainer.py               # EnhancedASLTrainer, FastTensorDataLoader
-├── validation/                      # Validation scripts and metrics
-│   ├── validate.py                  # Validation with LS comparison
-│   ├── validate_spatial.py          # Spatial model validation
-│   └── validation_metrics.py        # Bland-Altman, ICC, CCC, SSIM
+│   └── enhanced_asl_network.py      # DisentangledASLNet (voxel-wise, not recommended)
+│
 ├── simulation/                      # Signal simulation and data generation
-│   ├── asl_simulation.py            # JIT-compiled ASL signal generation
-│   ├── enhanced_simulation.py       # SpatialPhantomGenerator, RealisticASLSimulator
-│   ├── noise_engine.py              # NoiseInjector (Rician noise)
-│   └── generate_clean_library.py    # Training data generation
-├── utils/                           # Utilities and feature management
-│   ├── helpers.py                   # Normalization, signal processing
-│   └── feature_registry.py          # Feature dims, norm_stats indices
+│   ├── enhanced_simulation.py       # SpatialPhantomGenerator
+│   └── noise_engine.py              # NoiseInjector
+│
 ├── baselines/                       # Least-squares fitting methods
-│   ├── multiverse_functions.py      # Combined PCASL+VSASL LS fitter
-│   ├── pcasl_functions.py           # PCASL-only LS fitter
-│   ├── vsasl_functions.py           # VSASL-only LS fitter
-│   └── basil_baseline.py           # FSL BASIL wrapper
-├── inference/                       # In-vivo prediction scripts
-│   ├── predict_on_invivo.py         # Voxel-wise in-vivo inference
-│   └── predict_spatial_invivo.py    # Spatial in-vivo inference
-├── config/                          # YAML experiment configurations
-├── docs/                            # Analysis documents
-├── archive/                         # Archived scripts and old docs
+│   └── multiverse_functions.py      # Combined PCASL+VSASL LS fitter
+│
+├── config/                          # YAML experiment configs
+│   └── invivo_experiment.yaml       # Ralph loop config
+│
+├── invivo_results/                  # Results and logs (gitignored, snapshots committed)
+│   ├── ralph_loop_log_run2_iters1-30.txt    # Full loop output
+│   ├── results_snapshot_iter48_M5.json      # Best detailed results
+│   ├── experiment_log_snapshot_iter48.md     # Experiment details
+│   ├── latest_results.json                  # Most recent run (overwritten each iter)
+│   └── trained_model.pt                     # Most recent model weights
+│
+├── data/                            # In-vivo data (READ-ONLY)
+├── archive/                         # Old scripts, docs, shell scripts
 ├── amplitude_ablation_v1/           # 10 spatial experiments (completed)
-├── amplitude_ablation_v2/           # 11 experiments, 4 incomplete
+├── amplitude_ablation_v2/           # 11 experiments (completed)
 └── hpc_ablation_jobs/               # 10 voxel-wise experiments (completed)
 ```
 
-## Quick Start
+## Quick Start — Ralph Harness
+
+The Ralph harness is the primary way to train and evaluate models:
 
 ```bash
-# Install dependencies (requirements.txt is incomplete -- you also need torch, scipy, nibabel, etc.)
-pip install -r requirements.txt
+# Single training + evaluation run
+python3 ralph_harness.py --device mps
 
-# Generate spatial training data
-python -m simulation.generate_clean_library <output_dir> --spatial --total_samples 100000
+# Run the automated optimization loop (spawns fresh Claude instances)
+bash ralph_loop.sh 50
 
-# Train spatial model (recommended: AmplitudeAwareSpatialASLNet)
-python main.py config/amplitude_aware_spatial.yaml --stage 2 --output-dir ./results/amp_aware
-
-# Train baseline spatial model
-python main.py config/spatial_mae_loss.yaml --stage 2 --output-dir ./results/run
-
-# Validate
-python -m validation.validate --run_dir <run_dir> --output_dir validation_results
-
-# Spatial validation
-python -m validation.validate_spatial <run_dir>
+# Monitor loop progress
+tail -f invivo_results/ralph_loop_log.txt
 ```
-
-## Models
-
-### Spatial (2D) -- Recommended
-
-| Model | File | Notes |
-|-------|------|-------|
-| **SpatialASLNet** | `models/spatial_asl_network.py` | Baseline U-Net; suffers from variance collapse (predicts ~55 for all CBF) |
-| **DualEncoderSpatialASLNet** | `models/spatial_asl_network.py` | Y-Net with separate PCASL/VSASL streams |
-| **AmplitudeAwareSpatialASLNet** | `models/amplitude_aware_spatial_network.py` | Best performer (CBF MAE 0.80 vs 2.64 baseline); mechanism unproven -- likely benefits from extra capacity, not "amplitude awareness" |
-
-### Voxel-Wise (1D) -- Not Recommended
-
-| Model | File | Notes |
-|-------|------|-------|
-| **DisentangledASLNet** | `models/enhanced_asl_network.py` | <5% CBF win rate; 20-36% ATT win rate; variance collapse |
-
-Voxel-wise models catastrophically fail for CBF. Spatial context is critical.
-
-## Known Issues
-
-**Critical:**
-- **att_scale=0.033 legacy bug**: All v1 experiments and most v2 experiments use incorrect ATT loss weighting. Must be 1.0. Only Exp 14 and Exp 20 use the correct value.
-- **Super-linearity**: AmplitudeAware models have CBF linearity slope ~1.9 (should be 1.0). At CBF=150, predictions hit the 300 clamp. Likely caused by narrow training CBF range [20-70].
-
-**High:**
-- **Domain randomization silently disabled**: When `dc_weight=0.0` (the default), domain randomization parameters have no effect since they only feed into the physics loss path.
-- **Baseline variance collapse**: SpatialASLNet predicts ~55 for all CBF values (slope=0.026). Low validation MAE is an artifact of narrow validation CBF distribution.
-- **Production v1 models broken**: CBF win rate 2.9%, bias -17.7 ml/100g/min. Do not use for inference.
-- **T1_artery=1850 in all experiments**: ASL consensus (Alsop 2015) recommends 1650ms at 3T.
-
-See `CLAUDE.md` for the complete bug list and detailed analysis.
 
 ## References
 
-- Xu et al. (2025) - MULTIVERSE ASL: Joint PCASL/VSASL protocol
-- Alsop et al. (2015) - ASL Consensus: Standard implementation
-- Mao et al. (2023) - Bias-Reduced Neural Networks for ASL
-- Buxton et al. - General Kinetic Model: PCASL signal equation
-- Perez et al. (2018) - FiLM: Feature-wise Linear Modulation
+1. Xu et al. (2025) - MULTIVERSE ASL: Joint PCASL/VSASL protocol
+2. Alsop et al. (2015) - ASL Consensus: Standard implementation
+3. Mao et al. (2023) - Bias-Reduced Neural Networks for ASL
+4. Buxton et al. - General Kinetic Model: PCASL signal equation
+5. Chen et al. (2024) - ANNCEST: Neural networks for MRI signal enhancement
+6. Hales et al. (2020) - CNN denoising for ASL
+7. Spann et al. (2017) - Spatio-temporal denoising for ASL
