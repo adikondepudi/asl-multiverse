@@ -317,7 +317,7 @@ def train_model(cfg, signals, targets, norm_stats, device, n_epochs, seed):
 
             # Label smoothing: add small noise to targets to prevent overfitting
             cbf_t = cbf_t + 0.5 * torch.randn_like(cbf_t)
-            att_t = att_t + 15.0 * torch.randn_like(att_t)
+            att_t = att_t + 5.0 * torch.randn_like(att_t)
 
             # Random flip augmentation (applied consistently to input, targets, mask)
             if torch.rand(1).item() > 0.5:
