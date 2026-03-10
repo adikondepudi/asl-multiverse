@@ -572,7 +572,7 @@ def synthetic_eval(model, cfg, norm_stats, device, n_phantoms=10, snr_levels=[3,
                 nn_cbf, nn_att = tta_predict_single(model, norm_stats, inp)
 
             # Post-processing Gaussian blur for denoising
-            nn_cbf = gaussian_filter(nn_cbf, sigma=1.0)
+            nn_cbf = gaussian_filter(nn_cbf, sigma=1.5)
             nn_att = gaussian_filter(nn_att, sigma=2.0)
             nn_cbf = np.clip(nn_cbf, 0, 200)
             nn_att = np.clip(nn_att, 0, 5000)
@@ -695,7 +695,7 @@ def invivo_eval(model, norm_stats, cfg, device, data_dir, ls_cache_dir, subjects
         nn_att = np.transpose(att_vol, (1, 2, 0))
         # Post-processing Gaussian blur (per-slice, 2D)
         for z in range(nn_cbf.shape[2]):
-            nn_cbf[:, :, z] = gaussian_filter(nn_cbf[:, :, z], sigma=1.0)
+            nn_cbf[:, :, z] = gaussian_filter(nn_cbf[:, :, z], sigma=1.5)
             nn_att[:, :, z] = gaussian_filter(nn_att[:, :, z], sigma=2.0)
         nn_cbf = np.clip(nn_cbf, 0, 200)
         nn_att = np.clip(nn_att, 0, 5000)
