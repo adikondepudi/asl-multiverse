@@ -236,11 +236,9 @@ def train_model(cfg, signals, targets, norm_stats, device, n_epochs, seed):
     snr_max_base = noise_cfg['noise_config'].get('snr_range', [2.0, 25.0])[1]
     loss_history = []
 
-    # SWA: accumulate averaged weights over last swa_epochs epochs
-    swa_epochs = 5
-    swa_start = n_epochs - swa_epochs
-    swa_state = None
-    swa_count = 0
+    # EMA: exponential moving average of model weights (J2, replaces SWA)
+    ema_decay = 0.999
+    ema_state = {k: v.clone().float() for k, v in model.state_dict().items()}
 
     for epoch in range(n_epochs):
         # Regenerate training data at interval boundaries (except epoch 0, which uses initial data)
@@ -324,6 +322,10 @@ def train_model(cfg, signals, targets, norm_stats, device, n_epochs, seed):
             loss.backward()
             torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
             optimizer.step()
+            # EMA update after each optimizer step
+            with torch.no_grad():
+                for k, v in model.state_dict().items():
+                    ema_state[k].mul_(ema_decay).add_(v.float(), alpha=1 - ema_decay)
             epoch_loss += loss.item(); n_batches += 1
 
         scheduler.step()
@@ -332,22 +334,9 @@ def train_model(cfg, signals, targets, norm_stats, device, n_epochs, seed):
         if (epoch + 1) % 5 == 0 or epoch == 0:
             print(f"  Epoch {epoch+1}/{n_epochs}: loss = {avg_loss:.4f}")
 
-        # SWA: accumulate model weights over last swa_epochs epochs
-        if epoch >= swa_start:
-            swa_count += 1
-            current_sd = model.state_dict()
-            if swa_state is None:
-                swa_state = {k: v.clone().float() for k, v in current_sd.items()}
-            else:
-                for k in swa_state:
-                    swa_state[k] += current_sd[k].float()
-
-    # Apply SWA averaged weights
-    if swa_state is not None and swa_count > 0:
-        print(f"  Applying SWA over last {swa_count} epochs")
-        for k in swa_state:
-            swa_state[k] /= swa_count
-        model.load_state_dict({k: v.to(next(model.parameters()).dtype) for k, v in swa_state.items()})
+    # Apply EMA weights at end of training
+    print(f"  Applying EMA weights (decay={ema_decay})")
+    model.load_state_dict({k: v.to(next(model.parameters()).dtype) for k, v in ema_state.items()})
 
     return model, loss_history
 
