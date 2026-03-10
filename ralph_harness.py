@@ -228,6 +228,20 @@ def train_model(cfg, signals, targets, norm_stats, device, n_epochs, seed):
     # This gives 6x phantom diversity (18000 unique anatomies across 30 epochs)
     regen_interval = 5
 
+    # K2: Two-stage domain randomization curriculum
+    # First 50% of epochs: narrow DR (near-consensus physics, easier to learn)
+    # Last 50%: full DR range (robustness to physics mismatch)
+    full_dr = cfg.get('domain_randomization', {}).copy()
+    narrow_dr = {
+        'enabled': True,
+        'T1_artery_range': [1550.0, 1850.0],   # narrow (full: 1550-2150)
+        'alpha_PCASL_range': [0.80, 0.90],      # narrow (full: 0.75-0.95)
+        'alpha_VSASL_range': [0.48, 0.62],      # narrow (full: 0.40-0.70)
+        'alpha_BS1_range': [0.92, 1.0],         # narrow (full: 0.85-1.0)
+        'T_tau_perturb': 0.05,                  # narrow (full: 0.10)
+    }
+    dr_switch_epoch = n_epochs // 2  # switch at 50%
+
     optimizer = torch.optim.AdamW(model.parameters(), lr=lr, weight_decay=cfg.get('weight_decay', 0.0001))
     scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=n_epochs, eta_min=lr * 0.01)
 
@@ -243,10 +257,17 @@ def train_model(cfg, signals, targets, norm_stats, device, n_epochs, seed):
     swa_count = 0
 
     for epoch in range(n_epochs):
+        # K2: Switch DR range based on epoch
+        if epoch < dr_switch_epoch:
+            cfg['domain_randomization'] = narrow_dr
+        else:
+            cfg['domain_randomization'] = full_dr
+
         # Regenerate training data at interval boundaries (except epoch 0, which uses initial data)
         if epoch > 0 and epoch % regen_interval == 0:
             regen_seed = seed + epoch * 1000
-            print(f"  Regenerating training data (seed={regen_seed})...")
+            dr_label = "narrow" if epoch < dr_switch_epoch else "full"
+            print(f"  Regenerating training data (seed={regen_seed}, DR={dr_label})...")
             new_signals, new_targets, _ = generate_training_data(cfg, n_samples, regen_seed)
             # Keep original norm_stats for loss consistency
             n_new = len(new_signals)
@@ -912,7 +933,18 @@ def main():
     # Phase 1: Train single model (ensemble disabled for fast iteration)
     print(f"\n[Phase 1] Generating {args.n_samples} samples + training {args.n_epochs} epochs...")
     t1 = time.time()
+    # K2: Initial data uses narrow DR (first 50% of epochs are narrow)
+    full_dr_saved = cfg.get('domain_randomization', {}).copy()
+    cfg['domain_randomization'] = {
+        'enabled': True,
+        'T1_artery_range': [1550.0, 1850.0],
+        'alpha_PCASL_range': [0.80, 0.90],
+        'alpha_VSASL_range': [0.48, 0.62],
+        'alpha_BS1_range': [0.92, 1.0],
+        'T_tau_perturb': 0.05,
+    }
     signals, targets, norm_stats = generate_training_data(cfg, args.n_samples, args.seed)
+    cfg['domain_randomization'] = full_dr_saved  # restore for train_model
     print(f"  Data: {time.time()-t1:.0f}s, norm_stats: CBF={norm_stats['y_mean_cbf']:.1f}+/-{norm_stats['y_std_cbf']:.1f}")
 
     model, loss_history = train_model(cfg, signals, targets, norm_stats, device, args.n_epochs, args.seed)
