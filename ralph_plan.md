@@ -1,7 +1,7 @@
 # Ralph Plan — Ordered Task Checklist
 
 **Status**: IN PROGRESS
-**Iteration**: 36
+**Iteration**: 37
 **Last Updated**: 2026-03-09
 
 ---
@@ -229,10 +229,10 @@
 
 ## Phase K — Data Diversity & Cleanup (based on 35 iterations)
 
-- [ ] **K1**: Revert J4 gradient accumulation + more frequent phantom regen (every 5 epochs)
+- [x] **K1**: Revert J4 gradient accumulation + more frequent phantom regen (every 5 epochs)
   - Change: Remove accum_steps=2, set regen_interval=5 (was 10)
   - Why: J4's grad accumulation is still in the code (CBF SNR3 -10.2% regression). More frequent regen gives 6x phantom diversity (18k unique anatomies vs 9k), leveraging the one pattern that consistently helped (J1: +1.9% from regen).
-  - Risk: Regen overhead (5 regens vs 2), may slow training slightly
+  - Result: CoV ratio improved 1.13→1.10. CBF wins stable (75.6/71.2/74.9 vs 76.3/71.1/76.9). ATT SNR10 +0.4%. Reverted J4 damage, more regen diversity.
 
 - [ ] **K2**: Two-stage domain randomization curriculum
   - Change: First 50% of epochs: narrow DR (alpha_BS1 [0.92, 1.0], T1_artery [1550, 1850]). Last 50%: full DR range.
@@ -292,3 +292,4 @@
 | 33   | J3   | FAIL | 59.3/68.6/56.7 | —/—/— | 0.91 | 0.44 | 4500 samples/30 epochs, CBF wins all dropped (-17.0/-2.5/-20.2%), more data hurt accuracy |
 | 34   | J4   | FAIL | 66.1/77.2/76.9 | —/—/— | 1.08 | 0.48 | Gradient accumulation (eff batch 128), CBF SNR3 -10.2% regression, CoV/smooth improved but vetoed |
 | 35   | J5   | FAIL | 66.1/77.2/76.9 | —/—/— | 1.08 | 0.48 | lr 0.003→0.002, CBF SNR3 -10.2% regression, CoV/smooth improved but vetoed |
+| 36   | K1   | PASS | 75.6/71.2/74.9 | 86.6/77.3/84.4 | 1.10 | 0.56 | Revert J4 grad accum + regen every 5 epochs, CoV improved 1.13→1.10 |
