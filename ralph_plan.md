@@ -1,7 +1,7 @@
 # Ralph Plan — Ordered Task Checklist
 
 **Status**: IN PROGRESS
-**Iteration**: 32
+**Iteration**: 33
 **Last Updated**: 2026-03-09
 
 ---
@@ -212,9 +212,10 @@
   - Why: SWA only averages last 5 epochs (5 snapshots). EMA smoothly averages entire training.
   - **FAIL**: CBF wins collapsed (76.3→49.2 SNR3, 71.1→63.3 SNR10, 76.9→55.4 SNR25). All CBF regressions exceed 5% threshold. EMA decay=0.999 too aggressive, averaged in early poorly-trained weights.
 
-- [ ] **J3**: Increase training samples (3000 → 4500, keep 30 epochs)
+- [FAIL] **J3**: Increase training samples (3000 → 4500, keep 30 epochs)
   - Change: `--n-samples 4500` with 30 epochs (not 50 like A1)
   - Why: A1 failed with 5000/50 (overfitting from more epochs). 4500/30 = more diversity, fewer passes per sample.
+  - **FAIL**: CBF wins dropped (76.3→59.3 SNR3, 71.1→68.6 SNR10, 76.9→56.7 SNR25). All CBF regressions exceed 5% threshold. More samples with same epochs degraded CBF accuracy.
 
 - [ ] **J4**: Gradient accumulation (effective batch 128)
   - Change: Accumulate gradients over 2 steps before optimizer.step()
@@ -263,3 +264,4 @@
 | 30   | I4   | FAIL | 65.5/74.1/77.4 | —/—/— | 1.06 | 0.52 | CosineAnnealingWarmRestarts, CBF SNR3 -8.9% regression |
 | 31   | J1   | PASS | 76.3/71.1/76.9 | 86.3/76.9/85.6 | 1.13 | 0.54 | Online phantom regen every 10 epochs, CBF SNR3 +1.9%, reverts I2/I3/I4 |
 | 32   | J2   | FAIL | 49.2/63.3/55.4 | —/—/— | 0.79 | 0.35 | EMA decay=0.999, CBF wins collapsed (-27.1/-7.8/-21.5%), averaged in early bad weights |
+| 33   | J3   | FAIL | 59.3/68.6/56.7 | —/—/— | 0.91 | 0.44 | 4500 samples/30 epochs, CBF wins all dropped (-17.0/-2.5/-20.2%), more data hurt accuracy |
