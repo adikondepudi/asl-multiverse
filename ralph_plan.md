@@ -1,7 +1,7 @@
 # Ralph Plan — Ordered Task Checklist
 
 **Status**: IN PROGRESS
-**Iteration**: 45
+**Iteration**: 46
 **Last Updated**: 2026-03-10
 
 ---
@@ -299,9 +299,10 @@
   - Why: G4 added target noise (CBF std=0.5, ATT std=15ms). For ATT values of 800-2500ms, 15ms noise may blur the signal LS uses to beat NN per-voxel.
   - Result: ATT SNR10 +3.5% (54.8→58.3), ATT SNR3 +0.8% (79.3→80.1). CBF SNR25 +1.2% (77.3→78.5). CBF SNR3/10 slightly down (-2.0/-0.3%, within threshold). CoV ratio 1.05→1.08 (slightly worse).
 
-- [ ] **M4**: Increase post-processing blur for CBF (1.0 → 1.5)
+- [x] **M4**: Increase post-processing blur for CBF (1.0 → 1.5)
   - Change: CBF blur sigma from 1.0 to 1.5 in both synth and invivo eval
   - Why: F3 tried 1.5 but crashed (parsing issue). CoV ratio is 1.05 — more CBF smoothing could push NN below LS. CBF varies more slowly than single-voxel, so more smoothing is physically justified.
+  - Result: Smoothness ratio 0.53→0.41 (below 0.50 target!). CBF wins slightly down (-1.3/-2.7/-3.0%, within threshold). CoV ratio 1.08→1.10.
 
 - [ ] **M5**: Ensemble (3 models) — final polish
   - Change: Re-enable ensemble (train 3 models, average predictions)
@@ -359,3 +360,4 @@
 | 43   | M1   | PASS | 67.3/72.1/78.9 | 80.9/53.3/75.2 | 1.06 | 0.54 | Asymmetric DR (T1_artery narrow, alpha widens), CBF SNR25 +2.4% |
 | 44   | M2   | PASS | 65.9/74.2/77.3 | 79.3/54.8/74.7 | 1.05 | 0.52 | ATT loss weight 1.0→1.5, CBF SNR10 +2.1%, smooth 0.54→0.52 |
 | 45   | M3   | PASS | 63.9/73.9/78.5 | 80.1/58.3/74.8 | 1.08 | 0.53 | ATT label smoothing 15ms→5ms, ATT SNR10 +3.5%, CBF SNR25 +1.2% |
+| 46   | M4   | PASS | 62.6/71.2/75.5 | 80.1/58.3/74.8 | 1.10 | 0.41 | CBF blur sigma 1.0→1.5, smooth ratio 0.53→0.41 (below target!), CBF wins slightly down |
