@@ -364,3 +364,32 @@
 | 46   | M4   | PASS | 62.6/71.2/75.5 | 80.1/58.3/74.8 | 1.10 | 0.41 | CBF blur sigma 1.0→1.5, smooth ratio 0.53→0.41 (below target!), CBF wins slightly down |
 | 47   | L3   | PASS | 64.2/71.6/74.9 | 79.1/54.3/75.0 | 1.08 | 0.40 | Weighted loss by voxel distance from edge, CBF SNR3 +1.6%, CoV 1.10→1.08 |
 | 48   | M5   | PASS | 64.4/68.6/74.2 | 82.1/53.8/74.5 | 0.92 | 0.36 | 3-model ensemble, in-vivo CoV 1.08→0.92, smooth 0.40→0.36 |
+
+---
+
+## Phase N — ATT Recovery & Metric Optimization (iter 49+)
+
+Analysis: ATT SNR10 at 53.8% is by far the weakest synthetic metric. L2 set ATT blur to 2.0 (from 1.0) and was marked FAIL but never reverted. Heavy blur hurts per-voxel win rate. CBF wins are also far from 90% target. Focus on recovering ATT without losing other gains.
+
+- [ ] **N1**: Reduce ATT post-processing blur (2.0 → 1.0)
+  - Change: ATT gaussian_filter sigma from 2.0 to 1.0 in both synth and invivo eval
+  - Why: ATT blur at 2.0 is very aggressive. L2 set this and was marked FAIL (no improvement). At SNR=10, LS fits ATT well per-voxel. Heavy NN blur over-smooths and loses per-voxel accuracy vs LS. ATT SNR10 at 53.8% is essentially coin flip.
+  - Risk: In-vivo ATT may be noisier, but ATT varies slowly so sigma=1.0 is still reasonable
+
+- [ ] **N2**: Increase ensemble to 5 models
+  - Change: n_ensembles=5 (was 3)
+  - Why: M5 showed ensemble dramatically helped in-vivo (CoV 1.08→0.92). More models = lower variance = better per-voxel accuracy.
+  - Risk: 5x training time vs 3x
+
+- [ ] **N3**: Reduce CBF label smoothing (0.5 → 0.2)
+  - Change: CBF target noise std from 0.5 to 0.2
+  - Why: M3 showed reducing ATT label smoothing helped ATT. Same logic for CBF — less target noise = sharper learning signal.
+
+- [ ] **N4**: Increase SWA window (5 → 10 epochs)
+  - Change: swa_epochs = 10 (was 5)
+  - Why: G2 showed SWA helps. Averaging over more epochs = smoother model weights.
+
+- [ ] **N5**: Wider evaluation DR (test phantoms with wider alpha_BS1)
+  - Change: Regenerate LS cache with wider alpha_BS1 [0.80, 1.0] for test phantoms
+  - Why: LS with fixed params performs worse when true physics deviates more from consensus. Currently eval phantoms use same DR as training. Wider eval DR = more realistic clinical scenario.
+  - Risk: Artificially widens gap; need to delete LS cache for this to take effect
