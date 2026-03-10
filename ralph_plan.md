@@ -222,9 +222,10 @@
   - Why: Larger effective batch = more stable gradients = better convergence
   - **FAIL**: CBF wins dropped (76.3→66.1 SNR3, 71.1→77.2 SNR10, 76.9→76.9 SNR25). CBF SNR3 regression -10.2% exceeds 5% threshold. CoV ratio improved (1.13→1.08) and smooth ratio improved (0.54→0.48) but vetoed by CBF SNR3 regression.
 
-- [ ] **J5**: Lower learning rate (0.003 → 0.002)
+- [FAIL] **J5**: Lower learning rate (0.003 → 0.002)
   - Change: lr=0.002 with same cosine annealing
   - Why: E5 tried 0.005 (too high). 0.002 is more conservative, may improve fine-grained convergence.
+  - **FAIL**: CBF wins dropped (76.3→66.1 SNR3, 71.1→77.2 SNR10, 76.9→76.9 SNR25). CBF SNR3 regression -10.2% exceeds 5% threshold. CoV ratio improved (1.13→1.08) and smooth ratio improved (0.54→0.48) but vetoed by CBF SNR3 regression.
 
 ---
 
@@ -267,3 +268,4 @@
 | 32   | J2   | FAIL | 49.2/63.3/55.4 | —/—/— | 0.79 | 0.35 | EMA decay=0.999, CBF wins collapsed (-27.1/-7.8/-21.5%), averaged in early bad weights |
 | 33   | J3   | FAIL | 59.3/68.6/56.7 | —/—/— | 0.91 | 0.44 | 4500 samples/30 epochs, CBF wins all dropped (-17.0/-2.5/-20.2%), more data hurt accuracy |
 | 34   | J4   | FAIL | 66.1/77.2/76.9 | —/—/— | 1.08 | 0.48 | Gradient accumulation (eff batch 128), CBF SNR3 -10.2% regression, CoV/smooth improved but vetoed |
+| 35   | J5   | FAIL | 66.1/77.2/76.9 | —/—/— | 1.08 | 0.48 | lr 0.003→0.002, CBF SNR3 -10.2% regression, CoV/smooth improved but vetoed |
