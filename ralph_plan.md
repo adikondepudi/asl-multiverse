@@ -199,6 +199,30 @@
   - Risk: May need more epochs to converge fully
   - **FAIL**: CBF wins dropped (74.4→65.5, 72.0→74.1, 77.4→77.4). CBF SNR3 regression -8.9% exceeds 5% threshold. Warm restarts hurt low-SNR CBF accuracy.
 
+## Phase J — Data Diversity (online regeneration)
+
+- [ ] **J1**: Online phantom regeneration every 10 epochs
+  - Change: Regenerate fresh training phantoms at epochs 10 and 20 (3 different datasets across 30 epochs)
+  - Why: Current training repeats same 3000 phantoms 30 times. Regeneration gives 9000 unique anatomies across training. A1 (5000/50 epochs) failed due to overfitting from more epochs, not more data. This gives more diversity without more passes per sample.
+  - Also reverts accumulated failed changes from I2 (noise_repeats), I3 (variance_weight), I4 (scheduler)
+  - Risk: Data generation adds ~10-15s per regeneration. Slightly longer training.
+
+- [ ] **J2**: Exponential Moving Average (EMA) of model weights (decay=0.999)
+  - Change: Replace SWA with EMA applied every optimizer step. Smoother averaging across all training.
+  - Why: SWA only averages last 5 epochs (5 snapshots). EMA smoothly averages entire training.
+
+- [ ] **J3**: Increase training samples (3000 → 4500, keep 30 epochs)
+  - Change: `--n-samples 4500` with 30 epochs (not 50 like A1)
+  - Why: A1 failed with 5000/50 (overfitting from more epochs). 4500/30 = more diversity, fewer passes per sample.
+
+- [ ] **J4**: Gradient accumulation (effective batch 128)
+  - Change: Accumulate gradients over 2 steps before optimizer.step()
+  - Why: Larger effective batch = more stable gradients = better convergence
+
+- [ ] **J5**: Lower learning rate (0.003 → 0.002)
+  - Change: lr=0.002 with same cosine annealing
+  - Why: E5 tried 0.005 (too high). 0.002 is more conservative, may improve fine-grained convergence.
+
 ---
 
 ## Iteration Log

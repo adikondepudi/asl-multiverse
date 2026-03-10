@@ -127,12 +127,7 @@ def make_brain_mask_2d(size=64):
 
 
 def generate_training_data(cfg, n_samples, seed):
-    """Generate spatial phantom training data with realistic brain masks.
-
-    Uses 2 noise realizations per phantom: n_samples/2 unique phantoms, each
-    duplicated once. Same anatomy with different noise at training time teaches
-    noise robustness more effectively than more unique phantoms.
-    """
+    """Generate spatial phantom training data with realistic brain masks."""
     np.random.seed(seed)
     plds = np.array(cfg.get('pld_values', [500, 1000, 1500, 2000, 2500]), dtype=np.float32)
     asl_dict = {k: v for k, v in cfg.items() if k in ASLParameters.__annotations__}
@@ -143,27 +138,20 @@ def generate_training_data(cfg, n_samples, seed):
     phantom_gen = SpatialPhantomGenerator(size=64, pve_sigma=3.0)
     plds_bc = plds[:, np.newaxis, np.newaxis]
 
-    noise_repeats = 2
-    n_unique = n_samples // noise_repeats
-
     signals_list, targets_list = [], []
-    for _ in range(n_unique):
+    for _ in range(n_samples):
         cbf_map, att_map, _ = phantom_gen.generate_phantom(include_pathology=False)
+        t1_b, alpha_p, alpha_v, tau = sample_physics(cfg, base_params, use_dr)
+        sig = generate_asl_signal(cbf_map, att_map, plds_bc, t1_b, alpha_p, alpha_v, tau, base_params.T2_factor)
 
         # Apply random brain-shaped mask (~55% coverage, matching in-vivo)
         brain_mask = make_brain_mask_2d(64)
+        sig[:, ~brain_mask] = 0.0
         cbf_map[~brain_mask] = 0.0
         att_map[~brain_mask] = 0.0
-        target = np.stack([cbf_map, att_map], axis=0).astype(np.float32)
 
-        # Generate multiple copies with different domain-randomized physics
-        for _ in range(noise_repeats):
-            t1_b, alpha_p, alpha_v, tau = sample_physics(cfg, base_params, use_dr)
-            sig = generate_asl_signal(cbf_map, att_map, plds_bc, t1_b, alpha_p, alpha_v, tau, base_params.T2_factor)
-            sig[:, ~brain_mask] = 0.0
-
-            signals_list.append(sig)
-            targets_list.append(target)
+        signals_list.append(sig)
+        targets_list.append(np.stack([cbf_map, att_map], axis=0).astype(np.float32))
 
     signals = np.array(signals_list, dtype=np.float32) * 100.0  # M0 scaling
     targets = np.array(targets_list, dtype=np.float32)
@@ -189,7 +177,7 @@ def create_brain_mask(signals_np):
 
 
 def train_model(cfg, signals, targets, norm_stats, device, n_epochs, seed):
-    """Train AmplitudeAwareSpatialASLNet."""
+    """Train AmplitudeAwareSpatialASLNet with periodic data regeneration."""
     torch.manual_seed(seed)
     np.random.seed(seed + 100)
     plds = np.array(cfg.get('pld_values', [500, 1000, 1500, 2000, 2500]), dtype=np.float32)
@@ -226,7 +214,9 @@ def train_model(cfg, signals, targets, norm_stats, device, n_epochs, seed):
     global_scale = cfg.get('global_scale_factor', 10.0)
     batch_size = cfg.get('batch_size', 64)
     lr = cfg.get('learning_rate', 0.003)
+    n_samples = len(signals)
 
+    # Initial train/val split
     n = len(signals)
     n_train = n - max(1, int(n * 0.1))
     perm = np.random.permutation(n)
@@ -234,8 +224,12 @@ def train_model(cfg, signals, targets, norm_stats, device, n_epochs, seed):
     train_signals = torch.from_numpy(signals[train_idx]).float()
     train_targets = targets[train_idx]
 
+    # Online data regeneration: regenerate phantoms every regen_interval epochs
+    # This gives 3x phantom diversity (9000 unique anatomies across 30 epochs)
+    regen_interval = 10
+
     optimizer = torch.optim.AdamW(model.parameters(), lr=lr, weight_decay=cfg.get('weight_decay', 0.0001))
-    scheduler = torch.optim.lr_scheduler.CosineAnnealingWarmRestarts(optimizer, T_0=10, T_mult=2, eta_min=lr * 0.01)
+    scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=n_epochs, eta_min=lr * 0.01)
 
     clean_fraction = 0.0  # I1: skip clean epochs, all epochs get noise
     snr_min_base = noise_cfg['noise_config'].get('snr_range', [2.0, 25.0])[0]
@@ -249,6 +243,19 @@ def train_model(cfg, signals, targets, norm_stats, device, n_epochs, seed):
     swa_count = 0
 
     for epoch in range(n_epochs):
+        # Regenerate training data at interval boundaries (except epoch 0, which uses initial data)
+        if epoch > 0 and epoch % regen_interval == 0:
+            regen_seed = seed + epoch * 1000
+            print(f"  Regenerating training data (seed={regen_seed})...")
+            new_signals, new_targets, _ = generate_training_data(cfg, n_samples, regen_seed)
+            # Keep original norm_stats for loss consistency
+            n_new = len(new_signals)
+            n_train = n_new - max(1, int(n_new * 0.1))
+            perm = np.random.permutation(n_new)
+            train_idx = perm[:n_train]
+            train_signals = torch.from_numpy(new_signals[train_idx]).float()
+            train_targets = new_targets[train_idx]
+
         model.train()
         epoch_loss, n_batches = 0.0, 0
         perm_train = np.random.permutation(n_train)
