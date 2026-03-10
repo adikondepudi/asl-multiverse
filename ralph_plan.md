@@ -1,7 +1,7 @@
 # Ralph Plan — Ordered Task Checklist
 
 **Status**: IN PROGRESS
-**Iteration**: 46
+**Iteration**: 47
 **Last Updated**: 2026-03-10
 
 ---
@@ -267,10 +267,10 @@
   - Risk: Over-smoothed ATT might miss real variation
   - **FAIL**: CBF wins 68.8/71.3/76.5 (no improvement over best 68.8/71.3/76.5). CoV ratio 1.05 (no improvement over best 1.05). Smooth ratio 0.54 (no improvement over best 0.54). No metric improved.
 
-- [ ] **L3**: Weighted loss by voxel distance from brain center
+- [x] **L3**: Weighted loss by voxel distance from brain center
   - Change: Weight loss higher for brain-interior voxels, lower for edge voxels
   - Why: Edge voxels are most variable and hardest to predict. Interior voxels matter most for clinical use. Focusing on interior improves average quality.
-  - Risk: Edge artifacts could worsen
+  - Result: CBF SNR3 +1.6% (62.6→64.2), CBF SNR10 +0.4% (71.2→71.6). CoV ratio 1.10→1.08, smooth ratio 0.41→0.40. CBF SNR25 slightly down (-0.6%, within threshold).
 
 - [ ] **L4**: Separate CBF and ATT post-processing blur sigma (0.5 and 1.5)
   - Change: CBF sigma=0.5 (less blur, preserve detail), ATT sigma=1.5 (more blur, reduce noise)
@@ -361,3 +361,4 @@
 | 44   | M2   | PASS | 65.9/74.2/77.3 | 79.3/54.8/74.7 | 1.05 | 0.52 | ATT loss weight 1.0→1.5, CBF SNR10 +2.1%, smooth 0.54→0.52 |
 | 45   | M3   | PASS | 63.9/73.9/78.5 | 80.1/58.3/74.8 | 1.08 | 0.53 | ATT label smoothing 15ms→5ms, ATT SNR10 +3.5%, CBF SNR25 +1.2% |
 | 46   | M4   | PASS | 62.6/71.2/75.5 | 80.1/58.3/74.8 | 1.10 | 0.41 | CBF blur sigma 1.0→1.5, smooth ratio 0.53→0.41 (below target!), CBF wins slightly down |
+| 47   | L3   | PASS | 64.2/71.6/74.9 | 79.1/54.3/75.0 | 1.08 | 0.40 | Weighted loss by voxel distance from edge, CBF SNR3 +1.6%, CoV 1.10→1.08 |
