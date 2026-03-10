@@ -1,7 +1,7 @@
 # Ralph Plan — Ordered Task Checklist
 
 **Status**: IN PROGRESS
-**Iteration**: 47
+**Iteration**: 48
 **Last Updated**: 2026-03-10
 
 ---
@@ -304,9 +304,10 @@
   - Why: F3 tried 1.5 but crashed (parsing issue). CoV ratio is 1.05 — more CBF smoothing could push NN below LS. CBF varies more slowly than single-voxel, so more smoothing is physically justified.
   - Result: Smoothness ratio 0.53→0.41 (below 0.50 target!). CBF wins slightly down (-1.3/-2.7/-3.0%, within threshold). CoV ratio 1.08→1.10.
 
-- [ ] **M5**: Ensemble (3 models) — final polish
+- [x] **M5**: Ensemble (3 models) — final polish
   - Change: Re-enable ensemble (train 3 models, average predictions)
   - Why: B1 showed ensemble helps (CoV 1.00→0.94, smooth 0.90→0.87). Deferred for fast iteration. If M1-M4 improve base model, ensemble multiplies gains.
+  - Result: In-vivo CoV ratio 1.08→0.92 (huge improvement!), smooth ratio 0.40→0.36. CBF SNR10 dipped -3.0% (71.6→68.6, within threshold). ATT SNR3 +3.0% (79.1→82.1). Ensemble dramatically improved in-vivo metrics.
 
 ---
 
@@ -362,3 +363,4 @@
 | 45   | M3   | PASS | 63.9/73.9/78.5 | 80.1/58.3/74.8 | 1.08 | 0.53 | ATT label smoothing 15ms→5ms, ATT SNR10 +3.5%, CBF SNR25 +1.2% |
 | 46   | M4   | PASS | 62.6/71.2/75.5 | 80.1/58.3/74.8 | 1.10 | 0.41 | CBF blur sigma 1.0→1.5, smooth ratio 0.53→0.41 (below target!), CBF wins slightly down |
 | 47   | L3   | PASS | 64.2/71.6/74.9 | 79.1/54.3/75.0 | 1.08 | 0.40 | Weighted loss by voxel distance from edge, CBF SNR3 +1.6%, CoV 1.10→1.08 |
+| 48   | M5   | PASS | 64.4/68.6/74.2 | 82.1/53.8/74.5 | 0.92 | 0.36 | 3-model ensemble, in-vivo CoV 1.08→0.92, smooth 0.40→0.36 |

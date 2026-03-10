@@ -3,22 +3,22 @@
 ## Current Best Results (updated by each successful iteration)
 
 ### Synthetic (per-voxel win rate, NN vs domain-randomized LS)
-NOTE: Single model with 4-flip TTA. Ensemble adds ~5% to metrics.
+NOTE: 3-model ensemble with 4-flip TTA.
 | SNR | CBF Win % | ATT Win % | CBF Slope | CBF Bias |
 |-----|-----------|-----------|-----------|----------|
-| 3   | 64.2      | 79.1      | 0.69      | -2.8     |
-| 10  | 71.6      | 54.3      | 0.80      | -0.6     |
-| 25  | 74.9      | 75.0      | 0.90      | +2.4     |
+| 3   | 64.4      | 82.1      | 0.71      | -3.6     |
+| 10  | 68.6      | 53.8      | 0.82      | -0.7     |
+| 25  | 74.2      | 74.5      | 0.91      | +2.1     |
 
 ### In-Vivo (3 subjects average)
-NOTE: Single model with 4-flip TTA. Ensemble improves CoV ratio by ~0.06, smooth by ~0.03.
+NOTE: 3-model ensemble with 4-flip TTA.
 | Metric              | NN     | LS     | Ratio (NN/LS) |
 |---------------------|--------|--------|---------------|
-| GM CBF CoV (%)      | 49.9   | 46.2   | 1.08          |
-| Spatial Smoothness  | 3.29   | 8.27   | 0.40          |
-| GM CBF Mean         | 44.7   | —      | —             |
-| GM/WM Ratio         | 1.09   | —      | —             |
-| GM ATT Mean (ms)    | 1319   | —      | —             |
+| GM CBF CoV (%)      | 42.7   | 46.2   | 0.92          |
+| Spatial Smoothness  | 2.94   | 8.27   | 0.36          |
+| GM CBF Mean         | 43.2   | —      | —             |
+| GM/WM Ratio         | 1.19   | —      | —             |
+| GM ATT Mean (ms)    | 1304   | —      | —             |
 
 ## Targets (hard — no fallback)
 - **Synthetic CBF win rate > 90%** at ALL SNR levels (3, 10, 25)
