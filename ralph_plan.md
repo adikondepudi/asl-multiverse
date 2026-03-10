@@ -1,7 +1,7 @@
 # Ralph Plan — Ordered Task Checklist
 
 **Status**: IN PROGRESS
-**Iteration**: 31
+**Iteration**: 32
 **Last Updated**: 2026-03-09
 
 ---
@@ -207,9 +207,10 @@
   - Also reverts accumulated failed changes from I2 (noise_repeats), I3 (variance_weight), I4 (scheduler)
   - Result: CBF SNR3 +1.9% (74.4→76.3). SNR10/25 within noise (-0.9/-0.5%). ATT stable. More phantom diversity helped low-SNR CBF.
 
-- [ ] **J2**: Exponential Moving Average (EMA) of model weights (decay=0.999)
+- [FAIL] **J2**: Exponential Moving Average (EMA) of model weights (decay=0.999)
   - Change: Replace SWA with EMA applied every optimizer step. Smoother averaging across all training.
   - Why: SWA only averages last 5 epochs (5 snapshots). EMA smoothly averages entire training.
+  - **FAIL**: CBF wins collapsed (76.3→49.2 SNR3, 71.1→63.3 SNR10, 76.9→55.4 SNR25). All CBF regressions exceed 5% threshold. EMA decay=0.999 too aggressive, averaged in early poorly-trained weights.
 
 - [ ] **J3**: Increase training samples (3000 → 4500, keep 30 epochs)
   - Change: `--n-samples 4500` with 30 epochs (not 50 like A1)
@@ -261,3 +262,4 @@
 | 29   | I3   | FAIL | 68.3/75.3/77.8 | —/—/— | 1.12 | 0.53 | variance_weight 0.01→0.05, CBF SNR3 -6.1% regression |
 | 30   | I4   | FAIL | 65.5/74.1/77.4 | —/—/— | 1.06 | 0.52 | CosineAnnealingWarmRestarts, CBF SNR3 -8.9% regression |
 | 31   | J1   | PASS | 76.3/71.1/76.9 | 86.3/76.9/85.6 | 1.13 | 0.54 | Online phantom regen every 10 epochs, CBF SNR3 +1.9%, reverts I2/I3/I4 |
+| 32   | J2   | FAIL | 49.2/63.3/55.4 | —/—/— | 0.79 | 0.35 | EMA decay=0.999, CBF wins collapsed (-27.1/-7.8/-21.5%), averaged in early bad weights |
