@@ -414,7 +414,7 @@ def _ls_cache_path():
     return Path('invivo_results') / 'ls_synth_cache.npz'
 
 
-def _compute_ls_cache(cfg, n_phantoms=10, snr_levels=[3, 10, 25], seed=9999):
+def _compute_ls_cache(cfg, n_phantoms=20, snr_levels=[3, 10, 25], seed=9999):
     """Compute LS results for synthetic phantoms once and cache to disk."""
     print("  Computing LS cache (one-time cost)...")
     np.random.seed(seed)
@@ -495,7 +495,7 @@ def _compute_ls_cache(cfg, n_phantoms=10, snr_levels=[3, 10, 25], seed=9999):
     return cache
 
 
-def synthetic_eval(model, cfg, norm_stats, device, n_phantoms=10, snr_levels=[3, 10, 25], seed=9999, models_and_stats=None):
+def synthetic_eval(model, cfg, norm_stats, device, n_phantoms=20, snr_levels=[3, 10, 25], seed=9999, models_and_stats=None):
     """Evaluate on synthetic phantoms with known ground truth. LS results are cached."""
     # Load or compute LS cache
     cache_path = _ls_cache_path()
